@@ -1,6 +1,6 @@
 # Portable model optimization with runtime-local evidence
 
-**Status:** Pending written review
+**Status:** Approved for implementation planning
 **Date:** 2026-08-19
 **Repository:** `pablontiv/skills`
 **Skill:** `skills/model-optimizer/`
@@ -277,12 +277,16 @@ The OpenCode adapter uses only OpenCode-local evidence:
 
 1. capture `opencode --version`, cwd, and selected configuration path;
 2. parse `opencode auth list` for provider readiness without token material;
-3. parse `opencode models` for exact servable IDs;
+3. parse `opencode models --verbose`, whose output is an exact model ID followed by one JSON metadata object, for servable IDs, family, limits, cost, modalities, tool calling, cache metadata, and supported variants;
 4. read `opencode.json` for current agent assignments and supported options;
-5. live-check with:
+5. live-check with JSON event output and a variant only when the model metadata declares it:
 
 ```bash
-opencode run -m provider/model "Reply exactly: PONG"
+opencode run \
+  --format json \
+  --model provider/model \
+  --variant high \
+  "Reply exactly: PONG"
 ```
 
 On launch failure, the adapter may inspect a bounded tail of the documented OpenCode log for reason codes such as model-not-found or undefined model. It redacts secrets and never treats helper scripts or external catalogs as stronger than `opencode models` plus the live response.
