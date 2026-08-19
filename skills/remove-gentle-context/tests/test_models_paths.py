@@ -3,10 +3,40 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import helper
 from helper import Plan, Receipt, ReceiptStatus
 from helper.canonical import canonical_bytes, digest_json
 from helper.models import ArtifactClass, Candidate, Ownership, PlatformProfile
 from helper.paths import _is_windows_reparse_point, assert_safe_target, resolve_state_root
+
+
+APPROVED_HELPER_PUBLIC_NAMES = (
+    "canonical_bytes",
+    "digest_json",
+    "ArtifactClass",
+    "BackupManifest",
+    "Candidate",
+    "Check",
+    "CompletedCommand",
+    "Inventory",
+    "LifecycleAction",
+    "LifecycleOutcome",
+    "Operation",
+    "OperationKind",
+    "OperationOutcome",
+    "Ownership",
+    "Plan",
+    "PlatformProfile",
+    "Preimage",
+    "PreservationAssertion",
+    "ProcessSnapshot",
+    "Receipt",
+    "ReceiptStatus",
+    "RuntimeContext",
+    "VerificationResult",
+    "assert_safe_target",
+    "resolve_state_root",
+)
 
 
 class ModelsAndPathsTests(unittest.TestCase):
@@ -49,39 +79,14 @@ class ModelsAndPathsTests(unittest.TestCase):
         self.assertNotIn("digest", plan.to_unsigned_dict())
 
     def test_package_public_api_matches_deliberate_contract(self):
-        namespace = {}
-        exec("from helper import *", namespace)
-        public_names = {name for name in namespace if not name.startswith("_")}
-        self.assertEqual(
-            public_names,
-            {
-                "ArtifactClass",
-                "BackupManifest",
-                "Candidate",
-                "Check",
-                "CompletedCommand",
-                "Inventory",
-                "LifecycleAction",
-                "LifecycleOutcome",
-                "Operation",
-                "OperationKind",
-                "OperationOutcome",
-                "Ownership",
-                "Plan",
-                "PlatformProfile",
-                "Preimage",
-                "PreservationAssertion",
-                "ProcessSnapshot",
-                "Receipt",
-                "ReceiptStatus",
-                "RuntimeContext",
-                "VerificationResult",
-                "assert_safe_target",
-                "canonical_bytes",
-                "digest_json",
-                "resolve_state_root",
-            },
-        )
+        with self.subTest("helper.__all__"):
+            self.assertEqual(tuple(getattr(helper, "__all__", ())), APPROVED_HELPER_PUBLIC_NAMES)
+
+        with self.subTest("from helper import *"):
+            namespace = {}
+            exec("from helper import *", namespace)
+            public_names = {name for name in namespace if not name.startswith("_")}
+            self.assertEqual(public_names, set(APPROVED_HELPER_PUBLIC_NAMES))
 
     def test_receipt_serializes_stage_fields(self):
         receipt = Receipt(status=ReceiptStatus.COMPLETED)
