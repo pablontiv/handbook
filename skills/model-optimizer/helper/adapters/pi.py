@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -27,6 +28,7 @@ from . import RuntimeContext
 _SECRET_KEY_RE = re.compile(r"token|key|secret|password|cookie|authorization|credential", re.IGNORECASE)
 _SECRET_KEY_ALLOWLIST = {"maxtokens"}
 _STRUCTURAL_PROFILE_KEYS = {"effort", "thinking", "reasoning", "defaultThinkingLevel", "tools", "temperature"}
+_AUTH_TYPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,63}$")
 _METADATA_FILENAMES = ("models-store.json", "models.json")
 _DEFAULT_TIMEOUT_SECONDS = 15
 _MAX_DETAIL_CHARS = 240
@@ -58,9 +60,12 @@ def _display_int(value: str) -> int | None:
         multiplier = 1_000_000
         text = text[:-1]
     try:
-        return int(float(text) * multiplier)
+        parsed = float(text) * multiplier
     except ValueError:
         return None
+    if not math.isfinite(parsed):
+        return None
+    return int(parsed)
 
 
 def parse_pi_model_listing(text: str) -> tuple[ModelRecord, ...]:
@@ -97,12 +102,20 @@ def parse_pi_auth(text: str, provider: str) -> ProviderReadiness:
 
     status_text = str(value.get("status", "unknown")).lower()
     auth_type = value.get("authType", value.get("auth_type"))
-    auth_type_text = str(auth_type) if auth_type is not None else None
+    auth_type_text = _auth_type_or_none(auth_type)
     if status_text == ReadinessStatus.READY.value:
         return ProviderReadiness(provider, ReadinessStatus.READY, auth_type_text, "auth_ready")
     if status_text in {ReadinessStatus.NOT_READY.value, "missing", "expired", "unauthorized"}:
         return ProviderReadiness(provider, ReadinessStatus.NOT_READY, auth_type_text, "auth_not_ready")
     return ProviderReadiness(provider, ReadinessStatus.UNKNOWN, auth_type_text, "auth_unknown")
+
+
+def _auth_type_or_none(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if not _AUTH_TYPE_RE.fullmatch(value):
+        return None
+    return value
 
 
 def _agent_dir(home: Path) -> Path:
@@ -118,7 +131,7 @@ def _load_json(path: Path) -> tuple[Any | None, str | None]:
         return None, None
     try:
         return json.loads(path.read_text(encoding="utf-8")), None
-    except json.JSONDecodeError:
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None, f"inventory_malformed_metadata:{path.name}"
     except OSError:
         return None, f"inventory_unreadable_source:{path.name}"
@@ -153,6 +166,10 @@ def _is_json_structural(value: Any) -> bool:
 def _source_label(scope: str, filename: str, exists: bool) -> str:
     prefix = "" if exists else "missing:"
     return f"{prefix}{scope}:{filename}"
+
+
+def _invalid_source_shape_warning(path: Path) -> str:
+    return f"inventory_invalid_source_shape:{path.name}"
 
 
 def _exact_model(provider: str | None, model: str | None) -> str | None:
@@ -266,6 +283,8 @@ def _number_from_metadata(value: Any) -> int | None:
     if isinstance(value, int):
         return value
     if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
         return int(value)
     if isinstance(value, str):
         return _display_int(value)
@@ -408,10 +427,14 @@ class PiAdapter:
         sources.append(_source_label("global", "settings.json", settings_path.exists()))
         if warning:
             warnings.append(warning)
+        elif settings is None:
+            pass
         elif isinstance(settings, Mapping):
             assignment = _settings_assignment(_prune_secret_keys(settings))
             if assignment is not None:
                 assignments.append(assignment)
+        else:
+            warnings.append(_invalid_source_shape_warning(settings_path))
 
         merged_profiles: dict[str, Mapping[str, Any]] = {}
         source_by_agent: dict[str, str] = {}
@@ -421,6 +444,11 @@ class PiAdapter:
             sources.append(_source_label(scope, "subagents.json", subagents_path.exists()))
             if warning:
                 warnings.append(warning)
+                continue
+            if data is None:
+                continue
+            if not isinstance(data, Mapping):
+                warnings.append(_invalid_source_shape_warning(subagents_path))
                 continue
             profiles = _profiles_from_source(_prune_secret_keys(data))
             for agent, profile in profiles.items():
@@ -522,6 +550,7 @@ class PiAdapter:
         }
 
     def inventory(self, context: RuntimeContext) -> Inventory:
+        self.warnings = []
         runtime = self.detect(context)
         snapshot = self.snapshot(context)
         catalog_local = self.list_models(context)

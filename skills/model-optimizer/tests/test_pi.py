@@ -43,10 +43,43 @@ class PiAdapterTests(unittest.TestCase):
         self.assertEqual(models[1].context_window, 262100)
         self.assertEqual(models[1].input_modes, ("text", "image"))
 
+    def test_listing_non_finite_display_limits_do_not_raise(self):
+        models = parse_pi_model_listing("""\
+provider        model       context  max-out  thinking  images
+bad-provider    inf-model   inf      -inf     yes       no
+bad-provider    nan-model   nan      nan      no        yes
+ok-provider     ok-model    1K       2K       yes       no
+""")
+        by_id = {model.exact_id: model for model in models}
+        self.assertEqual(set(by_id), {
+            "bad-provider/inf-model",
+            "bad-provider/nan-model",
+            "ok-provider/ok-model",
+        })
+        self.assertIsNone(by_id["bad-provider/inf-model"].context_window)
+        self.assertIsNone(by_id["bad-provider/inf-model"].max_output)
+        self.assertIsNone(by_id["bad-provider/nan-model"].context_window)
+        self.assertIsNone(by_id["bad-provider/nan-model"].max_output)
+        self.assertEqual(by_id["ok-provider/ok-model"].context_window, 1000)
+        self.assertEqual(by_id["ok-provider/ok-model"].max_output, 2000)
+
     def test_auth_check_never_requires_credentials_output(self):
         readiness = parse_pi_auth(fixture_text("pi/auth-ready.json"), "nan-builders")
         self.assertEqual(readiness.status, ReadinessStatus.READY)
         self.assertEqual(readiness.auth_type, "api_key")
+
+    def test_auth_type_must_be_bounded_structural_string(self):
+        invalid_values = (123, ["api_key"], {"kind": "api_key"}, "x" * 65, "api key")
+        for auth_type in invalid_values:
+            with self.subTest(auth_type=auth_type):
+                readiness = parse_pi_auth(json.dumps({
+                    "status": "ready",
+                    "provider": "nan-builders",
+                    "authType": auth_type,
+                }), "nan-builders")
+                self.assertEqual(readiness.status, ReadinessStatus.READY)
+                self.assertIsNone(readiness.auth_type)
+                self.assertEqual(readiness.reason_code, "auth_ready")
 
     def test_check_readiness_uses_exact_no_refresh_json_command(self):
         runner = FakeRunner.stdout(fixture_text("pi/auth-ready.json"))
@@ -215,6 +248,71 @@ class PiAdapterTests(unittest.TestCase):
             "openai-codex/gpt-5.6-terra",
         ])
         self.assertIn("inventory_malformed_metadata:models-store.json", adapter.warnings)
+
+    def test_list_models_invalid_utf8_metadata_warns_and_preserves_inventory(self):
+        copy_pi_fixtures_to_home(self.root)
+        store = self.root / ".pi" / "agent" / "models-store.json"
+        store.write_bytes(b"{\xff")
+
+        adapter = PiAdapter(FakeRunner.stdout(fixture_text("pi/list-models.txt")))
+        models = adapter.list_models(self.context)
+        self.assertEqual([m.exact_id for m in models], [
+            "github-copilot/gemini-3.1-pro-preview",
+            "nan-builders/qwen3.6",
+            "openai-codex/gpt-5.6-terra",
+        ])
+        self.assertIn("inventory_malformed_metadata:models-store.json", adapter.warnings)
+
+        inventory = PiAdapter(pi_inventory_runner_from_fixtures()).inventory(self.context)
+        self.assertEqual([m.exact_id for m in inventory.catalog_local], [
+            "github-copilot/gemini-3.1-pro-preview",
+            "nan-builders/qwen3.6",
+            "openai-codex/gpt-5.6-terra",
+        ])
+        self.assertIn("inventory_malformed_metadata:models-store.json", inventory.warnings)
+
+    def test_non_object_settings_and_subagents_sources_warn(self):
+        global_agent = self.root / ".pi" / "agent"
+        project_agent = self.context.cwd / ".pi" / "agent"
+        global_agent.mkdir(parents=True)
+        project_agent.mkdir(parents=True)
+        (global_agent / "settings.json").write_text("[]", encoding="utf-8")
+        (project_agent / "subagents.json").write_text("[]", encoding="utf-8")
+
+        adapter = PiAdapter(FakeRunner.stdout("0.84.2\n"))
+        snapshot = adapter.snapshot(self.context)
+        self.assertIn("inventory_invalid_source_shape:settings.json", snapshot.warnings)
+        self.assertIn("inventory_invalid_source_shape:subagents.json", snapshot.warnings)
+        self.assertIn("inventory_invalid_source_shape:settings.json", adapter.warnings)
+        self.assertIn("inventory_invalid_source_shape:subagents.json", adapter.warnings)
+
+    def test_repeated_inventory_does_not_leak_prior_warnings(self):
+        first_agent = self.root / ".pi" / "agent"
+        first_agent.mkdir(parents=True)
+        (first_agent / "models-store.json").write_text("{malformed", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as second_temp:
+            second_root = Path(second_temp)
+            second_context = RuntimeContext(home=second_root, cwd=second_root / "project", env={})
+            second_context.cwd.mkdir()
+            runner = FakeRunner((
+                _command("0.84.2\n"),
+                _command(fixture_text("pi/list-models.txt")),
+                _command(json.dumps({"status": "ready", "authType": "test"})),
+                _command(json.dumps({"status": "ready", "authType": "test"})),
+                _command(json.dumps({"status": "ready", "authType": "test"})),
+                _command("0.84.2\n"),
+                _command(fixture_text("pi/list-models.txt")),
+                _command(json.dumps({"status": "ready", "authType": "test"})),
+                _command(json.dumps({"status": "ready", "authType": "test"})),
+                _command(json.dumps({"status": "ready", "authType": "test"})),
+            ))
+            adapter = PiAdapter(runner)
+            first = adapter.inventory(self.context)
+            second = adapter.inventory(second_context)
+
+        self.assertIn("inventory_malformed_metadata:models-store.json", first.warnings)
+        self.assertNotIn("inventory_malformed_metadata:models-store.json", second.warnings)
 
     def test_missing_settings_sources_are_allowed_and_represented(self):
         snapshot = PiAdapter(FakeRunner.stdout("0.84.2\n")).snapshot(self.context)
