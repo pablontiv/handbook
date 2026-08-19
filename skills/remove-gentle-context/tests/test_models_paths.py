@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from helper import Plan, Receipt, ReceiptStatus
 from helper.canonical import canonical_bytes, digest_json
@@ -47,6 +48,12 @@ class ModelsAndPathsTests(unittest.TestCase):
         self.assertEqual(plan.digest, digest_json({}))
         self.assertNotIn("digest", plan.to_unsigned_dict())
 
+    def test_package_star_import_excludes_internal_helpers(self):
+        namespace = {}
+        exec("from helper import *", namespace)
+        self.assertNotIn("Path", namespace)
+        self.assertNotIn("dataclass", namespace)
+
     def test_receipt_serializes_stage_fields(self):
         receipt = Receipt(status=ReceiptStatus.COMPLETED)
         self.assertEqual(receipt.to_dict()["status"], "completed")
@@ -64,6 +71,16 @@ class ModelsAndPathsTests(unittest.TestCase):
             link.symlink_to(real)
             with self.assertRaisesRegex(ValueError, "preflight_unexpected_link"):
                 assert_safe_target(link, (root,))
+
+    def test_safe_target_rejects_windows_reparse_point(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "reparse.json"
+            target.write_text("{}")
+            fake_stat = type("Stat", (), {"st_file_attributes": 0x400, "st_mode": 0})()
+            with patch("helper.paths.os.lstat", return_value=fake_stat), patch("pathlib.Path.resolve", return_value=target), patch.object(Path, "is_symlink", return_value=False):
+                with self.assertRaisesRegex(ValueError, "preflight_unexpected_link"):
+                    assert_safe_target(target, (root,))
 
     def test_safe_target_rejects_nonexistent_parent_escape(self):
         with tempfile.TemporaryDirectory() as td:

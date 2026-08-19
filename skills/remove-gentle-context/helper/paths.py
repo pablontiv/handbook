@@ -5,6 +5,8 @@ from pathlib import Path
 
 from .models import PlatformProfile
 
+WINDOWS_REPARSE_POINT = 0x400
+
 
 def resolve_state_root(profile: PlatformProfile) -> Path:
     os_name = profile.os_name.lower()
@@ -28,6 +30,6 @@ def assert_safe_target(path: Path, allowed_roots: tuple[Path, ...]) -> os.stat_r
     st = os.lstat(path)
     if path.is_symlink():
         raise ValueError("preflight_unexpected_link")
-    if hasattr(st, "st_file_attributes") and st.st_file_attributes & getattr(os, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
+    if hasattr(st, "st_file_attributes") and st.st_file_attributes & WINDOWS_REPARSE_POINT:
         raise ValueError("preflight_unexpected_link")
     return st
