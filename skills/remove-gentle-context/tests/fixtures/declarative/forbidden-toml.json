@@ -1,0 +1,10 @@
+{
+  "schema": "remove-gentle-context.adapter/v1",
+  "client": "bad",
+  "roots": {
+    "config": {"kind": "home_relative", "path": ".bad"}
+  },
+  "rules": [
+    {"id": "bad", "kind": "toml_edit", "root": "config", "path": "settings.toml"}
+  ]
+}

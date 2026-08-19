@@ -1,0 +1,11 @@
+{
+  "schema": "remove-gentle-context.adapter/v1",
+  "client": "gemini",
+  "roots": {
+    "config": {"kind": "home_relative", "path": ".gemini"}
+  },
+  "rules": [
+    {"id": "agent", "kind": "exact_file", "root": "config", "path": "agents/sdd-init.md", "catalog_name": "sdd-init"},
+    {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-hook"}
+  ]
+}

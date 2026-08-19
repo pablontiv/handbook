@@ -1,0 +1,201 @@
+{
+  "schema": "remove-gentle-context.adapter/v1",
+  "client": "hermes",
+  "roots": {
+    "state": {
+      "kind": "home_relative",
+      "path": ".hermes"
+    }
+  },
+  "rules": [
+    {
+      "id": "state-db",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "state.db",
+      "artifact_class": "historical",
+      "proposed_action": "report_only",
+      "reason": "historical Hermes state database; do not mutate"
+    },
+    {
+      "id": "state-db-wal",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "state.db-wal",
+      "artifact_class": "historical",
+      "proposed_action": "report_only",
+      "reason": "historical Hermes state write-ahead log; do not mutate"
+    },
+    {
+      "id": "snapshot-jd-fix-agent",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/jd-fix-agent.md",
+      "catalog_name": "jd-fix-agent",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-jd-judge-a",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/jd-judge-a.md",
+      "catalog_name": "jd-judge-a",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-jd-judge-b",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/jd-judge-b.md",
+      "catalog_name": "jd-judge-b",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-review-readability",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/review-readability.md",
+      "catalog_name": "review-readability",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-review-refuter",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/review-refuter.md",
+      "catalog_name": "review-refuter",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-review-reliability",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/review-reliability.md",
+      "catalog_name": "review-reliability",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-review-resilience",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/review-resilience.md",
+      "catalog_name": "review-resilience",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-review-risk",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/review-risk.md",
+      "catalog_name": "review-risk",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-apply",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-apply.md",
+      "catalog_name": "sdd-apply",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-archive",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-archive.md",
+      "catalog_name": "sdd-archive",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-design",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-design.md",
+      "catalog_name": "sdd-design",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-explore",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-explore.md",
+      "catalog_name": "sdd-explore",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-init",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-init.md",
+      "catalog_name": "sdd-init",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-onboard",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-onboard.md",
+      "catalog_name": "sdd-onboard",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-propose",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-propose.md",
+      "catalog_name": "sdd-propose",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-spec",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-spec.md",
+      "catalog_name": "sdd-spec",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-tasks",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-tasks.md",
+      "catalog_name": "sdd-tasks",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-validator",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-validator.md",
+      "catalog_name": "sdd-validator",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    },
+    {
+      "id": "snapshot-sdd-verify",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "archived-prompt-snapshots/sdd-verify.md",
+      "catalog_name": "sdd-verify",
+      "artifact_class": "historical",
+      "proposed_action": "report_only"
+    }
+  ]
+}

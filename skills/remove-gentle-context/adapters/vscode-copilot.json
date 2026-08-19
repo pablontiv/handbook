@@ -1,0 +1,163 @@
+{
+  "schema": "remove-gentle-context.adapter/v1",
+  "client": "vscode-copilot",
+  "roots": {
+    "config": {
+      "kind": "home_relative",
+      "path": ".vscode"
+    }
+  },
+  "rules": [
+    {
+      "id": "agent-jd-fix-agent",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/jd-fix-agent.md",
+      "catalog_name": "jd-fix-agent"
+    },
+    {
+      "id": "agent-jd-judge-a",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/jd-judge-a.md",
+      "catalog_name": "jd-judge-a"
+    },
+    {
+      "id": "agent-jd-judge-b",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/jd-judge-b.md",
+      "catalog_name": "jd-judge-b"
+    },
+    {
+      "id": "agent-review-readability",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/review-readability.md",
+      "catalog_name": "review-readability"
+    },
+    {
+      "id": "agent-review-refuter",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/review-refuter.md",
+      "catalog_name": "review-refuter"
+    },
+    {
+      "id": "agent-review-reliability",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/review-reliability.md",
+      "catalog_name": "review-reliability"
+    },
+    {
+      "id": "agent-review-resilience",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/review-resilience.md",
+      "catalog_name": "review-resilience"
+    },
+    {
+      "id": "agent-review-risk",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/review-risk.md",
+      "catalog_name": "review-risk"
+    },
+    {
+      "id": "agent-sdd-apply",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-apply.md",
+      "catalog_name": "sdd-apply"
+    },
+    {
+      "id": "agent-sdd-archive",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-archive.md",
+      "catalog_name": "sdd-archive"
+    },
+    {
+      "id": "agent-sdd-design",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-design.md",
+      "catalog_name": "sdd-design"
+    },
+    {
+      "id": "agent-sdd-explore",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-explore.md",
+      "catalog_name": "sdd-explore"
+    },
+    {
+      "id": "agent-sdd-init",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-init.md",
+      "catalog_name": "sdd-init"
+    },
+    {
+      "id": "agent-sdd-onboard",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-onboard.md",
+      "catalog_name": "sdd-onboard"
+    },
+    {
+      "id": "agent-sdd-propose",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-propose.md",
+      "catalog_name": "sdd-propose"
+    },
+    {
+      "id": "agent-sdd-spec",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-spec.md",
+      "catalog_name": "sdd-spec"
+    },
+    {
+      "id": "agent-sdd-tasks",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-tasks.md",
+      "catalog_name": "sdd-tasks"
+    },
+    {
+      "id": "agent-sdd-validator",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-validator.md",
+      "catalog_name": "sdd-validator"
+    },
+    {
+      "id": "agent-sdd-verify",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "copilot/agents/sdd-verify.md",
+      "catalog_name": "sdd-verify"
+    },
+    {
+      "id": "copilot-instructions-marker",
+      "kind": "balanced_marker_block",
+      "root": "config",
+      "path": "copilot-instructions.md",
+      "open_marker": "<!-- gentle-ai:begin -->",
+      "close_marker": "<!-- gentle-ai:end -->"
+    },
+    {
+      "id": "settings-instruction-sdd-init",
+      "kind": "json_array_value",
+      "root": "config",
+      "path": "settings.json",
+      "pointer": "/github.copilot.chat.codeGeneration.instructions",
+      "value": {
+        "text": "gentle-ai:sdd-init"
+      }
+    }
+  ]
+}
