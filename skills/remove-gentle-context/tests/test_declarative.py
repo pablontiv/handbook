@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from helper.adapter import AdapterRegistry
-from helper.declarative import _canonical_tree_sha256, load_declarative_adapter
+from helper.declarative import load_declarative_adapter
 from helper.models import Ownership, PlatformProfile, RuntimeContext
+from helper.ownership import canonical_tree_sha256
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -199,6 +200,48 @@ metadata:
                 self.assertEqual(len(rule_ids), len(set(rule_ids)))
         self.assertEqual(seen_clients, {"gemini", "kimi", "hermes", "vscode-copilot"})
 
+    def test_gentle_prefix_substrings_are_report_only_without_structural_corroboration(self):
+        cases = {
+            "prose": "A prose note mentions gentle-ai:sdd-init but is not managed metadata.\n",
+            "url": "See https://example.invalid/search?q=gentle-ai:sdd-init for an example.\n",
+            "quoted_example": "Use `gentle-ai:sdd-init` as a sample setting in docs.\n",
+            "arbitrary_comment": "<!-- docs mention gentle-ai:sdd-init, not a managed marker -->\n",
+        }
+        for case, content in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+                home = Path(td) / "home"
+                target = home / ".gemini" / "agents" / "sdd-init.md"
+                target.parent.mkdir(parents=True)
+                target.write_text(content)
+                adapter_path = Path(td) / "adapter.json"
+                adapter_path.write_text(json.dumps({
+                    "schema": "remove-gentle-context.adapter/v1",
+                    "client": "gemini",
+                    "roots": {"config": {"kind": "home_relative", "path": ".gemini"}},
+                    "rules": [{"id": "sdd-init", "kind": "exact_file", "root": "config", "path": "agents/sdd-init.md"}],
+                }))
+                (candidate,) = load_declarative_adapter(adapter_path).inventory(self._context(home))
+                self.assertEqual(candidate.ownership, Ownership.AMBIGUOUS)
+                self.assertEqual(candidate.proposed_action, "report_only")
+
+    def test_complete_gentle_html_marker_corroborates_exact_file(self):
+        content = "<!-- gentle-ai:sdd-init -->\n# Gentle upstream asset\n"
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".gemini" / "agents" / "sdd-init.md"
+            target.parent.mkdir(parents=True)
+            target.write_text(content)
+            adapter_path = Path(td) / "adapter.json"
+            adapter_path.write_text(json.dumps({
+                "schema": "remove-gentle-context.adapter/v1",
+                "client": "gemini",
+                "roots": {"config": {"kind": "home_relative", "path": ".gemini"}},
+                "rules": [{"id": "sdd-init", "kind": "exact_file", "root": "config", "path": "agents/sdd-init.md"}],
+            }))
+            (candidate,) = load_declarative_adapter(adapter_path).inventory(self._context(home))
+            self.assertEqual(candidate.ownership, Ownership.PROVEN)
+            self.assertIn("marker", {item["kind"] for item in candidate.evidence})
+
     def test_byte_identical_gentle_asset_is_not_preserved(self):
         content = "---\nname: sdd-init\n---\n# Gentle upstream asset\n"
         digest = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
@@ -258,7 +301,7 @@ metadata:
             target.parent.mkdir(parents=True)
             target.write_text(content)
             content_digest = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
-            tree_digest = _canonical_tree_sha256(target)
+            tree_digest = canonical_tree_sha256(target)
             (receipts / "systemic-issue-triage.json").write_text(json.dumps(self._receipt(
                 target=target,
                 content_sha256=content_digest,
@@ -306,7 +349,7 @@ metadata:
                 )
                 target.write_text(content)
                 content_digest = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
-                tree_digest = _canonical_tree_sha256(target)
+                tree_digest = canonical_tree_sha256(target)
                 catalog_tree = "sha256:" + "1" * 64 if case == "wrong_release_tree_sha256" else tree_digest
                 receipt_tree = "sha256:" + "2" * 64 if case == "wrong_receipt_tree_sha256" else tree_digest
                 receipt_content = "sha256:" + "3" * 64 if case == "wrong_receipt_content_sha256" else content_digest
