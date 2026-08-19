@@ -1,8 +1,8 @@
-import os
 import tempfile
 import unittest
 from pathlib import Path
 
+from helper import Plan, Receipt, ReceiptStatus
 from helper.canonical import canonical_bytes, digest_json
 from helper.models import ArtifactClass, Candidate, Ownership, PlatformProfile
 from helper.paths import assert_safe_target, resolve_state_root
@@ -41,6 +41,20 @@ class ModelsAndPathsTests(unittest.TestCase):
             Path("C:/Local/remove-gentle-context/state"),
         )
 
+    def test_plan_digest_round_trips_without_digest_field(self):
+        plan = Plan().with_digest()
+        self.assertEqual(plan.to_unsigned_dict(), {})
+        self.assertEqual(plan.digest, digest_json({}))
+        self.assertNotIn("digest", plan.to_unsigned_dict())
+
+    def test_receipt_serializes_stage_fields(self):
+        receipt = Receipt(status=ReceiptStatus.COMPLETED)
+        self.assertEqual(receipt.to_dict()["status"], "completed")
+        self.assertIn("operation_outcomes", receipt.to_dict())
+        self.assertIn("backup_manifest_path", receipt.to_dict())
+        self.assertIn("lifecycle_outcomes", receipt.to_dict())
+        self.assertIn("checks", receipt.to_dict())
+
     def test_safe_target_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -50,3 +64,11 @@ class ModelsAndPathsTests(unittest.TestCase):
             link.symlink_to(real)
             with self.assertRaisesRegex(ValueError, "preflight_unexpected_link"):
                 assert_safe_target(link, (root,))
+
+    def test_safe_target_rejects_nonexistent_parent_escape(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "allowed"
+            root.mkdir()
+            path = root / "missing" / ".." / ".." / "escape.json"
+            with self.assertRaisesRegex(ValueError, "preflight_path_escape"):
+                assert_safe_target(path, (root,))

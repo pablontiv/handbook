@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Mapping, Sequence, Tuple
+from typing import Mapping, Sequence
+
+from .canonical import digest_json
 
 
 class ArtifactClass(StrEnum):
@@ -95,20 +97,70 @@ class PreservationAssertion: ...
 @dataclass(frozen=True)
 class Inventory: ...
 @dataclass(frozen=True)
-class Plan: ...
+class Plan:
+    digest: str | None = None
+
+    def to_unsigned_dict(self) -> dict[str, object]:
+        return {}
+
+    def to_dict(self) -> dict[str, object]:
+        data = self.to_unsigned_dict()
+        if self.digest is not None:
+            data["digest"] = self.digest
+        return data
+
+    def with_digest(self) -> "Plan":
+        return Plan(digest=digest_json(self.to_unsigned_dict()))
+
+
 @dataclass(frozen=True)
-class Check: ...
+class Check:
+    pass
+
+
 @dataclass(frozen=True)
-class BackupManifest: ...
+class BackupManifest:
+    pass
+
+
 @dataclass(frozen=True)
-class OperationOutcome: ...
+class OperationOutcome:
+    pass
+
+
 @dataclass(frozen=True)
-class CompletedCommand: ...
+class CompletedCommand:
+    pass
+
+
 @dataclass(frozen=True)
-class ProcessSnapshot: ...
+class ProcessSnapshot:
+    pass
+
+
 @dataclass(frozen=True)
-class LifecycleOutcome: ...
+class LifecycleOutcome:
+    pass
+
+
 @dataclass(frozen=True)
-class VerificationResult: ...
+class VerificationResult:
+    pass
+
+
 @dataclass(frozen=True)
-class Receipt: ...
+class Receipt:
+    operation_outcomes: tuple[OperationOutcome, ...] = ()
+    backup_manifest_path: Path | None = None
+    lifecycle_outcomes: tuple[LifecycleOutcome, ...] = ()
+    checks: tuple[Check, ...] = ()
+    status: ReceiptStatus | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "operation_outcomes": [o.__dict__ for o in self.operation_outcomes],
+            "backup_manifest_path": None if self.backup_manifest_path is None else str(self.backup_manifest_path),
+            "lifecycle_outcomes": [o.__dict__ for o in self.lifecycle_outcomes],
+            "checks": [c.__dict__ for c in self.checks],
+            "status": None if self.status is None else str(self.status),
+        }
