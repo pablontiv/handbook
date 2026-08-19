@@ -1,0 +1,15 @@
+{
+  "schema": "claude-theme/v1",
+  "name": "gentleman",
+  "displayName": "Gentleman",
+  "metadata": {
+    "managedBy": "gentle-ai",
+    "source": "Gentleman-Programming/gentle-ai",
+    "themeId": "gentleman"
+  },
+  "colors": {
+    "background": "#0f1117",
+    "foreground": "#e6edf3",
+    "accent": "#7aa2f7"
+  }
+}

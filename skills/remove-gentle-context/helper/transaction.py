@@ -15,7 +15,7 @@ from typing import Iterable
 from .canonical import digest_json
 from .engine import validate_approval
 from .models import BackupEntry, BackupManifest, LifecycleOutcome, Operation, OperationKind, OperationOutcome, Plan, ProcessSnapshot, Receipt, ReceiptStatus, RuntimeContext
-from .paths import _is_windows_reparse_point, path_from_root_relative, resolve_state_root, root_relative_path
+from .paths import _is_windows_reparse_point, path_from_root_relative, resolve_state_root, root_map, root_relative_path
 
 
 class OperationApplyError(RuntimeError):
@@ -27,6 +27,7 @@ class OperationApplyError(RuntimeError):
 
 def create_backup(plan: Plan, context: RuntimeContext) -> BackupManifest:
     plan_digest = _require_digest(plan.digest, "backup_plan_missing_digest")
+    _assert_plan_root_map_matches_context(plan, context, "backup_plan_roots_mismatch")
     prepared = [_prepare_backup_entry(index, operation, context) for index, operation in enumerate(plan.operations)]
     root = _new_transaction_root("backups", plan_digest, context)
     entries: list[BackupEntry] = []
@@ -46,6 +47,7 @@ def create_backup(plan: Plan, context: RuntimeContext) -> BackupManifest:
 
 
 def apply_operations(plan: Plan, manifest: BackupManifest, context: RuntimeContext) -> tuple[OperationOutcome, ...]:
+    _assert_plan_root_map_matches_context(plan, context, "apply_plan_roots_mismatch")
     if manifest.plan_digest != _require_digest(plan.digest, "apply_plan_missing_digest"):
         raise ValueError("apply_manifest_plan_mismatch")
     outcomes: list[OperationOutcome] = []
@@ -89,6 +91,7 @@ def rollback(manifest: BackupManifest, outcomes: Iterable[OperationOutcome], con
 
 def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: object) -> Receipt:
     validate_approval(plan, approval)
+    _assert_plan_root_map_matches_context(plan, context, "execute_plan_roots_mismatch")
     if not plan.operations:
         return Receipt(status=ReceiptStatus.COMPLETED)
 
@@ -137,6 +140,13 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
     lifecycle_outcomes.extend(restart_outcomes)
     status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.COMPLETED
     return Receipt(operation_outcomes=outcomes, backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status)
+
+
+def _assert_plan_root_map_matches_context(plan: Plan, context: RuntimeContext, code: str) -> None:
+    if not plan.root_map:
+        return
+    if dict(sorted(plan.root_map.items())) != dict(sorted(root_map(context).items())):
+        raise ValueError(code)
 
 
 def _lifecycle_preflight(plan: Plan, context: RuntimeContext, lifecycle: object) -> tuple[ProcessSnapshot, ...]:

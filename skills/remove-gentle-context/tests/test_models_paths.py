@@ -6,8 +6,8 @@ from unittest.mock import patch
 import helper
 from helper import Plan, Receipt, ReceiptStatus
 from helper.canonical import canonical_bytes, digest_json
-from helper.models import ArtifactClass, Candidate, Ownership, PlatformProfile
-from helper.paths import _is_windows_reparse_point, assert_safe_target, resolve_state_root
+from helper.models import ArtifactClass, Candidate, Ownership, PlatformProfile, RuntimeContext
+from helper.paths import _is_windows_reparse_point, assert_safe_target, known_roots, resolve_state_root, root_relative_path
 
 
 APPROVED_HELPER_PUBLIC_NAMES = (
@@ -128,3 +128,37 @@ class ModelsAndPathsTests(unittest.TestCase):
             path = root / "missing" / ".." / ".." / "escape.json"
             with self.assertRaisesRegex(ValueError, "preflight_path_escape"):
                 assert_safe_target(path, (root,))
+
+    def test_known_roots_include_stable_external_project_root_ids(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / "home"
+            project_a = root / "projects" / "alpha"
+            project_b = root / "projects" / "beta"
+            home.mkdir()
+            project_a.mkdir(parents=True)
+            project_b.mkdir(parents=True)
+            first = RuntimeContext(PlatformProfile("linux", home, {}), project_roots=(project_b, project_a))
+            second = RuntimeContext(PlatformProfile("linux", home, {}), project_roots=(project_a, project_b))
+
+            first_roots = known_roots(first)
+            second_roots = known_roots(second)
+
+            self.assertEqual(first_roots, second_roots)
+            self.assertEqual(first_roots["home"], home)
+            project_root_ids = [root_id for root_id in first_roots if root_id != "home"]
+            self.assertEqual(project_root_ids, sorted(project_root_ids))
+            self.assertEqual({first_roots[root_id] for root_id in project_root_ids}, {project_a.resolve(), project_b.resolve()})
+            self.assertTrue(all(root_id.startswith("project-") for root_id in project_root_ids))
+            self.assertEqual(root_relative_path(project_a / "CLAUDE.md", first)[1], "CLAUDE.md")
+
+    def test_runtime_context_rejects_duplicate_project_roots_after_normalization(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / "home"
+            project = root / "project"
+            home.mkdir()
+            project.mkdir()
+
+            with self.assertRaisesRegex(ValueError, "project_root_duplicate"):
+                RuntimeContext(PlatformProfile("linux", home, {}), project_roots=(project, project / ".." / "project"))

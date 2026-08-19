@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from helper.canonical import digest_json
 from helper.models import LifecycleAction, LifecycleOutcome, Operation, OperationKind, Plan, PlatformProfile, ProcessSnapshot, ReceiptStatus, RuntimeContext
-from helper.paths import resolve_state_root
+from helper.paths import resolve_state_root, root_map
 from helper.transaction import _same_file_identity, apply_operations, create_backup, execute_plan, restore
 
 
@@ -424,6 +424,38 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
         replacement_manifest = json.loads(receipt.backup_manifest_path.read_text())
         self.assertEqual(replacement_manifest["entries"][0]["sha256"], sha256_bytes(b"replacement"))
+
+    def test_external_project_root_file_backup_apply_restore_uses_root_id_not_audit_path(self):
+        project = self.temp_root / "external-project"
+        project.mkdir()
+        target = project / "CLAUDE.md"
+        target.write_text("before")
+        target.chmod(0o640)
+        context = RuntimeContext(self.context.profile, project_roots=(project,))
+        plan = write_plan(target, b"before", b"after")
+
+        with self.assertRaisesRegex(ValueError, "preflight_path_escape"):
+            create_backup(plan, self.context)
+
+        bound_plan = Plan(os_name="linux", home=str(self.home), root_map=root_map(context), operations=plan.operations).with_digest()
+        with self.assertRaisesRegex(ValueError, "backup_plan_roots_mismatch"):
+            create_backup(bound_plan, self.context)
+
+        manifest = create_backup(bound_plan, context)
+        self.assertTrue(manifest.entries[0].root_id.startswith("project-"))
+        self.assertEqual(manifest.entries[0].relative_path, "CLAUDE.md")
+        apply_operations(bound_plan, manifest, context)
+        self.assertEqual(target.read_text(), "after")
+
+        data = json.loads(manifest.path.read_text())
+        data["entries"][0]["original_path"] = str(self.temp_root / "outside-audit-path" / "CLAUDE.md")
+        data["digest"] = digest_json({key: value for key, value in data.items() if key != "digest"})
+        manifest.path.write_text(json.dumps(data))
+
+        receipt = restore(manifest.path, data["digest"], context)
+
+        self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
+        self.assertEqual(target.read_text(), "before")
 
     def test_restore_replacement_zero_inode_aborts_before_mutation(self):
         target = self.make_file("restore-zero-inode.txt", "before")

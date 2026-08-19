@@ -47,6 +47,20 @@ class PlatformProfile:
 @dataclass(frozen=True)
 class RuntimeContext:
     profile: PlatformProfile
+    project_roots: tuple[Path, ...] = ()
+
+    def __post_init__(self) -> None:
+        home = self.profile.home.expanduser().resolve(strict=False)
+        normalized: list[Path] = []
+        seen: set[str] = {str(home)}
+        for raw_root in self.project_roots:
+            root = Path(raw_root).expanduser().resolve(strict=False)
+            key = str(root)
+            if key in seen:
+                raise ValueError("project_root_duplicate")
+            seen.add(key)
+            normalized.append(root)
+        object.__setattr__(self, "project_roots", tuple(sorted(normalized, key=lambda path: str(path))))
 
 
 @dataclass(frozen=True)
@@ -187,6 +201,7 @@ class InventoryFinding:
 class Inventory:
     os_name: str = ""
     home: str = ""
+    root_map: Mapping[str, str] = field(default_factory=dict)
     adapter_versions: Mapping[str, str] = field(default_factory=dict)
     adapter_layouts: Mapping[str, str] = field(default_factory=dict)
     candidates: tuple[Candidate, ...] = ()
@@ -199,6 +214,8 @@ class Inventory:
             data["os_name"] = self.os_name
         if self.home:
             data["home"] = self.home
+        if self.root_map:
+            data["root_map"] = dict(self.root_map)
         if self.adapter_versions:
             data["adapter_versions"] = dict(self.adapter_versions)
         if self.adapter_layouts:
@@ -224,6 +241,7 @@ class Plan:
     inventory_digest: str | None = None
     os_name: str = ""
     home: str = ""
+    root_map: Mapping[str, str] = field(default_factory=dict)
     adapter_versions: Mapping[str, str] = field(default_factory=dict)
     adapter_layouts: Mapping[str, str] = field(default_factory=dict)
     operations: tuple[Operation, ...] = ()
@@ -241,6 +259,8 @@ class Plan:
             data["os_name"] = self.os_name
         if self.home:
             data["home"] = self.home
+        if self.root_map:
+            data["root_map"] = dict(self.root_map)
         if self.adapter_versions:
             data["adapter_versions"] = dict(self.adapter_versions)
         if self.adapter_layouts:

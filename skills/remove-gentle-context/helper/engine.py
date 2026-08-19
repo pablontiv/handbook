@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from helper.paths import root_map
 from helper.models import (
     Candidate,
     Inventory,
@@ -49,6 +50,7 @@ def build_inventory(context: RuntimeContext, adapters: object) -> Inventory:
     inventory = Inventory(
         os_name=context.profile.os_name,
         home=str(context.profile.home.resolve(strict=False)),
+        root_map=dict(sorted(root_map(context).items())),
         adapter_versions=dict(sorted(adapter_versions.items())),
         adapter_layouts=dict(sorted(adapter_layouts.items())),
         candidates=tuple(sorted(candidates, key=lambda candidate: (candidate.client, candidate.path, candidate.candidate_id))),
@@ -105,6 +107,7 @@ def build_plan(inventory: Inventory, context: RuntimeContext, adapters: object) 
         inventory_digest=inventory.digest,
         os_name=inventory.os_name,
         home=inventory.home,
+        root_map=dict(sorted(inventory.root_map.items())),
         adapter_versions=dict(sorted(inventory.adapter_versions.items())),
         adapter_layouts=dict(sorted(inventory.adapter_layouts.items())),
         operations=tuple(sorted(operations, key=lambda operation: (operation.path, operation.candidate_id or "", str(operation.kind)))),
@@ -126,6 +129,8 @@ def _assert_inventory_matches_context(inventory: Inventory, context: RuntimeCont
         raise ValueError("plan_inventory_home_mismatch")
     if inventory.os_name != context.profile.os_name:
         raise ValueError("plan_inventory_os_mismatch")
+    if dict(sorted(inventory.root_map.items())) != dict(sorted(root_map(context).items())):
+        raise ValueError("plan_inventory_roots_mismatch")
 
 
 def _complete_operation(operation: Operation, candidate: Candidate) -> Operation:

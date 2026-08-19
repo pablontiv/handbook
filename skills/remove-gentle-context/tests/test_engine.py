@@ -153,6 +153,36 @@ class EngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "plan_inventory_layout_mismatch"):
             build_plan(inventory, self.context, (FakeAdapter("client", layout_version="layout-2"),))
 
+    def test_inventory_and_plan_digest_bind_exact_root_map(self):
+        first_project = self.home.parent / "project-a"
+        second_project = self.home.parent / "project-b"
+        first_project.mkdir()
+        second_project.mkdir()
+        first_context = RuntimeContext(PlatformProfile("linux", self.home, {}), project_roots=(first_project,))
+        second_context = RuntimeContext(PlatformProfile("linux", self.home, {}), project_roots=(second_project,))
+        reordered_context = RuntimeContext(PlatformProfile("linux", self.home, {}), project_roots=(second_project, first_project))
+        stable_context = RuntimeContext(PlatformProfile("linux", self.home, {}), project_roots=(first_project, second_project))
+
+        first_inventory = build_inventory(first_context, (FakeAdapter("client"),))
+        second_inventory = build_inventory(second_context, (FakeAdapter("client"),))
+        stable_inventory = build_inventory(stable_context, (FakeAdapter("client"),))
+        reordered_inventory = build_inventory(reordered_context, (FakeAdapter("client"),))
+
+        self.assertIn("root_map", first_inventory.to_unsigned_dict())
+        self.assertNotEqual(first_inventory.digest, second_inventory.digest)
+        self.assertEqual(stable_inventory.digest, reordered_inventory.digest)
+        first_plan = build_plan(first_inventory, first_context, (FakeAdapter("client"),))
+        second_plan = build_plan(second_inventory, second_context, (FakeAdapter("client"),))
+        stable_plan = build_plan(stable_inventory, stable_context, (FakeAdapter("client"),))
+        reordered_plan = build_plan(reordered_inventory, reordered_context, (FakeAdapter("client"),))
+        self.assertEqual(first_plan.root_map, first_inventory.root_map)
+        self.assertEqual(first_plan.to_unsigned_dict()["root_map"], first_inventory.to_unsigned_dict()["root_map"])
+        self.assertNotEqual(first_plan.digest, second_plan.digest)
+        self.assertEqual(stable_plan.digest, reordered_plan.digest)
+
+        with self.assertRaisesRegex(ValueError, "plan_inventory_roots_mismatch"):
+            build_plan(first_inventory, second_context, (FakeAdapter("client"),))
+
     def test_write_operation_embeds_postimage_and_digest_changes_when_a_byte_changes(self):
         target = self.home / "config.json"
         target.write_bytes(b"old")

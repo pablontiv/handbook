@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": ["Bash(git status:*)"]
+  },
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem"]
+    }
+  },
+  "usage": {
+    "skill:model-optimizer": 12,
+    "lastProject": "/tmp/example-project"
+  }
+}

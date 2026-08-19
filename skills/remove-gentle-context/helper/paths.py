@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path, PurePosixPath
 
@@ -36,7 +37,34 @@ def assert_safe_target(path: Path, allowed_roots: tuple[Path, ...]) -> os.stat_r
 
 
 def known_roots(context: RuntimeContext) -> dict[str, Path]:
-    return {"home": context.profile.home}
+    home = context.profile.home.expanduser()
+    canonical_home = home.resolve(strict=False)
+    roots: dict[str, Path] = {"home": home}
+    seen_paths = {str(canonical_home)}
+    project_items: list[tuple[str, Path]] = []
+    for root in context.project_roots:
+        resolved = Path(root).expanduser().resolve(strict=False)
+        key = str(resolved)
+        if key in seen_paths:
+            raise ValueError("project_root_duplicate")
+        seen_paths.add(key)
+        root_id = _project_root_id(resolved)
+        project_items.append((root_id, resolved))
+    for root_id, resolved in sorted(project_items, key=lambda item: item[0]):
+        existing = roots.get(root_id)
+        if existing is not None and existing != resolved:
+            raise ValueError("project_root_id_collision")
+        roots[root_id] = resolved
+    return roots
+
+
+def root_map(context: RuntimeContext) -> dict[str, str]:
+    return {root_id: str(path.expanduser().resolve(strict=False)) for root_id, path in known_roots(context).items()}
+
+
+def _project_root_id(path: Path) -> str:
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+    return f"project-{digest}"
 
 
 def root_relative_path(path: Path, context: RuntimeContext, *, error_code: str = "preflight_path_escape") -> tuple[str, str]:
