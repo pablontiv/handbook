@@ -95,6 +95,8 @@ class CommandRunner:
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
             "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
             "cwd": str(cwd),
             "env": env,
             "shell": False,
@@ -125,10 +127,7 @@ class CommandRunner:
         if _is_windows():
             process.send_signal(CTRL_BREAK_EVENT)
         else:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            self._signal_posix_group_or_process(process, signal.SIGTERM)
 
         try:
             return process.communicate(timeout=_TERMINATION_GRACE_SECONDS)
@@ -136,11 +135,19 @@ class CommandRunner:
             if _is_windows():
                 process.kill()
             else:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                self._signal_posix_group_or_process(process, signal.SIGKILL)
             try:
                 return process.communicate(timeout=_TERMINATION_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
                 return "", "runner_timeout_kill_failed"
+
+    def _signal_posix_group_or_process(self, process: subprocess.Popen[str], group_signal: signal.Signals) -> None:
+        try:
+            os.killpg(process.pid, group_signal)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            if group_signal == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()

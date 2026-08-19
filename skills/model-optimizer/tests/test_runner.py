@@ -1,4 +1,5 @@
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -38,6 +39,11 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("secret-token", redacted)
         self.assertNotIn("sk-abc", redacted)
         self.assertNotIn("session-xyz", redacted)
+        self.assertIn("[REDACTED]", redacted)
+
+    def test_short_sensitive_values_are_redacted_fail_closed(self):
+        redacted = redact_text("single-character secret: q", ("q",))
+        self.assertNotIn("q", redacted)
         self.assertIn("[REDACTED]", redacted)
 
     def test_runner_rejects_empty_or_nul_arguments(self):
@@ -80,6 +86,24 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(lines[0], "snowman=☃ café")
         self.assertEqual(Path(lines[1]).resolve(), temp_root.resolve())
+
+    def test_invalid_utf8_output_uses_replacement_characters(self):
+        result = CommandRunner().run(
+            (
+                sys.executable,
+                "-c",
+                (
+                    "import sys; "
+                    "sys.stdout.buffer.write(b'out-\\xff-\\xfe'); "
+                    "sys.stderr.buffer.write(b'err-\\xff-\\xfe')"
+                ),
+            ),
+            timeout=5,
+            cwd=Path.cwd(),
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("out-\ufffd-\ufffd", result.stdout)
+        self.assertIn("err-\ufffd-\ufffd", result.stderr)
 
     def test_output_truncation_keeps_tail_of_both_streams(self):
         result = CommandRunner().run(
@@ -169,12 +193,53 @@ class RunnerTests(unittest.TestCase):
                 timeout=0.4,
                 cwd=Path.cwd(),
             )
+            time.sleep(0.05)
             first = heartbeat.read_text(encoding="utf-8") if heartbeat.exists() else ""
             time.sleep(0.25)
             second = heartbeat.read_text(encoding="utf-8") if heartbeat.exists() else ""
         self.assertTrue(result.timed_out)
         self.assertNotEqual(first, "")
         self.assertEqual(first, second)
+
+    def test_posix_timeout_permission_error_falls_back_to_direct_process_signals(self):
+        class FakeProcess:
+            pid = 12345
+            returncode = None
+
+            def __init__(self):
+                self.communicate_calls = 0
+                self.terminated = False
+                self.killed = False
+
+            def communicate(self, timeout=None):
+                self.communicate_calls += 1
+                if self.communicate_calls <= 2:
+                    raise subprocess.TimeoutExpired(cmd=("tool",), timeout=timeout)
+                self.returncode = -9
+                return ("posix stdout", "posix stderr")
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+        fake_process = FakeProcess()
+        with mock.patch("helper.runner._is_windows", return_value=False), \
+                mock.patch("helper.runner.subprocess.Popen", return_value=fake_process), \
+                mock.patch("helper.runner.os.killpg", side_effect=[PermissionError, PermissionError]) as killpg:
+            result = CommandRunner().run(("tool", "arg"), timeout=0.1, cwd=Path.cwd())
+
+        self.assertTrue(result.timed_out)
+        self.assertEqual(result.returncode, -9)
+        self.assertEqual(result.stdout, "posix stdout")
+        self.assertEqual(result.stderr, "posix stderr")
+        self.assertTrue(fake_process.terminated)
+        self.assertTrue(fake_process.killed)
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(fake_process.pid, signal.SIGTERM), mock.call(fake_process.pid, signal.SIGKILL)],
+        )
 
     def test_windows_timeout_uses_process_group_break_then_kill_with_mocks(self):
         class FakeProcess:
@@ -210,6 +275,8 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(fake_process.killed)
         kwargs = popen.call_args.kwargs
         self.assertFalse(kwargs["shell"])
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["errors"], "replace")
         self.assertNotIn("start_new_session", kwargs)
         self.assertEqual(kwargs["creationflags"], getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
 
