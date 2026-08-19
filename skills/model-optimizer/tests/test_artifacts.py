@@ -45,6 +45,46 @@ class ArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "artifact_unknown_schema"):
                 load_inventory(path)
 
+    def test_malformed_inventory_parse_and_shape_errors_are_bounded_value_errors(self):
+        attacker = "attacker-controlled-secret"
+        malformed_values = (
+            ("invalid-json", "{" + attacker),
+            ("primitive-root", json.dumps(7)),
+            ("list-root", json.dumps([])),
+            ("schema-correct-missing-fields", json.dumps({"schema": "model-optimizer.inventory/v1"})),
+            ("malformed-nested-shape", json.dumps({
+                "schema": "model-optimizer.inventory/v1",
+                "created_at": "1970-01-01T00:00:00Z",
+                "runtime": [],
+                "sources": [],
+                "current_assignments": [],
+                "catalog_local": {"attacker": attacker},
+                "provider_readiness": [],
+                "exclusions": [],
+                "warnings": [],
+                "digest": "sha256:not-a-valid-digest",
+            })),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "inventory.json"
+            for name, text in malformed_values:
+                path.write_text(text, encoding="utf-8")
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, r"artifact_(invalid_json|invalid_shape)") as caught:
+                        load_inventory(path)
+                    self.assertNotIn(attacker, str(caught.exception))
+
+    def test_inventory_invalid_utf8_is_bounded_stable_artifact_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "inventory.json"
+            path.write_bytes(b'\xff\xfe{"schema":"model-optimizer.inventory/v1","secret":"raw-secret"}')
+            with self.assertRaisesRegex(ValueError, "artifact_invalid_encoding") as caught:
+                load_inventory(path)
+        message = str(caught.exception)
+        self.assertNotIn("utf-8", message)
+        self.assertNotIn("codec", message)
+        self.assertNotIn("raw-secret", message)
+
     def test_current_assignment_options_are_deeply_immutable_and_alias_safe(self):
         options = {
             "reasoning": {"effort": "high"},
