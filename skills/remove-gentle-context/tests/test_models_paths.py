@@ -1,0 +1,52 @@
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+from helper.canonical import canonical_bytes, digest_json
+from helper.models import ArtifactClass, Candidate, Ownership, PlatformProfile
+from helper.paths import assert_safe_target, resolve_state_root
+
+
+class ModelsAndPathsTests(unittest.TestCase):
+    def test_canonical_digest_ignores_mapping_insertion_order(self):
+        left = {"b": 2, "a": 1}
+        right = {"a": 1, "b": 2}
+        self.assertEqual(canonical_bytes(left), b'{"a":1,"b":2}')
+        self.assertEqual(digest_json(left), digest_json(right))
+
+    def test_candidate_serializes_only_json_values(self):
+        candidate = Candidate(
+            candidate_id="sha256:abc",
+            client="codex",
+            path="/tmp/config.toml",
+            artifact_class=ArtifactClass.ACTIVE_SOURCE,
+            evidence=({"kind": "linked_selector", "value": "gentle-dev"},),
+            ownership=Ownership.PROVEN,
+            proposed_action="write_file",
+            preimage=None,
+            dependencies=(),
+            reason="profile and selector are linked",
+            details={},
+        )
+        self.assertEqual(candidate.to_dict()["ownership"], "proven")
+
+    def test_state_root_uses_platform_conventions(self):
+        self.assertEqual(
+            resolve_state_root(PlatformProfile("linux", Path("/home/u"), {"XDG_STATE_HOME": "/state"})),
+            Path("/state/remove-gentle-context"),
+        )
+        self.assertEqual(
+            resolve_state_root(PlatformProfile("windows", Path("C:/Users/u"), {"LOCALAPPDATA": "C:/Local"})),
+            Path("C:/Local/remove-gentle-context/state"),
+        )
+
+    def test_safe_target_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            real = root / "real.json"
+            real.write_text("{}")
+            link = root / "link.json"
+            link.symlink_to(real)
+            with self.assertRaisesRegex(ValueError, "preflight_unexpected_link"):
+                assert_safe_target(link, (root,))
