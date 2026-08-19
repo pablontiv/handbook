@@ -56,7 +56,23 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertEqual(ready[0].provider, "UNKNOWN")
         self.assertEqual(ready[0].status, ReadinessStatus.UNKNOWN)
         self.assertEqual(ready[0].reason_code, "auth_unknown_provider_label")
+        self.assertIsNone(ready[0].auth_type)
         self.assertNotIn("sk-do-not-leak", json.dumps([item.to_dict() for item in ready]))
+
+    def test_auth_type_uses_safe_vocabulary_and_unknown_provider_never_persists_method(self):
+        cases = (
+            ("OpenAI oauth\n", "openai", "oauth"),
+            ("OpenAI api\n", "openai", "api"),
+            ("OpenAI sk-live-api-key-shaped-value\n", "openai", None),
+            ("Mystery api\n", "UNKNOWN", None),
+            ("Mystery sk-live-api-key-shaped-value\n", "UNKNOWN", None),
+        )
+        for text, provider, auth_type in cases:
+            with self.subTest(text=text):
+                ready = parse_opencode_auth(text)
+                self.assertEqual(ready[0].provider, provider)
+                self.assertEqual(ready[0].auth_type, auth_type)
+                self.assertNotIn("sk-live-api-key-shaped-value", json.dumps(ready[0].to_dict()))
 
     def test_verbose_models_preserve_family_cache_vision_and_variants(self):
         models = parse_opencode_models_verbose(fixture_text("opencode/models-verbose.txt"))
@@ -82,6 +98,76 @@ openai/gpt-5.6-terra
         serialized = json.dumps(models[0].to_dict(), allow_nan=False)
         self.assertNotIn("Infinity", serialized)
         self.assertNotIn("NaN", serialized)
+
+    def test_verbose_models_require_positive_limits_and_non_negative_costs(self):
+        huge_json_integer = "1" + ("0" * 400)
+        text = f"""\
+openai/gpt-zero
+{{"id":"gpt-zero","providerID":"openai","limit":{{"context":0,"output":-5}},"cost":{{"input":0,"output":-0.25,"cache":{{"read":-1,"write":0}}}}}}
+nan/qwen-path
+{{"id":"qwen-path","providerID":"nan","limit":{{"context":{huge_json_integer},"output":Infinity}},"cost":{{"input":{huge_json_integer},"output":NaN,"cache":{{"read":{huge_json_integer},"write":Infinity}}}}}}
+"""
+        models = parse_opencode_models_verbose(text)
+        by_id = {model.exact_id: model for model in models}
+        zero = by_id["openai/gpt-zero"]
+        self.assertIsNone(zero.context_window)
+        self.assertIsNone(zero.max_output)
+        self.assertEqual(zero.input_cost, 0)
+        self.assertIsNone(zero.output_cost)
+        self.assertIsNone(zero.cache_read)
+        self.assertEqual(zero.cache_write, 0)
+        pathological = by_id["nan/qwen-path"]
+        self.assertIsNone(pathological.context_window)
+        self.assertIsNone(pathological.max_output)
+        self.assertIsNone(pathological.input_cost)
+        self.assertIsNone(pathological.output_cost)
+        self.assertIsNone(pathological.cache_read)
+        self.assertIsNone(pathological.cache_write)
+        json.dumps([model.to_dict() for model in models], allow_nan=False)
+
+    def test_verbose_models_reject_non_integral_positive_limits_without_truncation(self):
+        text = """\
+openai/gpt-fractional
+{"id":"gpt-fractional","providerID":"openai","limit":{"context":0.5,"output":2.0}}
+"""
+        models = parse_opencode_models_verbose(text)
+        self.assertEqual(len(models), 1)
+        self.assertIsNone(models[0].context_window)
+        self.assertEqual(models[0].max_output, 2)
+
+    def test_verbose_models_exclude_non_active_and_invalid_status_with_stable_warnings(self):
+        text = """\
+openai/gpt-active
+{"id":"gpt-active","providerID":"openai","status":"active"}
+openai/gpt-missing
+{"id":"gpt-missing","providerID":"openai"}
+openai/gpt-old
+{"id":"gpt-old","providerID":"openai","status":"deprecated"}
+nan/qwen-old
+{"id":"qwen-old","providerID":"nan","status":"inactive"}
+nan/qwen-invalid
+{"id":"qwen-invalid","providerID":"nan","status":{"value":"sk-status-secret"}}
+"""
+        adapter = OpenCodeAdapter(FakeRunner.stdout(text))
+        models = adapter.list_models(self.context)
+        self.assertEqual([model.exact_id for model in models], ["openai/gpt-active", "openai/gpt-missing"])
+        self.assertIn("inventory_model_status_excluded:openai/gpt-old", adapter.warnings)
+        self.assertIn("inventory_model_status_excluded:nan/qwen-old", adapter.warnings)
+        self.assertIn("inventory_model_status_invalid:nan/qwen-invalid", adapter.warnings)
+        serialized_warnings = json.dumps(adapter.warnings)
+        self.assertNotIn("deprecated", serialized_warnings)
+        self.assertNotIn("inactive", serialized_warnings)
+        self.assertNotIn("sk-status-secret", serialized_warnings)
+
+    def test_verbose_models_report_identity_mismatch_before_inactive_status(self):
+        text = """\
+openai/gpt-old
+{"id":"wrong-id","providerID":"openai","status":"deprecated"}
+"""
+        adapter = OpenCodeAdapter(FakeRunner.stdout(text))
+        self.assertEqual(adapter.list_models(self.context), ())
+        self.assertIn("inventory_model_id_mismatch:openai/gpt-old", adapter.warnings)
+        self.assertNotIn("inventory_model_status_excluded:openai/gpt-old", adapter.warnings)
 
     def test_verbose_models_accept_pretty_nested_json_and_validate_exact_id(self):
         text = """\
@@ -143,6 +229,37 @@ openai/gpt-5.6-terra
         self.assertEqual(worker.options, {})
         self.assertEqual(worker.source, "project:opencode.json")
 
+    def test_snapshot_recursively_prunes_secret_named_keys_from_structural_options(self):
+        self._write_project_config(json.dumps({
+            "agent": {
+                "worker": {
+                    "model": "nan/qwen3.6",
+                    "textVerbosity": {
+                        "safe": "keep",
+                        "apiKey": "sk-nested-secret",
+                        "nested": [
+                            {"token": "tok-secret", "safe": "sibling"},
+                            {"authorization": "Bearer secret"},
+                            {"list": [{"safe": []}, {"clientSecret": "secret-value"}]},
+                        ],
+                    },
+                    "reasoningEffort": [{"password": "pw-secret", "safe": "low"}, {"credential": "cred-secret"}],
+                }
+            }
+        }))
+        snapshot = OpenCodeAdapter(FakeRunner.stdout("1.18.18\n")).snapshot(self.context)
+        assignment = snapshot.current_assignments[0].to_dict()
+        self.assertEqual(assignment["options"], {
+            "reasoningEffort": [{"safe": "low"}, {}],
+            "textVerbosity": {
+                "nested": [{"safe": "sibling"}, {}, {"list": [{"safe": []}, {}]}],
+                "safe": "keep",
+            },
+        })
+        serialized = json.dumps(assignment)
+        for secret in ("sk-nested-secret", "tok-secret", "Bearer secret", "secret-value", "pw-secret", "cred-secret"):
+            self.assertNotIn(secret, serialized)
+
     def test_live_check_uses_json_events_and_supported_variant(self):
         runner = FakeRunner.stdout('{"type":"text","part":{"text":"PONG"}}\n')
         model = ModelRecord(
@@ -197,6 +314,23 @@ openai/gpt-5.6-terra
         self.assertNotIn("auth.json", check.detail)
         self.assertLessEqual(len(check.detail), 240)
 
+    def test_session_and_ref_redaction_accepts_case_insensitive_dash_or_underscore_forms(self):
+        event = {
+            "type": "error",
+            "error": {
+                "data": {
+                    "message": "refs SES-DASH Err_Dash ses_under err-under should be redacted",
+                },
+            },
+        }
+        runner = FakeRunner.stdout(json.dumps(event) + "\n")
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+        check = OpenCodeAdapter(runner).live_check(model, "low", "PONG", 60, self.context)
+        self.assertEqual(check.status, HealthStatus.FAIL)
+        self.assertEqual(check.reason_code, "live_runtime_error")
+        for token in ("SES-DASH", "Err_Dash", "ses_under", "err-under"):
+            self.assertNotIn(token, check.detail)
+
     def test_live_event_parser_concatenates_only_text_part_text_for_sentinel(self):
         events = "\n".join((
             '{"type":"text","part":{"text":"PO"}}',
@@ -204,6 +338,27 @@ openai/gpt-5.6-terra
             '{"type":"message","text":"PONG should not matter"}',
         ))
         matched, reason = parse_opencode_live_events(events, "PONG")
+        self.assertTrue(matched)
+        self.assertEqual(reason, "live_sentinel_matched")
+
+    def test_live_event_parser_rejects_empty_sentinel(self):
+        matched, reason = parse_opencode_live_events('{"type":"text","part":{"text":"anything"}}\n', "")
+        self.assertFalse(matched)
+        self.assertEqual(reason, "live_invalid_sentinel")
+
+    def test_live_event_parser_rejects_whitespace_only_sentinel(self):
+        matched, reason = parse_opencode_live_events('{"type":"text","part":{"text":"   "}}\n', "   ")
+        self.assertFalse(matched)
+        self.assertEqual(reason, "live_invalid_sentinel")
+
+    def test_primitive_jsonl_events_are_ignored_without_masking_later_text(self):
+        primitive_only = '123\ntrue\n"PONG"\n["PONG"]\n'
+        matched, reason = parse_opencode_live_events(primitive_only, "PONG")
+        self.assertFalse(matched)
+        self.assertEqual(reason, "live_empty_response")
+
+        mixed = primitive_only + '{"type":"text","part":{"text":"PONG"}}\n'
+        matched, reason = parse_opencode_live_events(mixed, "PONG")
         self.assertTrue(matched)
         self.assertEqual(reason, "live_sentinel_matched")
 
@@ -220,6 +375,24 @@ openai/gpt-5.6-terra
         check = OpenCodeAdapter(runner).live_check(model, "max", "PONG", 60, self.context)
         self.assertEqual(check.status, HealthStatus.FAIL)
         self.assertEqual(check.reason_code, "live_unsupported_variant")
+        self.assertEqual(runner.argv, [])
+
+    def test_empty_sentinel_fails_without_consuming_runner_response(self):
+        runner = FakeRunner.stdout('{"type":"text","part":{"text":"anything"}}\n')
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+        check = OpenCodeAdapter(runner).live_check(model, "low", "", 60, self.context)
+        self.assertEqual(check.status, HealthStatus.FAIL)
+        self.assertEqual(check.reason_code, "live_invalid_sentinel")
+        self.assertFalse(check.response_matched)
+        self.assertEqual(runner.argv, [])
+
+    def test_whitespace_only_sentinel_fails_without_consuming_runner_response(self):
+        runner = FakeRunner.stdout('{"type":"text","part":{"text":"   "}}\n')
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+        check = OpenCodeAdapter(runner).live_check(model, "low", "   ", 60, self.context)
+        self.assertEqual(check.status, HealthStatus.FAIL)
+        self.assertEqual(check.reason_code, "live_invalid_sentinel")
+        self.assertFalse(check.response_matched)
         self.assertEqual(runner.argv, [])
 
     def test_live_nonzero_maps_known_model_errors_to_bounded_reason_codes(self):

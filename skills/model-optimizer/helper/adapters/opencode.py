@@ -34,10 +34,10 @@ DISPLAY_TO_PROVIDER = {
 }
 
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_AUTH_TYPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,63}$")
+_SAFE_AUTH_TYPES = frozenset({"api", "oauth"})
 _EXACT_ID_RE = re.compile(r"^[^\s/{]+/[^\s/{]+$")
 _SECRET_KEY_RE = re.compile(r"token|key|secret|password|cookie|authorization|credential", re.IGNORECASE)
-_SESSION_OR_REF_RE = re.compile(r"\b(?:ses|err)_[A-Za-z0-9_-]+\b")
+_SESSION_OR_REF_RE = re.compile(r"\b(?:ses|err)[_-][A-Za-z0-9_-]+\b", re.IGNORECASE)
 _AUTH_PATH_RE = re.compile(r"(?:~|/[^\s]+)?(?:/\.local/share/opencode/auth\.json|opencode/auth\.json)")
 _STRUCTURAL_AGENT_KEYS = {"variant", "temperature", "top_p", "steps", "reasoningEffort", "textVerbosity"}
 _DEFAULT_TIMEOUT_SECONDS = 15
@@ -78,9 +78,10 @@ def _redact_diagnostic(text: str) -> str:
 def _auth_type_or_none(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
-    if not _AUTH_TYPE_RE.fullmatch(value):
+    normalized = value.strip().lower()
+    if normalized not in _SAFE_AUTH_TYPES:
         return None
-    return value
+    return normalized
 
 
 def parse_opencode_auth(text: str) -> tuple[ProviderReadiness, ...]:
@@ -102,7 +103,7 @@ def parse_opencode_auth(text: str) -> tuple[ProviderReadiness, ...]:
             readiness.append(ProviderReadiness(
                 "UNKNOWN",
                 ReadinessStatus.UNKNOWN,
-                _auth_type_or_none(auth_type),
+                None,
                 "auth_unknown_provider_label",
             ))
             continue
@@ -153,6 +154,10 @@ def _parse_opencode_models_verbose_with_warnings(text: str) -> tuple[tuple[Model
         if record is None:
             _append_unique(warnings, f"inventory_model_id_mismatch:{exact_id}")
             continue
+        status_warning = _model_status_warning(exact_id, value)
+        if status_warning:
+            _append_unique(warnings, status_warning)
+            continue
         records.append(record)
     return tuple(records), tuple(warnings)
 
@@ -172,6 +177,17 @@ def _find_next_exact_id_line(lines: Sequence[str], start: int) -> int | None:
     for index in range(start, len(lines)):
         if _is_exact_id_line(lines[index].strip()):
             return index
+    return None
+
+
+def _model_status_warning(exact_id: str, value: Any) -> str | None:
+    if not isinstance(value, Mapping) or "status" not in value:
+        return None
+    status = value.get("status")
+    if not isinstance(status, str):
+        return f"inventory_model_status_invalid:{exact_id}"
+    if status.lower() != "active":
+        return f"inventory_model_status_excluded:{exact_id}"
     return None
 
 
@@ -221,6 +237,8 @@ def parse_opencode_live_events(text: str, sentinel: str) -> tuple[bool, str]:
 
 
 def _parse_opencode_live_events_detail(text: str, sentinel: str) -> tuple[bool, str, str]:
+    if not isinstance(sentinel, str) or sentinel.strip() == "":
+        return False, "live_invalid_sentinel", "invalid sentinel"
     chunks: list[str] = []
     saw_text_event = False
     saw_event = False
@@ -298,27 +316,29 @@ def _string_or_none(value: Any) -> str | None:
 
 
 def _int_or_none(value: Any) -> int | None:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and math.isfinite(value):
-        return int(value)
-    return None
+    try:
+        converted = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(converted) or converted <= 0:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return int(value)
 
 
 def _float_or_none(value: Any) -> float | None:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if isinstance(value, float):
-        return value if math.isfinite(value) else None
-    if isinstance(value, int):
-        try:
-            converted = float(value)
-        except OverflowError:
-            return None
-        return converted if math.isfinite(converted) else None
-    return None
+    try:
+        converted = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(converted) or converted < 0:
+        return None
+    return converted
 
 
 def _append_unique(items: list[str], value: str) -> None:
@@ -338,6 +358,20 @@ def _is_json_structural(value: Any) -> bool:
 
 def _is_secret_key(key: str) -> bool:
     return bool(_SECRET_KEY_RE.search(key))
+
+
+def _prune_secret_named_keys(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _prune_secret_named_keys(item)
+            for key, item in value.items()
+            if isinstance(key, str) and not _is_secret_key(key)
+        }
+    if isinstance(value, list):
+        return [_prune_secret_named_keys(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_prune_secret_named_keys(item) for item in value)
+    return value
 
 
 def _load_json(path: Path) -> tuple[Any | None, str | None]:
@@ -377,7 +411,7 @@ def _assignments_from_config(value: Any, source: str) -> tuple[CurrentAssignment
         if not model:
             continue
         options = {
-            key: option
+            key: _prune_secret_named_keys(option)
             for key, option in config.items()
             if key in _STRUCTURAL_AGENT_KEYS and not _is_secret_key(key) and _is_json_structural(option)
         }
@@ -479,6 +513,16 @@ class OpenCodeAdapter:
         timeout: float,
         context: RuntimeContext,
     ) -> HealthCheck:
+        if not isinstance(sentinel, str) or sentinel.strip() == "":
+            return HealthCheck(
+                model=model_record.exact_id,
+                effort=effort,
+                status=HealthStatus.FAIL,
+                elapsed_ms=0,
+                reason_code="live_invalid_sentinel",
+                response_matched=False,
+                detail="invalid sentinel",
+            )
         if effort is not None and effort not in model_record.variants:
             return HealthCheck(
                 model=model_record.exact_id,
