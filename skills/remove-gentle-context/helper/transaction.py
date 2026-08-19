@@ -561,18 +561,26 @@ def _read_all_from_fd(fd: int) -> bytes:
 
 
 def _same_file_identity(before: os.stat_result, after: os.stat_result) -> bool:
-    compared = False
-    for attribute in ("st_dev", "st_ino"):
-        before_value = getattr(before, attribute, None)
-        after_value = getattr(after, attribute, None)
-        if before_value is None or after_value is None:
-            continue
-        compared = True
-        if before_value != after_value:
-            return False
-    if compared:
-        return True
-    return before == after
+    before_inode = _reliable_stat_integer(getattr(before, "st_ino", None))
+    after_inode = _reliable_stat_integer(getattr(after, "st_ino", None))
+    if before_inode is None or after_inode is None:
+        return False
+    if before_inode != after_inode:
+        return False
+
+    before_device = _reliable_stat_integer(getattr(before, "st_dev", None))
+    after_device = _reliable_stat_integer(getattr(after, "st_dev", None))
+    if before_device is not None and after_device is not None and before_device != after_device:
+        return False
+    return True
+
+
+def _reliable_stat_integer(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value <= 0:
+        return None
+    return value
 
 
 def _safe_lstat(path: Path) -> os.stat_result:

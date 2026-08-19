@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -13,7 +14,7 @@ from unittest.mock import patch
 from helper.canonical import digest_json
 from helper.models import Operation, OperationKind, Plan, PlatformProfile, ReceiptStatus, RuntimeContext
 from helper.paths import resolve_state_root
-from helper.transaction import apply_operations, create_backup, execute_plan, restore
+from helper.transaction import _same_file_identity, apply_operations, create_backup, execute_plan, restore
 
 
 class NoopLifecycle:
@@ -100,6 +101,32 @@ def injected_unlink_failure(target: Path):
         yield
 
 
+class SyntheticStat:
+    def __init__(self, *, st_mode: int = stat.S_IFREG | 0o600, st_size: int = 0, st_ino: object = 1, st_dev: object = 1) -> None:
+        self.st_mode = st_mode
+        self.st_size = st_size
+        if st_ino != "missing":
+            self.st_ino = st_ino
+        if st_dev != "missing":
+            self.st_dev = st_dev
+
+
+class FileIdentityTests(unittest.TestCase):
+    def test_same_file_identity_requires_reliable_nonzero_inode(self):
+        self.assertFalse(_same_file_identity(SyntheticStat(st_ino=0, st_dev=1), SyntheticStat(st_ino=0, st_dev=1)))
+        self.assertFalse(_same_file_identity(SyntheticStat(st_ino="missing", st_dev=1), SyntheticStat(st_ino=1, st_dev=1)))
+        self.assertFalse(_same_file_identity(SyntheticStat(st_ino="abc", st_dev=1), SyntheticStat(st_ino="abc", st_dev=1)))
+
+    def test_same_file_identity_compares_inode_and_reliable_device(self):
+        self.assertTrue(_same_file_identity(SyntheticStat(st_ino=7, st_dev=3), SyntheticStat(st_ino=7, st_dev=3)))
+        self.assertFalse(_same_file_identity(SyntheticStat(st_ino=7, st_dev=3), SyntheticStat(st_ino=8, st_dev=3)))
+        self.assertFalse(_same_file_identity(SyntheticStat(st_ino=7, st_dev=3), SyntheticStat(st_ino=7, st_dev=4)))
+
+    def test_same_file_identity_accepts_stable_inode_when_device_is_zero(self):
+        self.assertTrue(_same_file_identity(SyntheticStat(st_ino=7, st_dev=0), SyntheticStat(st_ino=7, st_dev=0)))
+        self.assertTrue(_same_file_identity(SyntheticStat(st_ino=7, st_dev="missing"), SyntheticStat(st_ino=7, st_dev="missing")))
+
+
 class TransactionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -126,6 +153,28 @@ class TransactionTests(unittest.TestCase):
             create_backup(plan, self.context)
 
         self.assertEqual(target.read_text(), "drift")
+        self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
+
+    def test_zero_inode_aborts_before_backup_or_mutation(self):
+        target = self.make_file("zero-inode.txt", "before")
+        plan = write_plan(target, b"before", b"after")
+        original_lstat = os.lstat
+        original_fstat = os.fstat
+
+        def zero_inode_stat(stat_result: os.stat_result) -> SyntheticStat:
+            return SyntheticStat(st_mode=stat_result.st_mode, st_size=stat_result.st_size, st_ino=0, st_dev=stat_result.st_dev)
+
+        def lstat_with_zero_inode(path, *args, **kwargs):
+            stat_result = original_lstat(path, *args, **kwargs)
+            if Path(path) == target:
+                return zero_inode_stat(stat_result)
+            return stat_result
+
+        with patch("helper.transaction.os.lstat", side_effect=lstat_with_zero_inode), patch("helper.transaction.os.fstat", side_effect=lambda fd: zero_inode_stat(original_fstat(fd))):
+            with self.assertRaisesRegex(ValueError, "preflight_preimage_drift"):
+                create_backup(plan, self.context)
+
+        self.assertEqual(target.read_text(), "before")
         self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
 
     def test_second_write_failure_rolls_back_first_write(self):
@@ -322,6 +371,28 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
         replacement_manifest = json.loads(receipt.backup_manifest_path.read_text())
         self.assertEqual(replacement_manifest["entries"][0]["sha256"], sha256_bytes(b"replacement"))
+
+    def test_restore_replacement_zero_inode_aborts_before_mutation(self):
+        target = self.make_file("restore-zero-inode.txt", "before")
+        manifest = create_backup(delete_plan(target, b"before"), self.context)
+        target.write_text("replacement")
+        original_lstat = os.lstat
+        original_fstat = os.fstat
+
+        def zero_inode_stat(stat_result: os.stat_result) -> SyntheticStat:
+            return SyntheticStat(st_mode=stat_result.st_mode, st_size=stat_result.st_size, st_ino=0, st_dev=stat_result.st_dev)
+
+        def lstat_with_zero_inode(path, *args, **kwargs):
+            stat_result = original_lstat(path, *args, **kwargs)
+            if Path(path) == target:
+                return zero_inode_stat(stat_result)
+            return stat_result
+
+        with patch("helper.transaction.os.lstat", side_effect=lstat_with_zero_inode), patch("helper.transaction.os.fstat", side_effect=lambda fd: zero_inode_stat(original_fstat(fd))):
+            with self.assertRaisesRegex(ValueError, "restore_replacement_preimage_drift"):
+                restore(manifest.path, manifest.digest or "", self.context)
+
+        self.assertEqual(target.read_text(), "replacement")
 
     def test_restore_failure_rolls_back_replacement_file(self):
         first = self.make_file("restore-first.txt", "before-one")
