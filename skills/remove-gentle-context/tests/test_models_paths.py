@@ -6,7 +6,7 @@ from unittest.mock import patch
 from helper import Plan, Receipt, ReceiptStatus
 from helper.canonical import canonical_bytes, digest_json
 from helper.models import ArtifactClass, Candidate, Ownership, PlatformProfile
-from helper.paths import assert_safe_target, resolve_state_root
+from helper.paths import _is_windows_reparse_point, assert_safe_target, resolve_state_root
 
 
 class ModelsAndPathsTests(unittest.TestCase):
@@ -48,11 +48,40 @@ class ModelsAndPathsTests(unittest.TestCase):
         self.assertEqual(plan.digest, digest_json({}))
         self.assertNotIn("digest", plan.to_unsigned_dict())
 
-    def test_package_star_import_excludes_internal_helpers(self):
+    def test_package_public_api_matches_deliberate_contract(self):
         namespace = {}
         exec("from helper import *", namespace)
-        self.assertNotIn("Path", namespace)
-        self.assertNotIn("dataclass", namespace)
+        public_names = {name for name in namespace if not name.startswith("_")}
+        self.assertEqual(
+            public_names,
+            {
+                "ArtifactClass",
+                "BackupManifest",
+                "Candidate",
+                "Check",
+                "CompletedCommand",
+                "Inventory",
+                "LifecycleAction",
+                "LifecycleOutcome",
+                "Operation",
+                "OperationKind",
+                "OperationOutcome",
+                "Ownership",
+                "Plan",
+                "PlatformProfile",
+                "Preimage",
+                "PreservationAssertion",
+                "ProcessSnapshot",
+                "Receipt",
+                "ReceiptStatus",
+                "RuntimeContext",
+                "VerificationResult",
+                "assert_safe_target",
+                "canonical_bytes",
+                "digest_json",
+                "resolve_state_root",
+            },
+        )
 
     def test_receipt_serializes_stage_fields(self):
         receipt = Receipt(status=ReceiptStatus.COMPLETED)
@@ -72,13 +101,18 @@ class ModelsAndPathsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "preflight_unexpected_link"):
                 assert_safe_target(link, (root,))
 
+    def test_windows_reparse_predicate_uses_st_file_attributes(self):
+        self.assertTrue(_is_windows_reparse_point(type("Stat", (), {"st_file_attributes": 0x400})()))
+        self.assertFalse(_is_windows_reparse_point(type("Stat", (), {"st_file_attributes": 0})()))
+        self.assertFalse(_is_windows_reparse_point(type("Stat", (), {})()))
+
     def test_safe_target_rejects_windows_reparse_point(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             target = root / "reparse.json"
             target.write_text("{}")
             fake_stat = type("Stat", (), {"st_file_attributes": 0x400, "st_mode": 0})()
-            with patch("helper.paths.os.lstat", return_value=fake_stat), patch("pathlib.Path.resolve", return_value=target), patch.object(Path, "is_symlink", return_value=False):
+            with patch("helper.paths.os.lstat", return_value=fake_stat), patch.object(Path, "resolve", return_value=target), patch.object(Path, "is_symlink", return_value=False):
                 with self.assertRaisesRegex(ValueError, "preflight_unexpected_link"):
                     assert_safe_target(target, (root,))
 
