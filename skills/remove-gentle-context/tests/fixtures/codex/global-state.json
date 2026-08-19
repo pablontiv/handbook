@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "activePermissionProfile": {
+    "id": "gentle-dev",
+    "extends": null
+  },
+  "sandbox": {
+    "mode": "workspace-write",
+    "approvals": "on-request"
+  },
+  "threads": [
+    {
+      "id": "thread-a",
+      "activePermissionProfile": {
+        "id": "gentle-dev",
+        "extends": null
+      },
+      "messages": [
+        {
+          "id": "message-a1",
+          "role": "user",
+          "metadata": {
+            "trace": "keep-a1"
+          }
+        }
+      ]
+    },
+    {
+      "id": "thread-b",
+      "activePermissionProfile": null,
+      "messages": [
+        {
+          "id": "message-b1",
+          "role": "assistant",
+          "metadata": {
+            "trace": "keep-b1",
+            "activePermissionProfile": {
+              "id": "custom-profile",
+              "extends": null
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "profiles": [
+    {
+      "id": "custom-profile",
+      "extends": null,
+      "label": "User profile"
+    }
+  ]
+}

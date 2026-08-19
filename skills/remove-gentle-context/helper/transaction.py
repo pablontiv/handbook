@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fnmatch
 import json
 import os
 import stat
@@ -28,6 +29,7 @@ class OperationApplyError(RuntimeError):
 def create_backup(plan: Plan, context: RuntimeContext) -> BackupManifest:
     plan_digest = _require_digest(plan.digest, "backup_plan_missing_digest")
     _assert_plan_root_map_matches_context(plan, context, "backup_plan_roots_mismatch")
+    _validate_plan_preconditions(plan, context, drift_code="preflight_directory_members_drift")
     prepared = [_prepare_backup_entry(index, operation, context) for index, operation in enumerate(plan.operations)]
     root = _new_transaction_root("backups", plan_digest, context)
     entries: list[BackupEntry] = []
@@ -159,6 +161,7 @@ def _lifecycle_preflight(plan: Plan, context: RuntimeContext, lifecycle: object)
 
 
 def _validate_plan_preimages(plan: Plan, context: RuntimeContext, *, drift_code: str) -> None:
+    _validate_plan_preconditions(plan, context, drift_code=drift_code if drift_code != "preflight_preimage_drift" else "preflight_directory_members_drift")
     for index, operation in enumerate(plan.operations):
         try:
             _prepare_backup_entry(index, operation, context)
@@ -168,6 +171,64 @@ def _validate_plan_preimages(plan: Plan, context: RuntimeContext, *, drift_code:
             raise
 
 
+def _validate_plan_preconditions(plan: Plan, context: RuntimeContext, *, drift_code: str) -> None:
+    for operation in plan.operations:
+        raw = operation.details.get("directory_member_preconditions")
+        if raw is None:
+            continue
+        if not isinstance(raw, Iterable) or isinstance(raw, (str, bytes, dict)):
+            raise ValueError("preflight_invalid_directory_member_precondition")
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("preflight_invalid_directory_member_precondition")
+            if item.get("kind") != "directory_member_set":
+                continue
+            root_id = item.get("root_id")
+            relative_dir = item.get("relative_dir")
+            expected_digest = item.get("digest")
+            if not isinstance(root_id, str) or not isinstance(relative_dir, str) or not isinstance(expected_digest, str):
+                raise ValueError("preflight_invalid_directory_member_precondition")
+            names = _string_tuple(item.get("file_names", ()), "preflight_invalid_directory_member_precondition")
+            patterns = _string_tuple(item.get("patterns", ()), "preflight_invalid_directory_member_precondition")
+            directory = path_from_root_relative(root_id, relative_dir, context, error_code="preflight_path_escape")
+            actual_members = _directory_member_set(directory, names, patterns)
+            actual_digest = digest_json({"members": actual_members})
+            if actual_digest != expected_digest:
+                raise ValueError(drift_code)
+
+
+def _string_tuple(value: object, code: str) -> tuple[str, ...]:
+    if not isinstance(value, Iterable) or isinstance(value, (str, bytes, dict)):
+        raise ValueError(code)
+    items = tuple(value)  # type: ignore[arg-type]
+    if not all(isinstance(item, str) for item in items):
+        raise ValueError(code)
+    return items
+
+
+def _directory_member_set(directory: Path, names: tuple[str, ...], patterns: tuple[str, ...]) -> list[dict[str, object]]:
+    members: list[dict[str, object]] = []
+    if not directory.is_dir():
+        return members
+    governed_names = set(names)
+    for child in sorted(directory.iterdir(), key=lambda item: item.name):
+        if child.name not in governed_names and not any(fnmatch.fnmatchcase(child.name, pattern) for pattern in patterns):
+            continue
+        try:
+            st = os.lstat(child)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(st.st_mode) or _is_windows_reparse_point(st):
+            members.append({"name": child.name, "type": "link_or_reparse"})
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            members.append({"name": child.name, "type": "non_regular"})
+            continue
+        content = child.read_bytes()
+        members.append({"name": child.name, "sha256": _sha256(content), "type": "file"})
+    return members
+
+
 def _is_preimage_state_error(code: str) -> bool:
     return code in {
         "preflight_preimage_drift",
@@ -175,6 +236,7 @@ def _is_preimage_state_error(code: str) -> bool:
         "preflight_unexpected_link",
         "preflight_not_regular_file",
         "preflight_not_directory",
+        "preflight_directory_members_drift",
     }
 
 

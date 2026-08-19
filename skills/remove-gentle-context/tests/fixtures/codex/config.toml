@@ -1,0 +1,28 @@
+# Codex configuration fixture
+# This root selector is owned only when it points at the recognized Gentle profile.
+default_permissions = "gentle-dev"
+theme = "dark"
+
+[mcp_servers.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem"]
+
+[permissions.other]
+description = "User-owned custom profile"
+
+[permissions.gentle-dev]
+description = "Gentle development permissions managed by gentle-ai"
+managed_by = "gentle-ai"
+
+[mcp_servers.git]
+command = "uvx"
+args = ["mcp-server-git"]
+
+[permissions.gentle-dev.filesystem]
+allow = ["read", "write"]
+
+[permissions.other.nested]
+allow = ["keep"]
+
+[permissions.gentle-dev.network]
+allow = ["localhost"]
