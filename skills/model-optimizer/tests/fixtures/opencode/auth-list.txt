@@ -1,0 +1,5 @@
+[1mCredentials ~/.local/share/opencode/auth.json[0m
+[32mOpenAI[0m oauth
+[36mMiniMax Token Plan (minimax.io)[0m api
+nan api
+3 credentials

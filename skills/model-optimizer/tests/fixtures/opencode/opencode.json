@@ -1,0 +1,6 @@
+{
+  "agent": {
+    "worker": {"model": "openai/gpt-5.6-terra", "variant": "high", "steps": 80},
+    "reviewer": {"model": "nan/qwen3.6", "temperature": 0.1}
+  }
+}

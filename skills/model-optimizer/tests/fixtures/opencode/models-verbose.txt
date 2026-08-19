@@ -1,0 +1,4 @@
+nan/qwen3.6
+{"id":"qwen3.6","providerID":"nan","name":"Qwen 3.6","family":"qwen","status":"active","cost":{"input":0,"output":0,"cache":{"read":0,"write":0}},"limit":{"context":262144,"output":16384},"capabilities":{"reasoning":true,"toolcall":true,"input":{"text":true,"image":true}},"variants":{"low":{"reasoningEffort":"low"}}}
+openai/gpt-5.6-terra
+{"id":"gpt-5.6-terra","providerID":"openai","name":"GPT-5.6 Terra","family":"gpt","status":"active","cost":{"input":2,"output":12,"cache":{"read":0.2,"write":2.5}},"limit":{"context":1050000,"output":128000},"capabilities":{"reasoning":true,"toolcall":true,"input":{"text":true,"image":true}},"variants":{"high":{"reasoningEffort":"high"},"max":{"reasoningEffort":"max"}}}
