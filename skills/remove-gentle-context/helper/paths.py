@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from .models import PlatformProfile
+from .models import PlatformProfile, RuntimeContext
 
 
 def _is_windows_reparse_point(stat_result: os.stat_result) -> bool:
@@ -33,3 +33,32 @@ def assert_safe_target(path: Path, allowed_roots: tuple[Path, ...]) -> os.stat_r
     if path.is_symlink() or _is_windows_reparse_point(st):
         raise ValueError("preflight_unexpected_link")
     return st
+
+
+def known_roots(context: RuntimeContext) -> dict[str, Path]:
+    return {"home": context.profile.home}
+
+
+def root_relative_path(path: Path, context: RuntimeContext, *, error_code: str = "preflight_path_escape") -> tuple[str, str]:
+    resolved = path.resolve(strict=False)
+    for root_id, root in known_roots(context).items():
+        resolved_root = root.resolve(strict=False)
+        if resolved == resolved_root or resolved.is_relative_to(resolved_root):
+            relative = resolved.relative_to(resolved_root)
+            return root_id, PurePosixPath(*relative.parts).as_posix()
+    raise ValueError(error_code)
+
+
+def path_from_root_relative(root_id: str, relative_path: str, context: RuntimeContext, *, error_code: str = "restore_path_escape") -> Path:
+    roots = known_roots(context)
+    if root_id not in roots:
+        raise ValueError(error_code)
+    relative = PurePosixPath(relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(error_code)
+    path = roots[root_id].joinpath(*relative.parts)
+    resolved = path.resolve(strict=False)
+    root = roots[root_id].resolve(strict=False)
+    if resolved != root and not resolved.is_relative_to(root):
+        raise ValueError(error_code)
+    return path

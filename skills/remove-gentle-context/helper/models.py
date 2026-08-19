@@ -273,13 +273,112 @@ class Check:
 
 
 @dataclass(frozen=True)
+class BackupEntry:
+    operation_index: int
+    kind: str
+    original_path: str
+    root_id: str
+    relative_path: str
+    target_type: str
+    mode: int | None = None
+    size: int | None = None
+    sha256: str | None = None
+    payload_path: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "operation_index": self.operation_index,
+            "kind": self.kind,
+            "original_path": self.original_path,
+            "root_id": self.root_id,
+            "relative_path": self.relative_path,
+            "target_type": self.target_type,
+        }
+        if self.mode is not None:
+            data["mode"] = self.mode
+        if self.size is not None:
+            data["size"] = self.size
+        if self.sha256 is not None:
+            data["sha256"] = self.sha256
+        if self.payload_path is not None:
+            data["payload_path"] = self.payload_path
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "BackupEntry":
+        return cls(
+            operation_index=int(data["operation_index"]),
+            kind=str(data["kind"]),
+            original_path=str(data["original_path"]),
+            root_id=str(data["root_id"]),
+            relative_path=str(data["relative_path"]),
+            target_type=str(data["target_type"]),
+            mode=None if "mode" not in data else int(data["mode"]),
+            size=None if "size" not in data else int(data["size"]),
+            sha256=None if data.get("sha256") is None else str(data["sha256"]),
+            payload_path=None if data.get("payload_path") is None else str(data["payload_path"]),
+        )
+
+
+@dataclass(frozen=True)
 class BackupManifest:
-    pass
+    path: Path
+    root: Path
+    plan_digest: str
+    entries: tuple[BackupEntry, ...] = ()
+    digest: str | None = None
+
+    def to_unsigned_dict(self) -> dict[str, object]:
+        return {
+            "schema": "remove-gentle-context.backup/v1",
+            "plan_digest": self.plan_digest,
+            "entries": [entry.to_dict() for entry in self.entries],
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        data = self.to_unsigned_dict()
+        if self.digest is not None:
+            data["digest"] = self.digest
+        return data
+
+    def with_digest(self) -> "BackupManifest":
+        return replace(self, digest=digest_json(self.to_unsigned_dict()))
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object], path: Path) -> "BackupManifest":
+        entries_data = data.get("entries", ())
+        if not isinstance(entries_data, Sequence) or isinstance(entries_data, (str, bytes)):
+            raise ValueError("manifest_invalid_entries")
+        entries = tuple(BackupEntry.from_dict(item) for item in entries_data if isinstance(item, Mapping))
+        if len(entries) != len(entries_data):
+            raise ValueError("manifest_invalid_entries")
+        return cls(
+            path=path,
+            root=path.parent,
+            plan_digest=str(data["plan_digest"]),
+            entries=entries,
+            digest=None if data.get("digest") is None else str(data["digest"]),
+        )
 
 
 @dataclass(frozen=True)
 class OperationOutcome:
-    pass
+    operation_index: int
+    kind: str
+    path: str
+    status: str
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "operation_index": self.operation_index,
+            "kind": self.kind,
+            "path": self.path,
+            "status": self.status,
+        }
+        if self.error is not None:
+            data["error"] = self.error
+        return data
 
 
 @dataclass(frozen=True)
@@ -312,7 +411,7 @@ class Receipt:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "operation_outcomes": [o.__dict__ for o in self.operation_outcomes],
+            "operation_outcomes": [o.to_dict() if hasattr(o, "to_dict") else o.__dict__ for o in self.operation_outcomes],
             "backup_manifest_path": None if self.backup_manifest_path is None else str(self.backup_manifest_path),
             "lifecycle_outcomes": [o.__dict__ for o in self.lifecycle_outcomes],
             "checks": [c.__dict__ for c in self.checks],
