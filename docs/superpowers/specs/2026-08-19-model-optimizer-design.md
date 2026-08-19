@@ -244,7 +244,7 @@ detect(context) -> detection evidence
 snapshot(context) -> current assignments
 list_models(context) -> catalog-local records
 check_readiness(providers, context) -> provider readiness
-live_check(model_id, effort, sentinel, timeout, context) -> health record
+live_check(model_record, effort, sentinel, timeout, context) -> health record
 reload_semantics(context) -> structured guidance
 ```
 
