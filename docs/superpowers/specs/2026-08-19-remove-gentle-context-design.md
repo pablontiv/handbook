@@ -193,7 +193,7 @@ A client needing those capabilities must be promoted to a core adapter.
 
 ### Claude
 
-The adapter inventories managed marker blocks, skills, agents, commands, hooks, output styles, generated registries, and Gentle-owned visual artifacts. Usage counters, project histories, third-party marketplaces, Engram, and unrelated skills remain preserved.
+The adapter inventories managed marker blocks, skills, agents, commands, hooks, output styles, and Gentle-owned visual artifacts. Usage counters, project histories, third-party marketplaces, Engram, and unrelated skills remain preserved. Pi owns generated Gentle Pi skill registries so only one adapter can authorize each registry mutation.
 
 ### Codex and ChatGPT
 
