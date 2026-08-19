@@ -26,7 +26,9 @@ _RECOGNIZED_PROFILE_MANAGED_BY = "gentle-ai"
 _CODEX_DIR = ".codex"
 _CONFIG_NAMES = ("config.toml", "config.toml.bak")
 _RUNTIME_NAMES = ("global-state.json", "global-state.json.bak")
-_RECOVERY_PATTERNS = (".config.toml.*.tmp", ".global-state.json.*.tmp")
+_CONFIG_RECOVERY_PATTERNS = (".config.toml.*.tmp",)
+_RUNTIME_RECOVERY_PATTERNS = (".global-state.json.*.tmp",)
+_RECOVERY_PATTERNS = _CONFIG_RECOVERY_PATTERNS + _RUNTIME_RECOVERY_PATTERNS
 _HISTORICAL_DIRS = ("archived_sessions", "sessions")
 _BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ROOT_SELECTOR_RE = re.compile(r'^default_permissions\s*=\s*"([^"]*)"\s*(?:#.*)?$')
@@ -55,8 +57,7 @@ class CodexAdapter:
         mutable: list[Candidate] = []
         historical: list[Candidate] = []
 
-        for name in _CONFIG_NAMES:
-            path = codex_dir / name
+        for path in _config_paths(codex_dir):
             if path.is_file():
                 candidate = self._config_candidate(path, context, member_preconditions)
                 if candidate is not None:
@@ -110,8 +111,7 @@ class CodexAdapter:
     def verify(self, receipt: Receipt, context: RuntimeContext) -> tuple[Check, ...]:
         codex_dir = context.profile.home / _CODEX_DIR
         if codex_dir.is_dir() and _allowed_home_child(codex_dir, context):
-            for name in _CONFIG_NAMES:
-                path = codex_dir / name
+            for path in _config_paths(codex_dir):
                 if path.is_file():
                     parsed = _load_toml_file(path)
                     if parsed.get("default_permissions") == PROFILE_ID:
@@ -359,13 +359,25 @@ def _strip_line_ending(line: str) -> str:
     return line[:-2] if line.endswith("\r\n") else line[:-1] if line.endswith("\n") else line
 
 
+def _config_paths(codex_dir: Path) -> tuple[Path, ...]:
+    paths = [codex_dir / name for name in _CONFIG_NAMES]
+    paths.extend(_recovery_paths(codex_dir, _CONFIG_RECOVERY_PATTERNS))
+    return tuple(dict.fromkeys(paths))
+
+
 def _runtime_paths(codex_dir: Path) -> tuple[Path, ...]:
     paths = [codex_dir / name for name in _RUNTIME_NAMES]
+    paths.extend(_recovery_paths(codex_dir, _RUNTIME_RECOVERY_PATTERNS))
+    return tuple(dict.fromkeys(paths))
+
+
+def _recovery_paths(codex_dir: Path, patterns: tuple[str, ...]) -> list[Path]:
+    paths: list[Path] = []
     if codex_dir.is_dir():
         for child in sorted(codex_dir.iterdir(), key=lambda item: item.name):
-            if child.is_file() and any(fnmatch.fnmatchcase(child.name, pattern) for pattern in _RECOVERY_PATTERNS):
+            if child.is_file() and any(fnmatch.fnmatchcase(child.name, pattern) for pattern in patterns):
                 paths.append(child)
-    return tuple(dict.fromkeys(paths))
+    return paths
 
 
 def _directory_member_preconditions(codex_dir: Path, context: RuntimeContext) -> tuple[Mapping[str, object], ...]:

@@ -189,15 +189,20 @@ class CodexAdapterTests(unittest.TestCase):
 
     def test_inventory_plan_apply_sanitizes_current_and_recovery_then_is_idempotent(self) -> None:
         home = build_codex_fixture(self.temp_root)
+        config_recovery = home / ".codex" / ".config.toml.atomic.tmp"
+        config_recovery.write_text(fixture("codex/config.toml"))
         context = context_for(home, XDG_STATE_HOME=str(self.temp_root / "state"))
         adapter = CodexAdapter()
+        original_recovery_mcp = tomllib.loads(config_recovery.read_text())["mcp_servers"]
 
         first_inventory = build_inventory(context, (adapter,))
+        self.assertEqual(first_inventory.findings, ())
         first_plan = build_plan(first_inventory, context, (adapter,))
         operation_paths = {Path(operation.path).name for operation in first_plan.operations}
 
         self.assertIn("config.toml", operation_paths)
         self.assertIn("config.toml.bak", operation_paths)
+        self.assertIn(".config.toml.atomic.tmp", operation_paths)
         self.assertIn("global-state.json", operation_paths)
         self.assertIn("global-state.json.bak", operation_paths)
         self.assertIn(".global-state.json.atomic.tmp", operation_paths)
@@ -207,26 +212,59 @@ class CodexAdapterTests(unittest.TestCase):
 
         receipt = execute_plan(first_plan, first_plan.digest or "", context, lifecycle=ShutdownWritesRecoveryLifecycle(home / ".codex" / "never-created", ""))
         self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
+        adapter.verify(receipt, context)
         self.assertFalse(any_active_profile_id(json.loads((home / ".codex" / "global-state.json").read_text()), "gentle-dev"))
         self.assertNotIn("gentle-dev", tomllib.loads((home / ".codex" / "config.toml.bak").read_text()).get("permissions", {}))
+        cleaned_recovery = tomllib.loads(config_recovery.read_text())
+        self.assertNotEqual(cleaned_recovery.get("default_permissions"), "gentle-dev")
+        self.assertNotIn("gentle-dev", cleaned_recovery.get("permissions", {}))
+        self.assertEqual(cleaned_recovery["mcp_servers"], original_recovery_mcp)
 
         second_inventory = build_inventory(context, (CodexAdapter(),))
         second_plan = build_plan(second_inventory, context, (CodexAdapter(),))
         self.assertEqual(second_plan.operations, ())
 
-    def test_new_governed_recovery_file_after_inventory_invalidates_preflight(self) -> None:
+    def test_malformed_config_recovery_temp_fails_closed_as_toml_not_json(self) -> None:
         home = build_codex_fixture(self.temp_root, include_archives=False)
+        (home / ".codex" / ".config.toml.bad.tmp").write_text("default_permissions = [\n")
         context = context_for(home, XDG_STATE_HOME=str(self.temp_root / "state"))
-        adapter = CodexAdapter()
-        inventory = build_inventory(context, (adapter,))
-        plan = build_plan(inventory, context, (adapter,))
-        late = home / ".codex" / ".global-state.json.late.tmp"
-        late.write_text(fixture("codex/global-state.json"))
 
-        with self.assertRaisesRegex(ValueError, "preflight_directory_members_drift"):
-            create_backup(plan, context)
+        inventory = build_inventory(context, (CodexAdapter(),))
 
-        self.assertFalse((resolve_state_root(context.profile) / "backups").exists())
+        self.assertEqual([finding.message for finding in inventory.findings], ["codex_toml_malformed"])
+
+    def test_governed_recovery_member_sets_invalidate_on_appearance_removal_or_change(self) -> None:
+        cases = (
+            ("config_appearance", ".config.toml.late.tmp", "appear", fixture("codex/config.toml")),
+            ("runtime_appearance", ".global-state.json.late.tmp", "appear", fixture("codex/global-state.json")),
+            ("config_removal", ".config.toml.present.tmp", "remove", fixture("codex/config.toml")),
+            ("runtime_removal", ".global-state.json.atomic.tmp", "remove", fixture("codex/global-state.json")),
+            ("config_change", ".config.toml.present.tmp", "change", fixture("codex/config.toml") + "\n# shutdown write\n"),
+            ("runtime_change", ".global-state.json.atomic.tmp", "change", "{}\n"),
+        )
+        for case_name, file_name, mutation, mutated_content in cases:
+            with self.subTest(case=case_name):
+                home = build_codex_fixture(self.temp_root / case_name, include_archives=False)
+                context = context_for(home, XDG_STATE_HOME=str(self.temp_root / "state" / case_name))
+                target = home / ".codex" / file_name
+                if mutation in {"remove", "change"} and not target.exists():
+                    target.write_text(fixture("codex/config.toml") if "config" in file_name else fixture("codex/global-state.json"))
+                adapter = CodexAdapter()
+                inventory = build_inventory(context, (adapter,))
+                self.assertEqual(inventory.findings, ())
+                plan = build_plan(inventory, context, (adapter,))
+
+                if mutation == "appear":
+                    target.write_text(mutated_content)
+                elif mutation == "remove":
+                    target.unlink()
+                else:
+                    target.write_text(mutated_content)
+
+                with self.assertRaisesRegex(ValueError, "preflight_directory_members_drift"):
+                    create_backup(plan, context)
+
+                self.assertFalse((resolve_state_root(context.profile) / "backups").exists())
 
     def test_shutdown_recovery_write_invalidates_plan_before_backup_or_mutation(self) -> None:
         home = build_codex_fixture(self.temp_root, include_archives=False)
