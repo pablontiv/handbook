@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from helper.canonical import digest_json
-from helper.models import Operation, OperationKind, Plan, PlatformProfile, ReceiptStatus, RuntimeContext
+from helper.models import LifecycleAction, LifecycleOutcome, Operation, OperationKind, Plan, PlatformProfile, ProcessSnapshot, ReceiptStatus, RuntimeContext
 from helper.paths import resolve_state_root
 from helper.transaction import _same_file_identity, apply_operations, create_backup, execute_plan, restore
 
@@ -24,6 +24,49 @@ class NoopLifecycle:
     def prepare(self, *args, **kwargs):
         self.calls.append("prepare")
         return ()
+
+
+class FakeTransactionLifecycle:
+    def __init__(self, *, target: Path | None = None, shutdown_content: str | None = None, restart_succeeds: bool = True, running: bool = True) -> None:
+        self.target = target
+        self.shutdown_content = shutdown_content
+        self.restart_succeeds = restart_succeeds
+        self.running = running
+        self.calls: list[str] = []
+        self.stopped: list[ProcessSnapshot] = []
+        self.restarted: list[ProcessSnapshot] = []
+
+    def preflight(self, actions, context):
+        self.calls.append("preflight")
+        if not self.running:
+            return ()
+        return tuple(
+            ProcessSnapshot(
+                action=action,
+                platform=context.profile.os_name,
+                running=True,
+                pid=123,
+                process_name=action.target or action.client,
+                executable="/usr/bin/codex",
+                argv=("/usr/bin/codex", "--foreground"),
+                identity="linux:123:/usr/bin/codex",
+            )
+            for action in actions
+        )
+
+    def stop(self, snapshot):
+        self.calls.append("stop")
+        self.stopped.append(snapshot)
+        if self.target is not None and self.shutdown_content is not None:
+            self.target.write_text(self.shutdown_content)
+        return LifecycleOutcome(action="stop", client=snapshot.action.client, target=snapshot.action.target, status="stopped", pid=snapshot.pid)
+
+    def restart(self, snapshot):
+        self.calls.append("restart")
+        self.restarted.append(snapshot)
+        status = "restarted" if self.restart_succeeds else "failed"
+        code = None if self.restart_succeeds else "lifecycle_restart_failed"
+        return LifecycleOutcome(action="restart", client=snapshot.action.client, target=snapshot.action.target, status=status, code=code, pid=snapshot.pid)
 
 
 def sha256_bytes(content: bytes) -> str:
@@ -51,6 +94,16 @@ def write_plan(path: Path, before: bytes | None, after: bytes, *, details: dict[
                 details={} if details is None else details,
             ),
         ),
+    ).with_digest()
+
+
+def lifecycle_write_plan(path: Path, before: bytes, after: bytes) -> Plan:
+    base = write_plan(path, before, after)
+    return Plan(
+        os_name=base.os_name,
+        home=base.home,
+        operations=base.operations,
+        lifecycle_actions=(LifecycleAction(candidate_id="codex-config", client="codex", action="stop", target="codex", reason="quiesce before edit", details={"process_name": "codex", "restart_argv": ["/usr/bin/codex", "--foreground"]}),),
     ).with_digest()
 
 
@@ -462,6 +515,61 @@ class TransactionTests(unittest.TestCase):
         receipt = execute_plan(plan, plan.digest or "", self.context, NoopLifecycle())
         self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
         self.assertFalse(directory.exists())
+
+    def test_shutdown_drift_after_graceful_stop_aborts_before_backup_or_mutation_and_restarts(self):
+        target = self.make_file(".codex/config.toml", "before")
+        plan = lifecycle_write_plan(target, b"before", b"after")
+        lifecycle = FakeTransactionLifecycle(target=target, shutdown_content="shutdown-drift")
+
+        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle)
+
+        self.assertEqual(receipt.status, ReceiptStatus.FAILED)
+        self.assertEqual(target.read_text(), "shutdown-drift")
+        self.assertIsNone(receipt.backup_manifest_path)
+        self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.operation_outcomes[0].error, "preflight_preimage_drift_after_shutdown")
+
+    def test_next_plan_created_while_client_closed_binds_stable_shutdown_bytes(self):
+        target = self.make_file(".codex/config.toml", "before")
+        drift_plan = lifecycle_write_plan(target, b"before", b"after")
+        drift_lifecycle = FakeTransactionLifecycle(target=target, shutdown_content="shutdown-drift")
+        drift_receipt = execute_plan(drift_plan, drift_plan.digest or "", self.context, drift_lifecycle)
+        self.assertEqual(drift_receipt.status, ReceiptStatus.FAILED)
+
+        closed_plan = lifecycle_write_plan(target, b"shutdown-drift", b"after")
+        closed_lifecycle = FakeTransactionLifecycle(running=False)
+        receipt = execute_plan(closed_plan, closed_plan.digest or "", self.context, closed_lifecycle)
+
+        self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
+        self.assertEqual(target.read_text(), "after")
+        self.assertEqual(closed_lifecycle.calls, ["preflight"])
+
+    def test_restart_failure_after_shutdown_drift_requires_manual_recovery(self):
+        target = self.make_file(".codex/config.toml", "before")
+        plan = lifecycle_write_plan(target, b"before", b"after")
+        lifecycle = FakeTransactionLifecycle(target=target, shutdown_content="shutdown-drift", restart_succeeds=False)
+
+        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle)
+
+        self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
+        self.assertEqual(receipt.operation_outcomes[0].error, "preflight_preimage_drift_after_shutdown")
+        self.assertEqual(receipt.lifecycle_outcomes[-1].status, "failed")
+        self.assertIsNone(receipt.backup_manifest_path)
+        self.assertEqual(target.read_text(), "shutdown-drift")
+
+    def test_restart_failure_after_successful_apply_requires_manual_recovery(self):
+        target = self.make_file(".codex/config.toml", "before")
+        plan = lifecycle_write_plan(target, b"before", b"after")
+        lifecycle = FakeTransactionLifecycle(restart_succeeds=False)
+
+        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle)
+
+        self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
+        self.assertEqual(target.read_text(), "after")
+        self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
+        self.assertEqual(receipt.operation_outcomes[0].status, "completed")
+        self.assertEqual(receipt.lifecycle_outcomes[-1].code, "lifecycle_restart_failed")
 
     def test_zero_operation_plan_does_not_touch_lifecycle(self):
         lifecycle = NoopLifecycle()

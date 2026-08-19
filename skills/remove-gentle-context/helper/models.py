@@ -383,17 +383,77 @@ class OperationOutcome:
 
 @dataclass(frozen=True)
 class CompletedCommand:
-    pass
+    argv: tuple[str, ...] = ()
+    returncode: int = 0
+    stdout: str = ""
+    stderr: str = ""
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "argv": list(self.argv),
+            "returncode": self.returncode,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+        }
 
 
 @dataclass(frozen=True)
 class ProcessSnapshot:
-    pass
+    action: LifecycleAction = field(default_factory=LifecycleAction)
+    platform: str = ""
+    running: bool = False
+    pid: int | None = None
+    process_name: str = ""
+    executable: str | None = None
+    argv: tuple[str, ...] = ()
+    bundle_id: str | None = None
+    identity: str | None = None
+    details: Mapping[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "action": self.action.to_dict(),
+            "platform": self.platform,
+            "running": self.running,
+            "argv": list(self.argv),
+            "details": dict(self.details),
+        }
+        if self.pid is not None:
+            data["pid"] = self.pid
+        if self.process_name:
+            data["process_name"] = self.process_name
+        if self.executable is not None:
+            data["executable"] = self.executable
+        if self.bundle_id is not None:
+            data["bundle_id"] = self.bundle_id
+        if self.identity is not None:
+            data["identity"] = self.identity
+        return data
 
 
 @dataclass(frozen=True)
 class LifecycleOutcome:
-    pass
+    action: str = ""
+    client: str = ""
+    target: str = ""
+    status: str = ""
+    code: str | None = None
+    pid: int | None = None
+    argv: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "action": self.action,
+            "client": self.client,
+            "target": self.target,
+            "status": self.status,
+            "argv": list(self.argv),
+        }
+        if self.code is not None:
+            data["code"] = self.code
+        if self.pid is not None:
+            data["pid"] = self.pid
+        return data
 
 
 @dataclass(frozen=True)

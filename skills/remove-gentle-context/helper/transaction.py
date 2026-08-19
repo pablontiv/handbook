@@ -14,7 +14,7 @@ from typing import Iterable
 
 from .canonical import digest_json
 from .engine import validate_approval
-from .models import BackupEntry, BackupManifest, Operation, OperationKind, OperationOutcome, Plan, Receipt, ReceiptStatus, RuntimeContext
+from .models import BackupEntry, BackupManifest, LifecycleOutcome, Operation, OperationKind, OperationOutcome, Plan, ProcessSnapshot, Receipt, ReceiptStatus, RuntimeContext
 from .paths import _is_windows_reparse_point, path_from_root_relative, resolve_state_root, root_relative_path
 
 
@@ -91,16 +91,100 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
     validate_approval(plan, approval)
     if not plan.operations:
         return Receipt(status=ReceiptStatus.COMPLETED)
+
+    lifecycle_outcomes: list[LifecycleOutcome] = []
+    stopped: list[ProcessSnapshot] = []
+    snapshots = _lifecycle_preflight(plan, context, lifecycle)
+    _validate_plan_preimages(plan, context, drift_code="preflight_preimage_drift")
+
+    try:
+        for snapshot in snapshots:
+            if not snapshot.running:
+                continue
+            outcome = lifecycle.stop(snapshot)  # type: ignore[attr-defined]
+            lifecycle_outcomes.append(outcome)
+            if getattr(outcome, "status", None) == "stopped":
+                stopped.append(snapshot)
+    except BaseException as exc:
+        code = _error_code(exc, "preflight_lifecycle_stop_failed")
+        restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
+        lifecycle_outcomes.extend(restart_outcomes)
+        status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.FAILED
+        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status)
+
+    try:
+        _validate_plan_preimages(plan, context, drift_code="preflight_preimage_drift_after_shutdown")
+    except BaseException as exc:
+        code = _error_code(exc, "preflight_preimage_drift_after_shutdown")
+        restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
+        lifecycle_outcomes.extend(restart_outcomes)
+        status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.FAILED
+        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status)
+
     manifest = create_backup(plan, context)
     try:
         outcomes = apply_operations(plan, manifest, context)
     except OperationApplyError as exc:
         rollback_outcomes = rollback(manifest, exc.outcomes, context)
+        restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
+        lifecycle_outcomes.extend(restart_outcomes)
         status = ReceiptStatus.ROLLED_BACK
-        if any(outcome.status == "failed" for outcome in rollback_outcomes):
+        if any(outcome.status == "failed" for outcome in rollback_outcomes) or _has_restart_failure(restart_outcomes):
             status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED
-        return Receipt(operation_outcomes=tuple(exc.outcomes + rollback_outcomes), backup_manifest_path=manifest.path, status=status)
-    return Receipt(operation_outcomes=outcomes, backup_manifest_path=manifest.path, status=ReceiptStatus.COMPLETED)
+        return Receipt(operation_outcomes=tuple(exc.outcomes + rollback_outcomes), backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status)
+
+    restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
+    lifecycle_outcomes.extend(restart_outcomes)
+    status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.COMPLETED
+    return Receipt(operation_outcomes=outcomes, backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status)
+
+
+def _lifecycle_preflight(plan: Plan, context: RuntimeContext, lifecycle: object) -> tuple[ProcessSnapshot, ...]:
+    if not plan.lifecycle_actions:
+        return ()
+    preflight = getattr(lifecycle, "preflight", None)
+    if preflight is None:
+        raise ValueError("preflight_lifecycle_unavailable")
+    return tuple(preflight(plan.lifecycle_actions, context))
+
+
+def _validate_plan_preimages(plan: Plan, context: RuntimeContext, *, drift_code: str) -> None:
+    for index, operation in enumerate(plan.operations):
+        try:
+            _prepare_backup_entry(index, operation, context)
+        except ValueError as exc:
+            if drift_code != "preflight_preimage_drift" and _is_preimage_state_error(str(exc)):
+                raise ValueError(drift_code) from exc
+            raise
+
+
+def _is_preimage_state_error(code: str) -> bool:
+    return code in {
+        "preflight_preimage_drift",
+        "preflight_missing_preimage",
+        "preflight_unexpected_link",
+        "preflight_not_regular_file",
+        "preflight_not_directory",
+    }
+
+
+def _failed_preflight_outcomes(plan: Plan, code: str) -> tuple[OperationOutcome, ...]:
+    return tuple(OperationOutcome(index, str(operation.kind), operation.path, "failed", code) for index, operation in enumerate(plan.operations))
+
+
+def _restart_stopped(lifecycle: object, stopped: tuple[ProcessSnapshot, ...]) -> tuple[LifecycleOutcome, ...]:
+    outcomes: list[LifecycleOutcome] = []
+    for snapshot in reversed(stopped):
+        try:
+            outcome = lifecycle.restart(snapshot)  # type: ignore[attr-defined]
+        except BaseException as exc:
+            outcome = LifecycleOutcome(action="restart", client=snapshot.action.client, target=snapshot.action.target, status="failed", code=_error_code(exc, "lifecycle_restart_failed"), pid=snapshot.pid)
+        outcomes.append(outcome)
+    return tuple(outcomes)
+
+
+def _has_restart_failure(outcomes: tuple[LifecycleOutcome, ...]) -> bool:
+    return any(outcome.action == "restart" and outcome.status == "failed" for outcome in outcomes)
 
 
 def restore(manifest_path: Path, approval: str, context: RuntimeContext) -> Receipt:
