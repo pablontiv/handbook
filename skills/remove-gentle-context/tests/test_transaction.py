@@ -13,7 +13,7 @@ from unittest.mock import patch
 from helper.canonical import digest_json
 from helper.models import Operation, OperationKind, Plan, PlatformProfile, ReceiptStatus, RuntimeContext
 from helper.paths import resolve_state_root
-from helper.transaction import create_backup, execute_plan, restore
+from helper.transaction import apply_operations, create_backup, execute_plan, restore
 
 
 class NoopLifecycle:
@@ -60,6 +60,14 @@ def delete_plan(path: Path, before: bytes) -> Plan:
         home=str(path.parents[0]),
         operations=(Operation(kind=OperationKind.DELETE_FILE, path=str(path), preimage_base64=pre_b64, preimage_sha256=pre_digest),),
     ).with_digest()
+
+
+def delete_plan_for_many(paths_and_preimages: tuple[tuple[Path, bytes], ...], home: Path) -> Plan:
+    operations = []
+    for path, before in paths_and_preimages:
+        pre_b64, pre_digest = image(before)
+        operations.append(Operation(kind=OperationKind.DELETE_FILE, path=str(path), preimage_base64=pre_b64, preimage_sha256=pre_digest))
+    return Plan(os_name="linux", home=str(home), operations=tuple(operations)).with_digest()
 
 
 def remove_empty_dir_plan(path: Path) -> Plan:
@@ -239,6 +247,56 @@ class TransactionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "preflight_unexpected_link"):
                 create_backup(reparse_plan, self.context)
 
+    def test_backup_read_rejects_same_content_path_identity_swap(self):
+        target = self.make_file("race.txt", "before")
+        replacement = self.home / "replacement-source.txt"
+        replacement.write_text("before")
+        plan = delete_plan(target, b"before")
+        original_lstat = os.lstat
+        swapped = False
+
+        def swap_after_lstat(path, *args, **kwargs):
+            nonlocal swapped
+            st = original_lstat(path, *args, **kwargs)
+            if Path(path) == target and not swapped:
+                swapped = True
+                target.unlink()
+                replacement.rename(target)
+            return st
+
+        with patch("helper.transaction.os.lstat", side_effect=swap_after_lstat):
+            with self.assertRaisesRegex(ValueError, "preflight_preimage_drift"):
+                create_backup(plan, self.context)
+
+        self.assertTrue(swapped)
+        self.assertEqual(target.read_text(), "before")
+        self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
+
+    def test_apply_revalidation_rejects_same_content_path_identity_swap(self):
+        target = self.make_file("apply-race.txt", "before")
+        replacement = self.home / "apply-replacement-source.txt"
+        replacement.write_text("before")
+        plan = write_plan(target, b"before", b"after")
+        manifest = create_backup(plan, self.context)
+        original_lstat = os.lstat
+        swapped = False
+
+        def swap_after_lstat(path, *args, **kwargs):
+            nonlocal swapped
+            st = original_lstat(path, *args, **kwargs)
+            if Path(path) == target and not swapped:
+                swapped = True
+                target.unlink()
+                replacement.rename(target)
+            return st
+
+        with patch("helper.transaction.os.lstat", side_effect=swap_after_lstat):
+            with self.assertRaisesRegex(Exception, "preflight_preimage_drift"):
+                apply_operations(plan, manifest, self.context)
+
+        self.assertTrue(swapped)
+        self.assertEqual(target.read_text(), "before")
+
     def test_manifest_tamper_is_rejected_by_restore_digest(self):
         target = self.make_file("restore.txt", "before")
         manifest = create_backup(delete_plan(target, b"before"), self.context)
@@ -264,6 +322,59 @@ class TransactionTests(unittest.TestCase):
         self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
         replacement_manifest = json.loads(receipt.backup_manifest_path.read_text())
         self.assertEqual(replacement_manifest["entries"][0]["sha256"], sha256_bytes(b"replacement"))
+
+    def test_restore_failure_rolls_back_replacement_file(self):
+        first = self.make_file("restore-first.txt", "before-one")
+        second = self.make_file("restore-second.txt", "before-two")
+        manifest = create_backup(delete_plan_for_many(((first, b"before-one"), (second, b"before-two")), self.home), self.context)
+        first.write_text("replacement-one")
+        second.write_text("replacement-two")
+
+        with injected_replace_failure(second):
+            receipt = restore(manifest.path, manifest.digest or "", self.context)
+
+        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertEqual(first.read_text(), "replacement-one")
+        self.assertEqual(second.read_text(), "replacement-two")
+        self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
+
+    def test_restore_failure_removes_newly_created_destination(self):
+        first = self.make_file("restore-new.txt", "before-one")
+        second = self.make_file("restore-existing.txt", "before-two")
+        manifest = create_backup(delete_plan_for_many(((first, b"before-one"), (second, b"before-two")), self.home), self.context)
+        first.unlink()
+        second.write_text("replacement-two")
+
+        with injected_replace_failure(second):
+            receipt = restore(manifest.path, manifest.digest or "", self.context)
+
+        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertFalse(first.exists())
+        self.assertEqual(second.read_text(), "replacement-two")
+        self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
+
+    def test_restore_rollback_failure_requires_manual_recovery(self):
+        first = self.make_file("restore-manual-first.txt", "before-one")
+        second = self.make_file("restore-manual-second.txt", "before-two")
+        manifest = create_backup(delete_plan_for_many(((first, b"before-one"), (second, b"before-two")), self.home), self.context)
+        first.write_text("replacement-one")
+        second.write_text("replacement-two")
+        original_replace = os.replace
+
+        def fail_second_restore_and_first_rollback(src, dst):
+            if Path(dst) == second:
+                raise OSError("injected second restore failure")
+            if Path(dst) == first and first.read_text() == "before-one":
+                raise OSError("injected rollback failure")
+            return original_replace(src, dst)
+
+        with patch("helper.transaction.os.replace", side_effect=fail_second_restore_and_first_rollback):
+            receipt = restore(manifest.path, manifest.digest or "", self.context)
+
+        self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
+        self.assertEqual(first.read_text(), "before-one")
+        self.assertEqual(second.read_text(), "replacement-two")
+        self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
 
     def test_nonempty_directory_refusal_and_empty_directory_removal(self):
         directory = self.home / "dir"

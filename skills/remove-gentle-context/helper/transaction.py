@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import os
 import stat
@@ -110,7 +111,9 @@ def restore(manifest_path: Path, approval: str, context: RuntimeContext) -> Rece
     if approval != computed:
         raise ValueError("restore_approval_mismatch")
     replacement_manifest = _backup_restore_replacements(manifest, context)
+    replacement_by_index = {entry.operation_index: entry for entry in replacement_manifest.entries}
     outcomes: list[OperationOutcome] = []
+    completed: list[BackupEntry] = []
     seen: set[Path] = set()
     for entry in manifest.entries:
         destination = path_from_root_relative(entry.root_id, entry.relative_path, context, error_code="restore_path_escape")
@@ -118,8 +121,18 @@ def restore(manifest_path: Path, approval: str, context: RuntimeContext) -> Rece
         if resolved in seen:
             raise ValueError("restore_path_collision")
         seen.add(resolved)
-        _restore_entry(entry, manifest, context)
+        try:
+            _restore_entry(entry, manifest, context)
+        except BaseException as exc:
+            code = _error_code(exc, "restore_failed")
+            outcomes.append(OperationOutcome(entry.operation_index, entry.kind, str(destination), "failed", code))
+            rollback_outcomes = _rollback_restore_entries(tuple(completed), manifest, replacement_manifest, replacement_by_index, context)
+            status = ReceiptStatus.ROLLED_BACK
+            if any(outcome.status == "failed" for outcome in rollback_outcomes):
+                status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED
+            return Receipt(operation_outcomes=tuple(outcomes + list(rollback_outcomes)), backup_manifest_path=replacement_manifest.path, status=status)
         outcomes.append(OperationOutcome(entry.operation_index, entry.kind, str(destination), "completed"))
+        completed.append(entry)
     return Receipt(operation_outcomes=tuple(outcomes), backup_manifest_path=replacement_manifest.path, status=ReceiptStatus.COMPLETED)
 
 
@@ -142,14 +155,15 @@ def _prepare_backup_entry(index: int, operation: Operation, context: RuntimeCont
             return BackupEntry(index, str(kind), operation.path, root_id, relative, "missing"), None
         raise ValueError("preflight_missing_preimage")
 
-    st = _safe_lstat(target)
-    if not stat.S_ISREG(st.st_mode):
-        raise ValueError("preflight_not_regular_file")
-    if st.st_size != len(expected):
-        raise ValueError("preflight_preimage_drift")
-    content = target.read_bytes()
-    if _sha256(content) != operation.preimage_sha256 or content != expected:
-        raise ValueError("preflight_preimage_drift")
+    st, content = _read_regular_file_bound(
+        target,
+        expected_content=expected,
+        expected_sha256=operation.preimage_sha256,
+        expected_size=len(expected),
+        mismatch_code="preflight_preimage_drift",
+        link_code="preflight_unexpected_link",
+        not_regular_code="preflight_not_regular_file",
+    )
     return BackupEntry(index, str(kind), operation.path, root_id, relative, "file", mode=stat.S_IMODE(st.st_mode), size=len(content), sha256=_sha256(content)), content
 
 
@@ -203,12 +217,16 @@ def _revalidate_entry_preimage(operation: Operation, entry: BackupEntry, target:
     if entry.target_type != "file":
         return
     expected = _decode_required_image(operation.preimage_base64, operation.preimage_sha256, "preflight_preimage_digest_mismatch")
-    st = _safe_lstat(target)
-    if not stat.S_ISREG(st.st_mode) or st.st_size != len(expected) or (entry.mode is not None and stat.S_IMODE(st.st_mode) != entry.mode):
-        raise ValueError("preflight_preimage_drift")
-    content = target.read_bytes()
-    if content != expected or _sha256(content) != entry.sha256:
-        raise ValueError("preflight_preimage_drift")
+    _read_regular_file_bound(
+        target,
+        expected_content=expected,
+        expected_sha256=entry.sha256,
+        expected_size=len(expected),
+        expected_mode=entry.mode,
+        mismatch_code="preflight_preimage_drift",
+        link_code="preflight_preimage_drift",
+        not_regular_code="preflight_preimage_drift",
+    )
 
 
 def _restore_entry(entry: BackupEntry, manifest: BackupManifest, context: RuntimeContext) -> None:
@@ -218,9 +236,7 @@ def _restore_entry(entry: BackupEntry, manifest: BackupManifest, context: Runtim
             raise ValueError("restore_manifest_missing_payload")
         payload = manifest.root / entry.payload_path
         _assert_payload_contained(payload, manifest.root)
-        content = payload.read_bytes()
-        if _sha256(content) != entry.sha256:
-            raise ValueError("restore_payload_digest_mismatch")
+        content = _read_backup_payload(payload, entry)
         _write_file_atomic(target, content, mode=entry.mode if entry.mode is not None else 0o600)
     elif entry.target_type == "directory":
         if target.exists() and not target.is_dir():
@@ -264,7 +280,12 @@ def _backup_restore_replacements(manifest: BackupManifest, context: RuntimeConte
             continue
         st = _safe_lstat(destination)
         if stat.S_ISREG(st.st_mode):
-            content = destination.read_bytes()
+            st, content = _read_regular_file_bound(
+                destination,
+                mismatch_code="restore_replacement_preimage_drift",
+                link_code="preflight_unexpected_link",
+                not_regular_code="restore_refuse_special_file",
+            )
             digest = _sha256(content)
             payload_path = f"rootfs/{source_entry.root_id}/{source_entry.relative_path}"
             _write_verified_payload(root / payload_path, content, digest)
@@ -276,6 +297,86 @@ def _backup_restore_replacements(manifest: BackupManifest, context: RuntimeConte
     replacement = BackupManifest(path=root / "manifest.json", root=root, plan_digest=computed, entries=tuple(entries)).with_digest()
     _write_json_atomic(replacement.path, replacement.to_dict(), mode=0o600)
     return replacement
+
+
+def _rollback_restore_entries(
+    completed: tuple[BackupEntry, ...],
+    source_manifest: BackupManifest,
+    replacement_manifest: BackupManifest,
+    replacement_by_index: dict[int, BackupEntry],
+    context: RuntimeContext,
+) -> tuple[OperationOutcome, ...]:
+    rollback_outcomes: list[OperationOutcome] = []
+    for source_entry in reversed(completed):
+        replacement_entry = replacement_by_index[source_entry.operation_index]
+        destination = path_from_root_relative(source_entry.root_id, source_entry.relative_path, context, error_code="restore_path_escape")
+        try:
+            _rollback_restored_entry(source_entry, source_manifest, replacement_entry, replacement_manifest, context)
+        except BaseException as exc:
+            rollback_outcomes.append(OperationOutcome(source_entry.operation_index, source_entry.kind, str(destination), "failed", _error_code(exc, "restore_rollback_failed")))
+            continue
+        rollback_outcomes.append(OperationOutcome(source_entry.operation_index, source_entry.kind, str(destination), "rolled_back"))
+    return tuple(rollback_outcomes)
+
+
+def _rollback_restored_entry(source_entry: BackupEntry, source_manifest: BackupManifest, replacement_entry: BackupEntry, replacement_manifest: BackupManifest, context: RuntimeContext) -> None:
+    if replacement_entry.target_type != "missing":
+        _restore_entry(replacement_entry, replacement_manifest, context)
+        return
+
+    target = path_from_root_relative(source_entry.root_id, source_entry.relative_path, context, error_code="restore_path_escape")
+    if source_entry.target_type == "file":
+        expected = _read_source_entry_payload(source_entry, source_manifest)
+        _read_regular_file_bound(
+            target,
+            expected_content=expected,
+            expected_sha256=source_entry.sha256,
+            expected_size=len(expected),
+            expected_mode=source_entry.mode,
+            mismatch_code="restore_rollback_preimage_drift",
+            link_code="restore_rollback_preimage_drift",
+            not_regular_code="restore_rollback_preimage_drift",
+        )
+        os.unlink(target)
+        _fsync_directory(target.parent)
+        return
+
+    if source_entry.target_type == "directory":
+        st = _safe_lstat(target)
+        if not stat.S_ISDIR(st.st_mode) or (source_entry.mode is not None and stat.S_IMODE(st.st_mode) != source_entry.mode):
+            raise ValueError("restore_rollback_preimage_drift")
+        os.rmdir(target)
+        _fsync_directory(target.parent)
+        return
+
+    if source_entry.target_type == "missing":
+        if target.exists() or target.is_symlink():
+            raise ValueError("restore_rollback_preimage_drift")
+        return
+
+    raise ValueError("restore_manifest_invalid_entry_type")
+
+
+def _read_source_entry_payload(entry: BackupEntry, manifest: BackupManifest) -> bytes:
+    if entry.payload_path is None or entry.sha256 is None:
+        raise ValueError("restore_manifest_missing_payload")
+    payload = manifest.root / entry.payload_path
+    _assert_payload_contained(payload, manifest.root)
+    return _read_backup_payload(payload, entry)
+
+
+def _read_backup_payload(payload: Path, entry: BackupEntry) -> bytes:
+    if entry.sha256 is None:
+        raise ValueError("restore_manifest_missing_payload")
+    _, content = _read_regular_file_bound(
+        payload,
+        expected_sha256=entry.sha256,
+        expected_size=entry.size,
+        mismatch_code="restore_payload_digest_mismatch",
+        link_code="restore_payload_digest_mismatch",
+        not_regular_code="restore_payload_digest_mismatch",
+    )
+    return content
 
 
 def _load_manifest(path: Path) -> BackupManifest:
@@ -394,12 +495,92 @@ def _declared_parse(operation: Operation) -> str | None:
     return None
 
 
+def _read_regular_file_bound(
+    path: Path,
+    *,
+    expected_content: bytes | None = None,
+    expected_sha256: str | None = None,
+    expected_size: int | None = None,
+    expected_mode: int | None = None,
+    mismatch_code: str,
+    link_code: str,
+    not_regular_code: str,
+) -> tuple[os.stat_result, bytes]:
+    try:
+        pre_open_stat = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise ValueError(mismatch_code) from exc
+    if stat.S_ISLNK(pre_open_stat.st_mode) or _is_windows_reparse_point(pre_open_stat):
+        raise ValueError(link_code)
+    if not stat.S_ISREG(pre_open_stat.st_mode):
+        raise ValueError(not_regular_code)
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.EMLINK}:
+            raise ValueError(link_code) from exc
+        raise ValueError(mismatch_code) from exc
+
+    try:
+        opened_stat = os.fstat(fd)
+        if stat.S_ISLNK(opened_stat.st_mode) or _is_windows_reparse_point(opened_stat):
+            raise ValueError(link_code)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise ValueError(not_regular_code)
+        if not _same_file_identity(pre_open_stat, opened_stat):
+            raise ValueError(mismatch_code)
+        if expected_mode is not None and stat.S_IMODE(opened_stat.st_mode) != expected_mode:
+            raise ValueError(mismatch_code)
+        content = _read_all_from_fd(fd)
+    finally:
+        os.close(fd)
+
+    digest = _sha256(content)
+    if len(content) != opened_stat.st_size:
+        raise ValueError(mismatch_code)
+    if expected_size is not None and len(content) != expected_size:
+        raise ValueError(mismatch_code)
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise ValueError(mismatch_code)
+    if expected_content is not None and content != expected_content:
+        raise ValueError(mismatch_code)
+    return opened_stat, content
+
+
+def _read_all_from_fd(fd: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _same_file_identity(before: os.stat_result, after: os.stat_result) -> bool:
+    compared = False
+    for attribute in ("st_dev", "st_ino"):
+        before_value = getattr(before, attribute, None)
+        after_value = getattr(after, attribute, None)
+        if before_value is None or after_value is None:
+            continue
+        compared = True
+        if before_value != after_value:
+            return False
+    if compared:
+        return True
+    return before == after
+
+
 def _safe_lstat(path: Path) -> os.stat_result:
     try:
         st = os.lstat(path)
     except FileNotFoundError as exc:
         raise ValueError("preflight_preimage_drift") from exc
-    if path.is_symlink() or _is_windows_reparse_point(st):
+    if stat.S_ISLNK(st.st_mode) or _is_windows_reparse_point(st):
         raise ValueError("preflight_unexpected_link")
     return st
 
