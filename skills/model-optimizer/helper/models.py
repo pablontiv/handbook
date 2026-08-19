@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Mapping
 
 
@@ -20,6 +23,43 @@ class HealthStatus(StrEnum):
     PASS = "PASS"
     FAIL = "FAIL"
     HANG = "HANG"
+
+
+def _invalid_options(path: str, reason: str) -> ValueError:
+    bounded_path = path[:80]
+    bounded_reason = reason[:80]
+    return ValueError(f"artifact_invalid_options:{bounded_path}:{bounded_reason}")
+
+
+def _freeze_json_option(value: Any, path: str = "options") -> Any:
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _invalid_options(path, "non_finite_float")
+        return value
+    if isinstance(value, MappingABC):
+        for key in sorted(value.keys(), key=lambda candidate: (type(candidate).__name__, repr(candidate))):
+            if not isinstance(key, str):
+                raise _invalid_options(path, f"non_string_key:{type(key).__name__}")
+        frozen_items = {
+            key: _freeze_json_option(value[key], f"{path}.{key}")
+            for key in sorted(value.keys())
+        }
+        return MappingProxyType(frozen_items)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json_option(item, f"{path}[{index}]") for index, item in enumerate(value))
+    raise _invalid_options(path, type(value).__name__)
+
+
+def _thaw_json_option(value: Any) -> Any:
+    if isinstance(value, MappingABC):
+        return {key: _thaw_json_option(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json_option(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -51,11 +91,14 @@ class CurrentAssignment:
     options: Mapping[str, Any]
     source: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "options", _freeze_json_option(self.options))
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "agent": self.agent,
             "model": self.model,
-            "options": dict(self.options),
+            "options": _thaw_json_option(self.options),
             "source": self.source,
         }
 
@@ -64,7 +107,7 @@ class CurrentAssignment:
         return cls(
             agent=value["agent"],
             model=value["model"],
-            options=dict(value.get("options", {})),
+            options=value.get("options", {}),
             source=value["source"],
         )
 
