@@ -7,6 +7,9 @@ from pathlib import Path, PurePosixPath
 from .models import PlatformProfile, RuntimeContext
 
 
+_PLATFORM_CONFIG_ENV_KEYS = ("XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA")
+
+
 def _is_windows_reparse_point(stat_result: os.stat_result) -> bool:
     return bool(getattr(stat_result, "st_file_attributes", 0) & 0x400)
 
@@ -41,6 +44,7 @@ def known_roots(context: RuntimeContext) -> dict[str, Path]:
     canonical_home = home.resolve(strict=False)
     roots: dict[str, Path] = {"home": home}
     seen_paths = {str(canonical_home)}
+    canonical_authority_roots = [canonical_home]
     project_items: list[tuple[str, Path]] = []
     for root in context.project_roots:
         resolved = Path(root).expanduser().resolve(strict=False)
@@ -48,12 +52,30 @@ def known_roots(context: RuntimeContext) -> dict[str, Path]:
         if key in seen_paths:
             raise ValueError("project_root_duplicate")
         seen_paths.add(key)
+        canonical_authority_roots.append(resolved)
         root_id = _project_root_id(resolved)
         project_items.append((root_id, resolved))
     for root_id, resolved in sorted(project_items, key=lambda item: item[0]):
         existing = roots.get(root_id)
         if existing is not None and existing != resolved:
             raise ValueError("project_root_id_collision")
+        roots[root_id] = resolved
+
+    platform_items: list[tuple[str, Path]] = []
+    for env_key in _PLATFORM_CONFIG_ENV_KEYS:
+        resolved = explicit_platform_config_root(context.profile, env_key)
+        if resolved is None or _is_inside_any(resolved, tuple(canonical_authority_roots)):
+            continue
+        key = str(resolved)
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        canonical_authority_roots.append(resolved)
+        platform_items.append((_platform_config_root_id(resolved), resolved))
+    for root_id, resolved in sorted(platform_items, key=lambda item: item[0]):
+        existing = roots.get(root_id)
+        if existing is not None and existing != resolved:
+            raise ValueError("platform_config_root_id_collision")
         roots[root_id] = resolved
     return roots
 
@@ -62,9 +84,30 @@ def root_map(context: RuntimeContext) -> dict[str, str]:
     return {root_id: str(path.expanduser().resolve(strict=False)) for root_id, path in known_roots(context).items()}
 
 
+def explicit_platform_config_root(profile: PlatformProfile, env_key: str) -> Path | None:
+    raw = profile.env.get(env_key)
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("platform_config_root_invalid")
+    path = Path(raw)
+    if not path.is_absolute():
+        raise ValueError("platform_config_root_invalid")
+    return path.resolve(strict=False)
+
+
 def _project_root_id(path: Path) -> str:
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
     return f"project-{digest}"
+
+
+def _platform_config_root_id(path: Path) -> str:
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+    return f"platform-config-{digest}"
+
+
+def _is_inside_any(path: Path, roots: tuple[Path, ...]) -> bool:
+    return any(path == root or path.is_relative_to(root) for root in roots)
 
 
 def root_relative_path(path: Path, context: RuntimeContext, *, error_code: str = "preflight_path_escape") -> tuple[str, str]:

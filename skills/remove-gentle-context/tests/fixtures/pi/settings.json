@@ -1,0 +1,15 @@
+{
+  "packages": [
+    "npm:gentle-pi",
+    "npm:gentle-pi@1.2.3",
+    "npm:gentle-engram",
+    "npm:gentle-pi@latest",
+    "npm:other-package"
+  ],
+  "mcp": {
+    "engram": {
+      "command": "gentle-engram"
+    }
+  },
+  "theme": "keep"
+}

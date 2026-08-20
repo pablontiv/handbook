@@ -152,6 +152,54 @@ class ModelsAndPathsTests(unittest.TestCase):
             self.assertTrue(all(root_id.startswith("project-") for root_id in project_root_ids))
             self.assertEqual(root_relative_path(project_a / "CLAUDE.md", first)[1], "CLAUDE.md")
 
+    def test_known_roots_include_stable_external_platform_config_roots(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / "home"
+            xdg = root / "xdg-config"
+            appdata = root / "appdata"
+            home.mkdir()
+            xdg.mkdir()
+            appdata.mkdir()
+            context = RuntimeContext(
+                PlatformProfile(
+                    "linux",
+                    home,
+                    {"XDG_CONFIG_HOME": str(xdg), "APPDATA": str(appdata), "LOCALAPPDATA": str(xdg)},
+                )
+            )
+
+            roots = known_roots(context)
+            platform_root_ids = [root_id for root_id in roots if root_id.startswith("platform-config-")]
+
+            self.assertEqual(platform_root_ids, sorted(platform_root_ids))
+            self.assertEqual({roots[root_id] for root_id in platform_root_ids}, {xdg.resolve(), appdata.resolve()})
+            root_id, relative = root_relative_path(xdg / "pi" / "settings.json", context)
+            self.assertTrue(root_id.startswith("platform-config-"))
+            self.assertEqual(relative, "pi/settings.json")
+
+    def test_known_roots_deduplicates_platform_config_roots_inside_home(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / "home"
+            in_home_config = home / ".config"
+            in_home_config.mkdir(parents=True)
+            context = RuntimeContext(PlatformProfile("linux", home, {"XDG_CONFIG_HOME": str(in_home_config)}))
+
+            roots = known_roots(context)
+
+            self.assertEqual([root_id for root_id in roots if root_id.startswith("platform-config-")], [])
+            self.assertEqual(root_relative_path(in_home_config / "pi" / "settings.json", context), ("home", ".config/pi/settings.json"))
+
+    def test_known_roots_rejects_relative_platform_config_env_roots(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            context = RuntimeContext(PlatformProfile("linux", home, {"XDG_CONFIG_HOME": "relative-config"}))
+
+            with self.assertRaisesRegex(ValueError, "platform_config_root_invalid"):
+                known_roots(context)
+
     def test_runtime_context_rejects_duplicate_project_roots_after_normalization(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
