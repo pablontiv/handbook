@@ -15,7 +15,7 @@ from unittest.mock import patch
 from helper.canonical import digest_json
 from helper.models import Inventory, LifecycleAction, LifecycleOutcome, Operation, OperationKind, Plan, PlatformProfile, ProcessSnapshot, ReceiptStatus, RuntimeContext
 from helper.paths import resolve_state_root, root_map
-from helper.transaction import _same_file_identity, apply_operations, create_backup, execute_plan, restore
+from helper.transaction import OperationApplyError, _same_file_identity, apply_operations, create_backup, execute_plan, restore
 
 
 class NoopLifecycle:
@@ -419,6 +419,39 @@ class TransactionTests(unittest.TestCase):
 
         self.assertEqual(target.read_text(), "before")
 
+    def test_backup_payload_failure_after_stop_restarts_and_returns_not_started_receipt(self):
+        target = self.make_file("stopped-backup.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        lifecycle = FakeTransactionLifecycle()
+
+        with patch("helper.transaction._write_verified_payload", side_effect=OSError("injected backup failure")):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(len(lifecycle.restarted), 1)
+        self.assertEqual(lifecycle.restarted, lifecycle.stopped)
+        self.assertEqual(receipt.status, ReceiptStatus.NOT_STARTED)
+        self.assertIsNone(receipt.backup_manifest_path)
+        self.assertEqual(receipt.plan, plan)
+        self.assertEqual(receipt.inventory, inventory)
+        self.assertEqual(receipt.operation_outcomes[0].status, "failed")
+        self.assertEqual(receipt.operation_outcomes[0].error, "backup_failed")
+
+    def test_backup_payload_failure_after_stop_with_restart_failure_requires_manual_recovery(self):
+        target = self.make_file("stopped-backup-restart-fails.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        lifecycle = FakeTransactionLifecycle(restart_succeeds=False)
+
+        with patch("helper.transaction._write_verified_payload", side_effect=OSError("injected backup failure")):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
+        self.assertIsNone(receipt.backup_manifest_path)
+        self.assertEqual(receipt.operation_outcomes[0].error, "backup_failed")
+
     def test_postimage_hash_mismatch_aborts_before_write(self):
         target = self.make_file("config.json", "before")
         pre_b64, pre_digest = image(b"before")
@@ -732,6 +765,108 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(receipt.lifecycle_outcomes[-1].status, "failed")
         self.assertIsNone(receipt.backup_manifest_path)
         self.assertEqual(target.read_text(), "shutdown-drift")
+
+    def test_journal_failure_before_first_mutation_does_not_mutate_and_restarts(self):
+        target = self.make_file("journal-before-first.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        lifecycle = FakeTransactionLifecycle()
+
+        def fail_before_first(manifest, transition, operation_index, operation, **kwargs):
+            if transition == "before" and operation_index == 0:
+                raise OSError("injected journal failure")
+
+        with patch("helper.transaction._append_journal", side_effect=fail_before_first):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.status, ReceiptStatus.NOT_STARTED)
+        self.assertEqual(receipt.operation_outcomes[0].status, "failed")
+        self.assertEqual(receipt.operation_outcomes[0].error, "journal_append_failed")
+
+    def test_journal_failure_before_second_mutation_rolls_back_first_and_restarts(self):
+        first = self.make_file("journal-before-second-one.txt", "before-one")
+        second = self.make_file("journal-before-second-two.txt", "before-two")
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        second_plan = write_plan(second, b"before-two", b"after-two", home=self.home)
+        base_plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], second_plan.operations[0]), lifecycle_actions=(LifecycleAction(candidate_id="codex-config", client="codex", action="stop", target="codex", reason="quiesce before edit", details={"process_name": "codex", "restart_argv": ["/usr/bin/codex", "--foreground"]}),)).with_digest()
+        inventory, plan = self.bind_plan(base_plan)
+        lifecycle = FakeTransactionLifecycle()
+
+        def fail_before_second(manifest, transition, operation_index, operation, **kwargs):
+            if transition == "before" and operation_index == 1:
+                raise OSError("injected journal failure")
+
+        with patch("helper.transaction._append_journal", side_effect=fail_before_second):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(first.read_text(), "before-one")
+        self.assertEqual(second.read_text(), "before-two")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertEqual([(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes], [(0, "completed", None), (1, "failed", "journal_append_failed"), (0, "rolled_back", None)])
+
+    def test_journal_failure_after_completed_mutation_includes_current_in_rollback(self):
+        target = self.make_file("journal-after-current.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        lifecycle = FakeTransactionLifecycle()
+
+        def fail_after_completed(manifest, transition, operation_index, operation, **kwargs):
+            if transition == "after" and kwargs.get("status") == "completed":
+                raise OSError("injected journal failure")
+
+        with patch("helper.transaction._append_journal", side_effect=fail_after_completed):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertIn((0, "completed", None), [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes])
+        self.assertIn((0, "failed", "journal_append_failed"), [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes])
+        self.assertIn((0, "rolled_back", None), [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes])
+
+    def test_journal_failures_during_error_and_rollback_reporting_do_not_block_safety(self):
+        first = self.make_file("journal-reporting-one.txt", "before-one")
+        second = self.make_file("journal-reporting-two.txt", "before-two")
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        second_plan = write_plan(second, b"before-two", b"after-two", home=self.home)
+        base_plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], second_plan.operations[0]), lifecycle_actions=(LifecycleAction(candidate_id="codex-config", client="codex", action="stop", target="codex", reason="quiesce before edit", details={"process_name": "codex", "restart_argv": ["/usr/bin/codex", "--foreground"]}),)).with_digest()
+        inventory, plan = self.bind_plan(base_plan)
+        lifecycle = FakeTransactionLifecycle()
+
+        def fail_reporting(manifest, transition, operation_index, operation, **kwargs):
+            if transition in {"rollback_before", "rollback_after"} or (transition == "after" and kwargs.get("status") == "failed"):
+                raise OSError("injected journal reporting failure")
+
+        with injected_replace_failure(second), patch("helper.transaction._append_journal", side_effect=fail_reporting):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(first.read_text(), "before-one")
+        self.assertEqual(second.read_text(), "before-two")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertIn((1, "failed", "operation_failed"), [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes])
+        self.assertIn((0, "rolled_back", None), [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes])
+
+    def test_apply_operations_reports_completed_indices_when_journal_before_second_fails(self):
+        first = self.make_file("apply-journal-one.txt", "before-one")
+        second = self.make_file("apply-journal-two.txt", "before-two")
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        second_plan = write_plan(second, b"before-two", b"after-two", home=self.home)
+        plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], second_plan.operations[0])).with_digest()
+        manifest = create_backup(plan, self.context)
+
+        def fail_before_second(manifest, transition, operation_index, operation, **kwargs):
+            if transition == "before" and operation_index == 1:
+                raise OSError("injected journal failure")
+
+        with patch("helper.transaction._append_journal", side_effect=fail_before_second):
+            with self.assertRaises(OperationApplyError) as raised:
+                apply_operations(plan, manifest, self.context)
+
+        self.assertEqual([(outcome.operation_index, outcome.status, outcome.error) for outcome in raised.exception.outcomes], [(0, "completed", None), (1, "failed", "journal_append_failed")])
+        self.assertEqual(first.read_text(), "after-one")
+        self.assertEqual(second.read_text(), "before-two")
 
     def test_restart_failure_after_successful_apply_requires_manual_recovery(self):
         target = self.make_file(".codex/config.toml", "before")

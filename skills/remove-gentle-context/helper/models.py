@@ -32,6 +32,7 @@ class OperationKind(StrEnum):
 
 class ReceiptStatus(StrEnum):
     COMPLETED = "completed"
+    NOT_STARTED = "not_started"
     ROLLED_BACK = "rolled_back"
     MANUAL_RECOVERY_REQUIRED = "manual_recovery_required"
     FAILED = "failed"

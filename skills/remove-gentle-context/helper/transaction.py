@@ -58,17 +58,25 @@ def apply_operations(plan: Plan, manifest: BackupManifest, context: RuntimeConte
         entry = entries_by_index.get(index)
         if entry is None:
             raise ValueError("apply_manifest_missing_entry")
-        _append_journal(manifest, "before", index, operation)
+        try:
+            _append_journal(manifest, "before", index, operation)
+        except BaseException as exc:
+            failed = OperationOutcome(index, str(operation.kind), operation.path, "failed", "journal_append_failed")
+            raise OperationApplyError("journal_append_failed", tuple(outcomes + [failed])) from exc
         try:
             _apply_one(index, operation, entry, context)
         except BaseException as exc:
             code = _error_code(exc, "operation_failed")
             failed = OperationOutcome(index, str(operation.kind), operation.path, "failed", code)
-            _append_journal(manifest, "after", index, operation, status="failed", error=code)
+            _append_journal_best_effort(manifest, "after", index, operation, status="failed", error=code)
             raise OperationApplyError(code, tuple(outcomes + [failed])) from exc
         outcome = OperationOutcome(index, str(operation.kind), operation.path, "completed")
         outcomes.append(outcome)
-        _append_journal(manifest, "after", index, operation, status="completed")
+        try:
+            _append_journal(manifest, "after", index, operation, status="completed")
+        except BaseException as exc:
+            failed = OperationOutcome(index, str(operation.kind), operation.path, "failed", "journal_append_failed")
+            raise OperationApplyError("journal_append_failed", tuple(outcomes + [failed])) from exc
     return tuple(outcomes)
 
 
@@ -78,16 +86,16 @@ def rollback(manifest: BackupManifest, outcomes: Iterable[OperationOutcome], con
     rollback_outcomes: list[OperationOutcome] = []
     for outcome in reversed(completed):
         entry = entries_by_index[outcome.operation_index]
-        _append_journal(manifest, "rollback_before", outcome.operation_index, None)
+        _append_journal_best_effort(manifest, "rollback_before", outcome.operation_index, None)
         try:
             _restore_entry(entry, manifest, context)
         except BaseException as exc:
             code = _error_code(exc, "rollback_failed")
             rollback_outcomes.append(OperationOutcome(outcome.operation_index, outcome.kind, outcome.path, "failed", code))
-            _append_journal(manifest, "rollback_after", outcome.operation_index, None, status="failed", error=code)
+            _append_journal_best_effort(manifest, "rollback_after", outcome.operation_index, None, status="failed", error=code)
             continue
         rollback_outcomes.append(OperationOutcome(outcome.operation_index, outcome.kind, outcome.path, "rolled_back"))
-        _append_journal(manifest, "rollback_after", outcome.operation_index, None, status="rolled_back")
+        _append_journal_best_effort(manifest, "rollback_after", outcome.operation_index, None, status="rolled_back")
     return tuple(rollback_outcomes)
 
 
@@ -126,17 +134,29 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
         status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.FAILED
         return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan, inventory=inventory)
 
-    manifest = create_backup(plan, context)
+    manifest: BackupManifest | None = None
+    try:
+        manifest = create_backup(plan, context)
+    except BaseException as exc:
+        code = _error_code(exc, "backup_failed")
+        restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
+        lifecycle_outcomes.extend(restart_outcomes)
+        status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.NOT_STARTED
+        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan, inventory=inventory)
+
     try:
         outcomes = apply_operations(plan, manifest, context)
     except OperationApplyError as exc:
         rollback_outcomes = rollback(manifest, exc.outcomes, context)
         restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
         lifecycle_outcomes.extend(restart_outcomes)
-        status = ReceiptStatus.ROLLED_BACK
-        if any(outcome.status == "failed" for outcome in rollback_outcomes) or _has_restart_failure(restart_outcomes):
-            status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED
+        status = _failure_status(exc.outcomes, rollback_outcomes, restart_outcomes)
         return Receipt(operation_outcomes=tuple(exc.outcomes + rollback_outcomes), backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan, inventory=inventory)
+    except BaseException as exc:
+        code = _error_code(exc, "transaction_failed")
+        restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
+        lifecycle_outcomes.extend(restart_outcomes)
+        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=ReceiptStatus.MANUAL_RECOVERY_REQUIRED, plan=plan, inventory=inventory)
 
     restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
     lifecycle_outcomes.extend(restart_outcomes)
@@ -289,6 +309,21 @@ def _restart_stopped(lifecycle: object, stopped: tuple[ProcessSnapshot, ...]) ->
 
 def _has_restart_failure(outcomes: tuple[LifecycleOutcome, ...]) -> bool:
     return any(outcome.action == "restart" and outcome.status == "failed" for outcome in outcomes)
+
+
+def _failure_status(operation_outcomes: tuple[OperationOutcome, ...], rollback_outcomes: tuple[OperationOutcome, ...], restart_outcomes: tuple[LifecycleOutcome, ...]) -> ReceiptStatus:
+    if any(outcome.status == "failed" for outcome in rollback_outcomes) or _has_restart_failure(restart_outcomes):
+        return ReceiptStatus.MANUAL_RECOVERY_REQUIRED
+    if _is_not_started_operation_failure(operation_outcomes):
+        return ReceiptStatus.NOT_STARTED
+    return ReceiptStatus.ROLLED_BACK
+
+
+def _is_not_started_operation_failure(operation_outcomes: tuple[OperationOutcome, ...]) -> bool:
+    if any(outcome.status == "completed" for outcome in operation_outcomes):
+        return False
+    failed = [outcome for outcome in operation_outcomes if outcome.status == "failed"]
+    return bool(failed) and all(outcome.error == "journal_append_failed" for outcome in failed)
 
 
 def restore(manifest_path: Path, approval: str, context: RuntimeContext) -> Receipt:
@@ -643,6 +678,13 @@ def _append_journal(manifest: BackupManifest, transition: str, operation_index: 
         handle.flush()
         _fsync_file(handle.fileno())
     _fsync_directory(journal.parent)
+
+
+def _append_journal_best_effort(manifest: BackupManifest, transition: str, operation_index: int, operation: Operation | None, *, status: str | None = None, error: str | None = None) -> None:
+    try:
+        _append_journal(manifest, transition, operation_index, operation, status=status, error=error)
+    except BaseException:
+        return
 
 
 def _decode_optional_image(encoded: str | None, declared_digest: str | None, mismatch_code: str) -> bytes | None:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -662,6 +664,78 @@ class CliTests(unittest.TestCase):
         succeeded = self.run_cli("inventory", "--home", str(self.home), "--platform", "linux", "--output", str(output), env=ignored_env)
         self.assertEqual(succeeded.returncode, 0)
         self.assertNotEqual(output.read_text(encoding="utf-8"), '{"previous":true}\n')
+
+    def test_cli_apply_writes_receipt_before_nonzero_exit_for_contained_transaction_failure(self) -> None:
+        cleanup = load_cleanup_module()
+        target = self.home / "cli-contained-failure.txt"
+        target.write_text("before", encoding="utf-8")
+        context = cleanup.RuntimeContext(cleanup.PlatformProfile("linux", self.home, {"XDG_STATE_HOME": str(self.temp_root / "state")}))
+        inventory = cleanup.Inventory(
+            os_name=context.profile.os_name,
+            home=str(self.home),
+            root_map=dict(sorted(cleanup.root_map(context).items())),
+            environment=dict(sorted(context.profile.env.items())),
+            adapter_versions={"fixture": "1.0"},
+            adapter_layouts={"fixture": "layout-v1"},
+        ).with_digest()
+        before = b"before"
+        after = b"after"
+        before_digest = "sha256:" + hashlib.sha256(before).hexdigest()
+        after_digest = "sha256:" + hashlib.sha256(after).hexdigest()
+        plan = cleanup.Plan(
+            inventory_digest=inventory.digest,
+            os_name=inventory.os_name,
+            home=inventory.home,
+            root_map=dict(sorted(inventory.root_map.items())),
+            adapter_versions={"fixture": "1.0"},
+            adapter_layouts={"fixture": "layout-v1"},
+            operations=(
+                cleanup.Operation(
+                    kind=cleanup.OperationKind.WRITE_FILE,
+                    path=str(target),
+                    preimage_base64=base64.b64encode(before).decode("ascii"),
+                    preimage_sha256=before_digest,
+                    postimage_base64=base64.b64encode(after).decode("ascii"),
+                    postimage_sha256=after_digest,
+                ),
+            ),
+        ).with_digest()
+        inventory_path = self.artifacts / "contained-inventory.json"
+        plan_path = self.artifacts / "contained-plan.json"
+        receipt_path = self.artifacts / "contained-receipt.json"
+        inventory_path.write_text(json.dumps(cleanup.inventory_artifact(inventory), sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        plan_path.write_text(json.dumps(cleanup.plan_artifact(plan), sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        fake_receipt = cleanup.Receipt(
+            operation_outcomes=(cleanup.OperationOutcome(0, str(cleanup.OperationKind.WRITE_FILE), str(target), "failed", "backup_failed"),),
+            status=cleanup.ReceiptStatus.NOT_STARTED,
+            plan=plan,
+            inventory=inventory,
+        )
+        class StdoutCapture:
+            def __init__(self) -> None:
+                self.buffer = io.BytesIO()
+
+            def write(self, _text: str) -> int:
+                return 0
+
+            def flush(self) -> None:
+                return
+
+        stdout = StdoutCapture()
+        stderr = io.StringIO()
+        argv = ["apply", "--inventory", str(inventory_path), "--plan", str(plan_path), "--approve", plan.digest or "", "--receipt", str(receipt_path)]
+
+        with mock.patch.object(cleanup, "execute_plan", return_value=fake_receipt), mock.patch.object(cleanup.sys, "stdout", stdout), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                cleanup.main(argv)
+
+        self.assertEqual(raised.exception.code, cleanup.EXIT_APPLY)
+        self.assertTrue(receipt_path.is_file())
+        persisted = cleanup.load_receipt(receipt_path)
+        self.assertEqual(persisted.status, cleanup.ReceiptStatus.NOT_STARTED)
+        self.assertEqual(persisted.operation_outcomes[0].error, "backup_failed")
+        self.assertEqual(json.loads(stdout.buffer.getvalue())["status"], "not_started")
+        self.assertIn("apply_not_started", stderr.getvalue())
 
     def test_pi_registry_without_reliable_probe_is_blocked_and_not_deleted(self) -> None:
         registry = self.seed_pi_registry_fixture()
