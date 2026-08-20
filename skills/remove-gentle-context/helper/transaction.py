@@ -161,16 +161,10 @@ def _validate_execution_artifacts(plan: Plan, inventory: Inventory, context: Run
         raise ValueError("execute_inventory_home_mismatch")
     if plan.home != context_home:
         raise ValueError("execute_plan_home_mismatch")
-    if inventory.home != plan.home:
-        raise ValueError("execute_plan_inventory_home_mismatch")
-
     if inventory.os_name != context.profile.os_name:
         raise ValueError("execute_inventory_os_mismatch")
     if plan.os_name != context.profile.os_name:
         raise ValueError("execute_plan_os_mismatch")
-    if inventory.os_name != plan.os_name:
-        raise ValueError("execute_plan_inventory_os_mismatch")
-
     context_roots = dict(sorted(root_map(context).items()))
     inventory_roots = dict(sorted(inventory.root_map.items()))
     plan_roots = dict(sorted(plan.root_map.items()))
@@ -178,8 +172,6 @@ def _validate_execution_artifacts(plan: Plan, inventory: Inventory, context: Run
         raise ValueError("execute_inventory_roots_mismatch")
     if plan_roots != context_roots:
         raise ValueError("execute_plan_roots_mismatch")
-    if plan_roots != inventory_roots:
-        raise ValueError("execute_plan_inventory_roots_mismatch")
 
 
 def _assert_plan_root_map_matches_context(plan: Plan, context: RuntimeContext, code: str) -> None:

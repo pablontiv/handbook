@@ -8,6 +8,7 @@ import stat
 import tempfile
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -77,19 +78,16 @@ def image(content: bytes) -> tuple[str, str]:
     return base64.b64encode(content).decode("ascii"), sha256_bytes(content)
 
 
-def plan_home_for(path: Path) -> str:
-    for parent in (path.parent, *path.parents):
-        if parent.name == "home":
-            return str(parent.resolve(strict=False))
-    return str(path.parent.resolve(strict=False))
+def plan_home(home: Path) -> str:
+    return str(home.resolve(strict=False))
 
 
-def write_plan(path: Path, before: bytes | None, after: bytes, *, details: dict[str, object] | None = None) -> Plan:
+def write_plan(path: Path, before: bytes | None, after: bytes, *, home: Path, details: dict[str, object] | None = None) -> Plan:
     pre_b64, pre_digest = (None, None) if before is None else image(before)
     post_b64, post_digest = image(after)
     return Plan(
         os_name="linux",
-        home=plan_home_for(path),
+        home=plan_home(home),
         operations=(
             Operation(
                 kind=OperationKind.WRITE_FILE,
@@ -104,8 +102,8 @@ def write_plan(path: Path, before: bytes | None, after: bytes, *, details: dict[
     ).with_digest()
 
 
-def lifecycle_write_plan(path: Path, before: bytes, after: bytes) -> Plan:
-    base = write_plan(path, before, after)
+def lifecycle_write_plan(path: Path, before: bytes, after: bytes, *, home: Path) -> Plan:
+    base = write_plan(path, before, after, home=home)
     return Plan(
         os_name=base.os_name,
         home=base.home,
@@ -114,11 +112,11 @@ def lifecycle_write_plan(path: Path, before: bytes, after: bytes) -> Plan:
     ).with_digest()
 
 
-def delete_plan(path: Path, before: bytes) -> Plan:
+def delete_plan(path: Path, before: bytes, *, home: Path) -> Plan:
     pre_b64, pre_digest = image(before)
     return Plan(
         os_name="linux",
-        home=plan_home_for(path),
+        home=plan_home(home),
         operations=(Operation(kind=OperationKind.DELETE_FILE, path=str(path), preimage_base64=pre_b64, preimage_sha256=pre_digest),),
     ).with_digest()
 
@@ -131,8 +129,8 @@ def delete_plan_for_many(paths_and_preimages: tuple[tuple[Path, bytes], ...], ho
     return Plan(os_name="linux", home=str(home), operations=tuple(operations)).with_digest()
 
 
-def remove_empty_dir_plan(path: Path) -> Plan:
-    return Plan(os_name="linux", home=plan_home_for(path), operations=(Operation(kind=OperationKind.REMOVE_EMPTY_DIRECTORY, path=str(path)),)).with_digest()
+def remove_empty_dir_plan(path: Path, *, home: Path) -> Plan:
+    return Plan(os_name="linux", home=plan_home(home), operations=(Operation(kind=OperationKind.REMOVE_EMPTY_DIRECTORY, path=str(path)),)).with_digest()
 
 
 @contextmanager
@@ -234,9 +232,22 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(receipt.inventory, inventory)
         return inventory, bound_plan, receipt
 
+    def execution_artifact_fixture(self) -> tuple[Path, Inventory, Plan, FakeTransactionLifecycle]:
+        target = self.make_file("artifact-binding.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        return target, inventory, plan, FakeTransactionLifecycle()
+
+    def assert_execution_artifact_rejected_without_side_effects(self, inventory: Inventory, plan: Plan, lifecycle: FakeTransactionLifecycle, target: Path, code: str) -> None:
+        with self.assertRaisesRegex(ValueError, code):
+            execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, [])
+        self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
+
     def test_preimage_drift_aborts_before_backup_or_mutation(self):
         target = self.make_file(".codex/config.toml", "before")
-        plan = write_plan(target, b"before", b"after")
+        plan = write_plan(target, b"before", b"after", home=self.home)
         target.write_text("drift")
 
         with self.assertRaisesRegex(ValueError, "preflight_preimage_drift"):
@@ -247,7 +258,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_zero_inode_aborts_before_backup_or_mutation(self):
         target = self.make_file("zero-inode.txt", "before")
-        plan = write_plan(target, b"before", b"after")
+        plan = write_plan(target, b"before", b"after", home=self.home)
         original_lstat = os.lstat
         original_fstat = os.fstat
 
@@ -269,7 +280,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_execute_plan_missing_inventory_is_rejected_before_lifecycle_backup_or_mutation(self):
         target = self.make_file("missing-inventory.txt", "before")
-        _inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after"))
+        _inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
         lifecycle = FakeTransactionLifecycle()
 
         with self.assertRaises(TypeError):
@@ -279,9 +290,9 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(lifecycle.calls, [])
         self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
 
-    def test_execute_plan_mismatched_inventory_is_rejected_before_lifecycle_backup_or_mutation(self):
+    def test_execute_plan_invalid_artifacts_are_rejected_before_lifecycle_backup_or_mutation(self):
         target = self.make_file("mismatched-inventory.txt", "before")
-        correct_inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after"))
+        correct_inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
         wrong_inventory = self.canonical_inventory(adapter_versions={"other": "1"})
         lifecycle = FakeTransactionLifecycle()
 
@@ -292,6 +303,66 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "before")
         self.assertEqual(lifecycle.calls, [])
         self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
+
+        digest_cases = (
+            (
+                "execute_inventory_digest_mismatch",
+                lambda inventory, plan: (replace(inventory, digest="sha256:" + "0" * 64), plan),
+            ),
+            (
+                "execute_plan_digest_mismatch",
+                lambda inventory, plan: (inventory, replace(plan, digest="sha256:" + "0" * 64)),
+            ),
+        )
+        for code, tamper in digest_cases:
+            with self.subTest(code=code):
+                target, inventory, plan, lifecycle = self.execution_artifact_fixture()
+                tampered_inventory, tampered_plan = tamper(inventory, plan)
+                self.assert_execution_artifact_rejected_without_side_effects(tampered_inventory, tampered_plan, lifecycle, target, code)
+
+        other_home = self.temp_root / "other-home"
+        other_home.mkdir()
+        bad_roots = {**dict(root_map(self.context)), "unexpected": str(self.temp_root / "unexpected-root")}
+        binding_cases = (
+            (
+                "execute_inventory_home_mismatch",
+                lambda inventory, plan: (
+                    (bad_inventory := replace(inventory, home=str(other_home.resolve(strict=False))).with_digest()),
+                    replace(plan, inventory_digest=bad_inventory.digest).with_digest(),
+                ),
+            ),
+            (
+                "execute_plan_home_mismatch",
+                lambda inventory, plan: (inventory, replace(plan, home=str(other_home.resolve(strict=False))).with_digest()),
+            ),
+            (
+                "execute_inventory_os_mismatch",
+                lambda inventory, plan: (
+                    (bad_inventory := replace(inventory, os_name="darwin").with_digest()),
+                    replace(plan, inventory_digest=bad_inventory.digest).with_digest(),
+                ),
+            ),
+            (
+                "execute_plan_os_mismatch",
+                lambda inventory, plan: (inventory, replace(plan, os_name="darwin").with_digest()),
+            ),
+            (
+                "execute_inventory_roots_mismatch",
+                lambda inventory, plan: (
+                    (bad_inventory := replace(inventory, root_map=bad_roots).with_digest()),
+                    replace(plan, inventory_digest=bad_inventory.digest).with_digest(),
+                ),
+            ),
+            (
+                "execute_plan_roots_mismatch",
+                lambda inventory, plan: (inventory, replace(plan, root_map=bad_roots).with_digest()),
+            ),
+        )
+        for code, tamper in binding_cases:
+            with self.subTest(code=code):
+                target, inventory, plan, lifecycle = self.execution_artifact_fixture()
+                tampered_inventory, tampered_plan = tamper(inventory, plan)
+                self.assert_execution_artifact_rejected_without_side_effects(tampered_inventory, tampered_plan, lifecycle, target, code)
 
     def test_second_write_failure_rolls_back_first_write(self):
         first = self.make_file("one", "before-one")
@@ -319,7 +390,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_restore_rejects_manifest_path_escape(self):
         target = self.make_file("safe.txt", "before")
-        plan = delete_plan(target, b"before")
+        plan = delete_plan(target, b"before", home=self.home)
         manifest = create_backup(plan, self.context)
         data = json.loads(manifest.path.read_text())
         data["entries"][0]["relative_path"] = "../../outside"
@@ -331,7 +402,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_backup_payload_write_failure_does_not_mutate_target(self):
         target = self.make_file("config.json", "before")
-        plan = delete_plan(target, b"before")
+        plan = delete_plan(target, b"before", home=self.home)
 
         with patch("helper.transaction._write_verified_payload", side_effect=OSError("injected backup failure")):
             with self.assertRaisesRegex(OSError, "injected backup failure"):
@@ -356,7 +427,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_declared_json_parse_failure_aborts_before_replace(self):
         target = self.make_file("settings.json", '{"before": true}\n')
-        plan = write_plan(target, b'{"before": true}\n', b'{"after": ', details={"parse": "json"})
+        plan = write_plan(target, b'{"before": true}\n', b'{"after": ', home=self.home, details={"parse": "json"})
 
         _inventory, plan, receipt = self.execute_bound(plan)
 
@@ -366,8 +437,8 @@ class TransactionTests(unittest.TestCase):
     def test_delete_unlink_failure_leaves_file_and_reports_manual_recovery_when_rollback_fails(self):
         first = self.make_file("first", "before-first")
         second = self.make_file("second", "before-second")
-        first_plan = write_plan(first, b"before-first", b"after-first")
-        second_delete = delete_plan(second, b"before-second").operations[0]
+        first_plan = write_plan(first, b"before-first", b"after-first", home=self.home)
+        second_delete = delete_plan(second, b"before-second", home=self.home).operations[0]
         plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], second_delete)).with_digest()
 
         original_replace = os.replace
@@ -386,7 +457,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_idempotent_noop_still_requires_preimage(self):
         target = self.make_file("noop.txt", "same")
-        plan = write_plan(target, b"same", b"same")
+        plan = write_plan(target, b"same", b"same", home=self.home)
 
         _inventory, plan, receipt = self.execute_bound(plan)
 
@@ -401,12 +472,12 @@ class TransactionTests(unittest.TestCase):
         real = self.make_file("real.json", "{}")
         link = self.home / "link.json"
         link.symlink_to(real)
-        plan = delete_plan(link, b"{}")
+        plan = delete_plan(link, b"{}", home=self.home)
         with self.assertRaisesRegex(ValueError, "preflight_unexpected_link"):
             create_backup(plan, self.context)
 
         target = self.make_file("reparse.json", "{}")
-        reparse_plan = delete_plan(target, b"{}")
+        reparse_plan = delete_plan(target, b"{}", home=self.home)
         fake_stat = type("Stat", (), {"st_file_attributes": 0x400, "st_mode": target.lstat().st_mode, "st_size": 2})()
         with patch("helper.paths.os.lstat", return_value=fake_stat), patch("helper.transaction.os.lstat", return_value=fake_stat):
             with self.assertRaisesRegex(ValueError, "preflight_unexpected_link"):
@@ -416,7 +487,7 @@ class TransactionTests(unittest.TestCase):
         target = self.make_file("race.txt", "before")
         replacement = self.home / "replacement-source.txt"
         replacement.write_text("before")
-        plan = delete_plan(target, b"before")
+        plan = delete_plan(target, b"before", home=self.home)
         original_lstat = os.lstat
         swapped = False
 
@@ -441,7 +512,7 @@ class TransactionTests(unittest.TestCase):
         target = self.make_file("apply-race.txt", "before")
         replacement = self.home / "apply-replacement-source.txt"
         replacement.write_text("before")
-        plan = write_plan(target, b"before", b"after")
+        plan = write_plan(target, b"before", b"after", home=self.home)
         manifest = create_backup(plan, self.context)
         original_lstat = os.lstat
         swapped = False
@@ -464,7 +535,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_manifest_tamper_is_rejected_by_restore_digest(self):
         target = self.make_file("restore.txt", "before")
-        manifest = create_backup(delete_plan(target, b"before"), self.context)
+        manifest = create_backup(delete_plan(target, b"before", home=self.home), self.context)
         data = json.loads(manifest.path.read_text())
         data["entries"][0]["sha256"] = sha256_bytes(b"tampered")
         manifest.path.write_text(json.dumps(data))
@@ -474,7 +545,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_restore_is_digest_approved_and_backs_up_replacement_preimage(self):
         target = self.make_file("restore.txt", "before")
-        manifest = create_backup(delete_plan(target, b"before"), self.context)
+        manifest = create_backup(delete_plan(target, b"before", home=self.home), self.context)
         target.write_text("replacement")
 
         with self.assertRaisesRegex(ValueError, "restore_approval_mismatch"):
@@ -495,7 +566,7 @@ class TransactionTests(unittest.TestCase):
         target.write_text("before")
         target.chmod(0o640)
         context = RuntimeContext(self.context.profile, project_roots=(project,))
-        plan = write_plan(target, b"before", b"after")
+        plan = write_plan(target, b"before", b"after", home=self.home)
 
         with self.assertRaisesRegex(ValueError, "preflight_path_escape"):
             create_backup(plan, self.context)
@@ -522,7 +593,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_restore_replacement_zero_inode_aborts_before_mutation(self):
         target = self.make_file("restore-zero-inode.txt", "before")
-        manifest = create_backup(delete_plan(target, b"before"), self.context)
+        manifest = create_backup(delete_plan(target, b"before", home=self.home), self.context)
         target.write_text("replacement")
         original_lstat = os.lstat
         original_fstat = os.fstat
@@ -599,7 +670,7 @@ class TransactionTests(unittest.TestCase):
         directory = self.home / "dir"
         directory.mkdir()
         (directory / "child").write_text("x")
-        plan = remove_empty_dir_plan(directory)
+        plan = remove_empty_dir_plan(directory, home=self.home)
 
         _inventory, plan, receipt = self.execute_bound(plan)
 
@@ -613,7 +684,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_shutdown_drift_after_graceful_stop_aborts_before_backup_or_mutation_and_restarts(self):
         target = self.make_file(".codex/config.toml", "before")
-        plan = lifecycle_write_plan(target, b"before", b"after")
+        plan = lifecycle_write_plan(target, b"before", b"after", home=self.home)
         lifecycle = FakeTransactionLifecycle(target=target, shutdown_content="shutdown-drift")
 
         _inventory, plan, receipt = self.execute_bound(plan, lifecycle)
@@ -627,12 +698,12 @@ class TransactionTests(unittest.TestCase):
 
     def test_next_plan_created_while_client_closed_binds_stable_shutdown_bytes(self):
         target = self.make_file(".codex/config.toml", "before")
-        drift_plan = lifecycle_write_plan(target, b"before", b"after")
+        drift_plan = lifecycle_write_plan(target, b"before", b"after", home=self.home)
         drift_lifecycle = FakeTransactionLifecycle(target=target, shutdown_content="shutdown-drift")
         _inventory, drift_plan, drift_receipt = self.execute_bound(drift_plan, drift_lifecycle)
         self.assertEqual(drift_receipt.status, ReceiptStatus.FAILED)
 
-        closed_plan = lifecycle_write_plan(target, b"shutdown-drift", b"after")
+        closed_plan = lifecycle_write_plan(target, b"shutdown-drift", b"after", home=self.home)
         closed_lifecycle = FakeTransactionLifecycle(running=False)
         _inventory, closed_plan, receipt = self.execute_bound(closed_plan, closed_lifecycle)
 
@@ -642,7 +713,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_restart_failure_after_shutdown_drift_requires_manual_recovery(self):
         target = self.make_file(".codex/config.toml", "before")
-        plan = lifecycle_write_plan(target, b"before", b"after")
+        plan = lifecycle_write_plan(target, b"before", b"after", home=self.home)
         lifecycle = FakeTransactionLifecycle(target=target, shutdown_content="shutdown-drift", restart_succeeds=False)
 
         _inventory, plan, receipt = self.execute_bound(plan, lifecycle)
@@ -655,7 +726,7 @@ class TransactionTests(unittest.TestCase):
 
     def test_restart_failure_after_successful_apply_requires_manual_recovery(self):
         target = self.make_file(".codex/config.toml", "before")
-        plan = lifecycle_write_plan(target, b"before", b"after")
+        plan = lifecycle_write_plan(target, b"before", b"after", home=self.home)
         lifecycle = FakeTransactionLifecycle(restart_succeeds=False)
 
         _inventory, plan, receipt = self.execute_bound(plan, lifecycle)
