@@ -63,6 +63,12 @@ Review path:
 - Use GitHub Issues to report defects, unsafe behavior, missing preservation coverage, or client/platform support requests.
 - Include inventory/plan/receipt/verification paths and digests when safe to share.
 
+### `model-optimizer`
+
+Optimize Pi and OpenCode model assignments with runtime-local evidence. The skill includes a read-only Python 3.11+ helper for inventory and bounded live checks. It does not automatically apply configuration, configure providers, install runtimes, or create fallback routing; online sources are metadata only.
+
+Install manually by copying or installing the self-contained [`skills/model-optimizer/`](skills/model-optimizer/) directory through your Agent Skills mechanism.
+
 ## Planned skills
 
 - None currently listed.

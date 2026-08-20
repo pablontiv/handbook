@@ -1,0 +1,52 @@
+{
+  "providers": {
+    "github-copilot": {
+      "apiKey": "sk-must-never-leak",
+      "models": [
+        {
+          "id": "gemini-3.1-pro-preview",
+          "context": 1000000,
+          "maxTokens": 64000,
+          "inputModes": ["text", "image"],
+          "costs": {"input": 1.25, "output": 10.0},
+          "cache": {"read": 0.10, "write": 0.50},
+          "thinking": {"minimal": true, "medium": true, "high": true},
+          "family": "gemini",
+          "toolCall": true
+        }
+      ]
+    },
+    "nan-builders": {
+      "apiKey": "sk-must-never-leak",
+      "models": [
+        {
+          "id": "qwen3.6",
+          "context": 262100,
+          "maxTokens": 16400,
+          "inputModes": ["text", "image"],
+          "costs": {"input": 0.20, "output": 0.80},
+          "cache": {"read": 0.02, "write": 0.08},
+          "thinking": {"minimal": true, "medium": true, "high": true},
+          "family": "qwen",
+          "toolCall": true
+        }
+      ]
+    },
+    "openai-codex": {
+      "apiKey": "sk-must-never-leak",
+      "models": [
+        {
+          "id": "gpt-5.6-terra",
+          "context": 272000,
+          "maxTokens": 128000,
+          "inputModes": ["text", "image"],
+          "costs": {"input": 1.00, "output": 8.00},
+          "cache": {"read": 0.05, "write": 0.25},
+          "thinking": {"minimal": true, "medium": true, "high": true},
+          "family": "gpt",
+          "toolCall": true
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,4 @@
+provider        model                   context  max-out  thinking  images
+github-copilot  gemini-3.1-pro-preview  1M       64K      yes       yes
+nan-builders    qwen3.6                 262.1K   16.4K    yes       yes
+openai-codex    gpt-5.6-terra           272K     128K     yes       yes
