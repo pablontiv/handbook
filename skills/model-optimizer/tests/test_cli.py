@@ -561,6 +561,41 @@ class CliTests(unittest.TestCase):
         self.assertEqual(opencode_check_code, 0, opencode_check_stderr)
         self.assertEqual(after, before)
 
+    def test_main_rejects_injected_test_overrides_without_test_mode_before_runner_or_artifact_access(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runner = FakeRunner(())
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch("scripts.model_optimizer.reject_runtime_config_output") as reject_output:
+                with patch("scripts.model_optimizer.load_inventory", side_effect=RuntimeError("runtime_load_inventory_called")) as load_inventory:
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        code = main([
+                            "check", "--inventory", str(root / "inventory.json"),
+                            "--model", "nan/qwen3.6", "--timeout", "1", "--output", str(root / "h.json"),
+                        ], runner=runner, environ={"HOME": str(root)}, which=lambda _: str(root / "bin" / "pi"))
+        self.assertEqual(code, 2)
+        self.assertIn("usage_error:test_overrides_require_test_mode", stderr.getvalue())
+        self.assertEqual(runner.argv, [])
+        reject_output.assert_not_called()
+        load_inventory.assert_not_called()
+        self.assertFalse((root / "h.json").exists())
+
+    def test_main_help_paths_allow_direct_execution_without_test_overrides(self):
+        top_stdout, top_stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(top_stdout), redirect_stderr(top_stderr):
+            top_code = main(["--help"])
+
+        inventory_stdout, inventory_stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(inventory_stdout), redirect_stderr(inventory_stderr):
+            inventory_code = main(["inventory", "--help"])
+
+        self.assertEqual(top_code, 0)
+        self.assertEqual(inventory_code, 0)
+        self.assertIn("usage:", top_stdout.getvalue())
+        self.assertIn("usage:", inventory_stdout.getvalue())
+        self.assertEqual(top_stderr.getvalue(), "")
+        self.assertEqual(inventory_stderr.getvalue(), "")
+
     def test_usage_and_schema_errors_return_two_without_traceback(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

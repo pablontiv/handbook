@@ -92,6 +92,12 @@ def main(argv: Sequence[str] | None = None, runner=None, environ=None, which: Ca
         print("usage_error:python_3_11_required", file=sys.stderr)
         return EXIT_USAGE_OR_SCHEMA
 
+    if _uses_test_overrides(runner, environ, which):
+        effective_environ = os.environ if environ is None else environ
+        if effective_environ.get("MODEL_OPTIMIZER_TEST_MODE") != "1":
+            print("usage_error:test_overrides_require_test_mode", file=sys.stderr)
+            return EXIT_USAGE_OR_SCHEMA
+
     actual_runner = runner if runner is not None else CommandRunner()
     actual_environ = dict(os.environ if environ is None else environ)
     actual_which = which if which is not None else shutil.which
@@ -258,6 +264,10 @@ def _schema_or_usage_message(exc: BaseException) -> str:
 def _home_from_env(environ: dict[str, str]) -> Path:
     home = environ.get("HOME") or environ.get("USERPROFILE") or str(Path.home())
     return Path(home)
+
+
+def _uses_test_overrides(runner, environ, which: Callable[[str], str | None] | None) -> bool:
+    return runner is not None or environ is not None or which is not None
 
 
 def _dedupe(values: Sequence[str]) -> tuple[str, ...]:
