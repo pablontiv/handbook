@@ -4,11 +4,18 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from helper.models import HealthArtifact, Inventory
+
+_REPLACE_RETRY_ATTEMPTS = 3
+_REPLACE_RETRY_SLEEP_SECONDS = 0.01
+_WRITE_LOCK_STRIPES = 64
+_WRITE_LOCKS = tuple(threading.Lock() for _ in range(_WRITE_LOCK_STRIPES))
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -104,26 +111,46 @@ def _reject_json_constant(_constant: str) -> None:
 def _atomic_write_text(path: Path, text: str) -> None:
     target = Path(path)
     encoded = text.encode("utf-8")
-    fd: int | None = None
-    temp_name: str | None = None
-    try:
-        fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
-        with os.fdopen(fd, "wb") as handle:
-            fd = None
-            handle.write(encoded)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, target)
-        temp_name = None
-        _fsync_directory(target.parent)
-    finally:
-        if fd is not None:
-            os.close(fd)
-        if temp_name is not None:
-            try:
-                os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
+    write_lock = _write_lock_for_target(target)
+    with write_lock:
+        fd: int | None = None
+        temp_name: str | None = None
+        try:
+            fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+            with os.fdopen(fd, "wb") as handle:
+                fd = None
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            _replace_with_retry(temp_name, target)
+            temp_name = None
+            _fsync_directory(target.parent)
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if temp_name is not None:
+                try:
+                    os.unlink(temp_name)
+                except FileNotFoundError:
+                    pass
+
+
+def _replace_with_retry(temp_name: str, target: Path) -> None:
+    for attempt in range(1, _REPLACE_RETRY_ATTEMPTS + 1):
+        try:
+            os.replace(temp_name, target)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_RETRY_ATTEMPTS:
+                raise
+            time.sleep(_REPLACE_RETRY_SLEEP_SECONDS)
+
+
+def _write_lock_for_target(path: Path) -> threading.Lock:
+    resolved = str(_resolved(path))
+    digest = hashlib.blake2b(resolved.encode("utf-8"), digest_size=8).digest()
+    stripe_index = int.from_bytes(digest, "big") % _WRITE_LOCK_STRIPES
+    return _WRITE_LOCKS[stripe_index]
 
 
 def _fsync_directory(directory: Path) -> None:

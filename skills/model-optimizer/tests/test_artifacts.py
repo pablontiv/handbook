@@ -2,10 +2,14 @@ import json
 import math
 import os
 import tempfile
+import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
+import helper.artifacts as artifacts_module
 from helper.artifacts import (
     canonical_bytes,
     digest_json,
@@ -294,6 +298,77 @@ class ArtifactTests(unittest.TestCase):
             loaded = load_health(output)
             self.assertIn(loaded.inventory_digest, {health.inventory_digest for health in artifacts})
             self.assertEqual(list(root.glob(".health.json.*.tmp")), [])
+
+    def test_atomic_write_retries_transient_permission_error_from_replace(self):
+        inventory = Inventory.empty(RuntimeInfo(RuntimeKind.PI, "0.84.2", "/work"))
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "inventory.json"
+            real_replace = os.replace
+
+            attempts = 0
+
+            def flaky_replace(src: str, dst: str | os.PathLike[str]) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError(5, "Access denied")
+                real_replace(src, dst)
+
+            with mock.patch("helper.artifacts.os.replace", side_effect=flaky_replace) as replace_mock, \
+                    mock.patch("helper.artifacts.time.sleep") as sleep_mock:
+                write_inventory(output, inventory)
+
+            self.assertEqual(replace_mock.call_count, 2)
+            sleep_mock.assert_called_once_with(artifacts_module._REPLACE_RETRY_SLEEP_SECONDS)
+            self.assertEqual(load_inventory(output).digest, inventory.digest)
+            self.assertEqual(list(Path(td).glob(".inventory.json.*.tmp")), [])
+
+    def test_atomic_write_reraises_permission_error_after_bounded_retries_and_cleans_temp(self):
+        inventory = Inventory.empty(RuntimeInfo(RuntimeKind.PI, "0.84.2", "/work"))
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "inventory.json"
+            with mock.patch("helper.artifacts.os.replace", side_effect=PermissionError(5, "Access denied")) as replace_mock, \
+                    mock.patch("helper.artifacts.time.sleep") as sleep_mock:
+                with self.assertRaises(PermissionError):
+                    write_inventory(output, inventory)
+
+            self.assertEqual(replace_mock.call_count, artifacts_module._REPLACE_RETRY_ATTEMPTS)
+            self.assertEqual(sleep_mock.call_count, artifacts_module._REPLACE_RETRY_ATTEMPTS - 1)
+            self.assertFalse(output.exists())
+            self.assertEqual(list(Path(td).glob(".inventory.json.*.tmp")), [])
+
+    def test_same_target_replace_critical_section_is_serialized(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "inventory.json"
+            inventories = [Inventory.empty(RuntimeInfo(RuntimeKind.PI, f"0.84.{index}", "/work")) for index in range(8)]
+            start = threading.Barrier(len(inventories))
+            counters_lock = threading.Lock()
+            active = 0
+            max_active = 0
+            real_replace = os.replace
+
+            def instrumented_replace(src: str, dst: str | os.PathLike[str]) -> None:
+                nonlocal active, max_active
+                with counters_lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                time.sleep(0.02)
+                try:
+                    real_replace(src, dst)
+                finally:
+                    with counters_lock:
+                        active -= 1
+
+            def write_one(inventory: Inventory) -> None:
+                start.wait(timeout=5)
+                write_inventory(output, inventory)
+
+            with mock.patch("helper.artifacts.os.replace", side_effect=instrumented_replace):
+                with ThreadPoolExecutor(max_workers=len(inventories)) as executor:
+                    list(executor.map(write_one, inventories))
+
+            self.assertEqual(max_active, 1)
 
     def test_health_round_trip_preserves_schema_without_self_digest(self):
         health = HealthArtifact(

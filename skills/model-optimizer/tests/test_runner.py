@@ -77,7 +77,12 @@ class RunnerTests(unittest.TestCase):
                 (
                     sys.executable,
                     "-c",
-                    "import os; print('snowman=☃ café'); print(os.getcwd())",
+                    (
+                        "import os,sys; "
+                        "sys.stdout.buffer.write('snowman=☃ café\\n'.encode('utf-8')); "
+                        "sys.stdout.buffer.write((os.getcwd()+'\\n').encode('utf-8')); "
+                        "sys.stderr.buffer.write('stderr=☃ café'.encode('utf-8'))"
+                    ),
                 ),
                 timeout=5,
                 cwd=temp_root,
@@ -86,6 +91,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(lines[0], "snowman=☃ café")
         self.assertEqual(Path(lines[1]).resolve(), temp_root.resolve())
+        self.assertEqual(result.stderr, "stderr=☃ café")
 
     def test_invalid_utf8_output_uses_replacement_characters(self):
         result = CommandRunner().run(
@@ -264,6 +270,7 @@ class RunnerTests(unittest.TestCase):
         self.assertNotEqual(first, "")
         self.assertEqual(first, second)
 
+    @unittest.skipIf(os.name == "nt", "POSIX killpg fallback is validated on POSIX hosts only")
     def test_posix_timeout_permission_error_falls_back_to_direct_process_signals(self):
         class FakeProcess:
             pid = 12345
