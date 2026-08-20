@@ -22,6 +22,7 @@ _BROKEN_LOGO_FILE = "gentle-logo.tsx"
 _DEFAULT_GENTLE_AGENT = "gentle-orchestrator"
 _DEFAULT_FALLBACK_AGENT = "general"
 _CONFIG_FAMILIES = ("agent", "agents", "command", "commands", "prompt", "prompts", "skill", "skills")
+_AGENT_CONFIG_FAMILIES = ("agent", "agents")
 _EXACT_FILE_ROOTS = ("agent", "agents", "command", "commands", "prompt", "prompts", "skill", "skills")
 _EXACT_FILE_SUFFIXES = (".md", ".json")
 
@@ -363,16 +364,34 @@ def _sanitize_config(data: Mapping[str, Any], gentle_names: Sequence[str], gener
 
     default_agent = data.get("default_agent")
     default_change_allowed = False
+    protected_default_families: set[str] = set()
     if isinstance(default_agent, str) and default_agent in gentle_set:
-        agent_map = data.get("agent")
-        general_configured = isinstance(agent_map, Mapping) and _DEFAULT_FALLBACK_AGENT in agent_map
-        default_proven = default_agent in proven_by_family.get("agent", {})
-        default_change_allowed = default_proven and (general_configured or general_builtin_fallback)
-        if default_change_allowed:
-            after["default_agent"] = _DEFAULT_FALLBACK_AGENT
-            actions.append({"kind": "default_agent", "from": default_agent, "to": _DEFAULT_FALLBACK_AGENT, "fallback": "configured" if general_configured else "documented_builtin"})
+        default_families = tuple(
+            family
+            for family in _AGENT_CONFIG_FAMILIES
+            if isinstance(data.get(family), Mapping) and default_agent in data[family]
+        )
+        if len(default_families) == 1:
+            default_family = default_families[0]
+            agent_map = data.get(default_family)
+            general_configured = isinstance(agent_map, Mapping) and _DEFAULT_FALLBACK_AGENT in agent_map
+            default_proven = default_agent in proven_by_family.get(default_family, {})
+            default_change_allowed = default_proven and (general_configured or general_builtin_fallback)
+            if default_change_allowed:
+                after["default_agent"] = _DEFAULT_FALLBACK_AGENT
+                actions.append({
+                    "kind": "default_agent",
+                    "family": default_family,
+                    "from": default_agent,
+                    "to": _DEFAULT_FALLBACK_AGENT,
+                    "fallback": "configured" if general_configured else "documented_builtin",
+                })
+            else:
+                ambiguous_default = True
+                protected_default_families.add(default_family)
         else:
             ambiguous_default = True
+            protected_default_families.update(default_families)
 
     for family in _CONFIG_FAMILIES:
         raw = after.get(family)
@@ -381,7 +400,7 @@ def _sanitize_config(data: Mapping[str, Any], gentle_names: Sequence[str], gener
         removed: list[str] = []
         proof_evidence: list[dict[str, object]] = []
         for name, proof in proven_by_family.get(family, {}).items():
-            if family == "agent" and name == default_agent and not default_change_allowed:
+            if family in protected_default_families and name == default_agent:
                 continue
             if name in raw:
                 raw.pop(name, None)

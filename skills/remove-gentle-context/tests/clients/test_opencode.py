@@ -88,6 +88,7 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertNotIn("gentle-orchestrator", config["agent"])
         self.assertNotIn("sdd-apply", config["agent"])
         self.assertIn("unrelated-agent", config["agent"])
+        self.assertIn("sdd-apply", config["command"])
         self.assertIn("keep-command", config["command"])
         self.assertIn("keep-skill", config["skill"])
 
@@ -189,6 +190,76 @@ class OpenCodeAdapterTests(unittest.TestCase):
         data = json.loads(self.config.read_text())
         data["agent"]["general"] = {"description": "fallback"}
         data["agent"]["gentle-orchestrator"] = {"description": "User-authored same-name default"}
+        self.config.write_text(json.dumps(data, indent=2) + "\n")
+
+        inventory = build_inventory(self.context, (OpenCodeAdapter(self.catalog),))
+        plan = build_plan(inventory, self.context, (OpenCodeAdapter(self.catalog),))
+        config_operations = [operation for operation in plan.operations if operation.path == str(self.config)]
+        self.assertEqual(config_operations, [])
+        defaults = [candidate for candidate in inventory.candidates if candidate.details.get("kind") == "default_agent"]
+        self.assertEqual(len(defaults), 1)
+        self.assertEqual(defaults[0].ownership, Ownership.AMBIGUOUS)
+        self.assertIn(defaults[0].candidate_id, plan.blocked_candidate_ids)
+
+    def test_plural_agents_proven_default_migrates_to_configured_general_fallback(self) -> None:
+        data = json.loads(self.config.read_text())
+        data.pop("agent")
+        data["agents"] = {
+            "general": {"description": "Configured fallback"},
+            "gentle-orchestrator": {
+                "description": "Gentle OpenCode orchestrator",
+                "managed_marker": "<!-- gentle-ai:gentle-orchestrator -->",
+            },
+            "unrelated-agent": {"description": "Keep this agent"},
+        }
+        self.config.write_text(json.dumps(data, indent=2) + "\n")
+
+        plan = plan_for(self.context, OpenCodeAdapter(self.catalog, general_builtin_fallback=False))
+        postimages = [operation for operation in plan.operations if operation.path == str(self.config)]
+        self.assertEqual(len(postimages), 1)
+        decoded = json.loads(base64.b64decode(postimages[0].postimage_base64 or ""))
+
+        self.assertEqual(decoded["default_agent"], "general")
+        self.assertNotIn("gentle-orchestrator", decoded["agents"])
+        self.assertIn("general", decoded["agents"])
+        self.assertIn("unrelated-agent", decoded["agents"])
+
+    def test_plural_agents_proven_default_without_allowed_fallback_is_blocked_not_dangling(self) -> None:
+        data = json.loads(self.config.read_text())
+        data.pop("agent")
+        data["agents"] = {
+            "gentle-orchestrator": {
+                "description": "Gentle OpenCode orchestrator",
+                "managed_marker": "<!-- gentle-ai:gentle-orchestrator -->",
+            },
+            "unrelated-agent": {"description": "Keep this agent"},
+        }
+        self.config.write_text(json.dumps(data, indent=2) + "\n")
+
+        inventory = build_inventory(self.context, (OpenCodeAdapter(self.catalog, general_builtin_fallback=False),))
+        plan = build_plan(inventory, self.context, (OpenCodeAdapter(self.catalog, general_builtin_fallback=False),))
+        config_operations = [operation for operation in plan.operations if operation.path == str(self.config)]
+        self.assertEqual(config_operations, [])
+        defaults = [candidate for candidate in inventory.candidates if candidate.details.get("kind") == "default_agent"]
+        self.assertEqual(len(defaults), 1)
+        self.assertEqual(defaults[0].ownership, Ownership.AMBIGUOUS)
+        self.assertIn(defaults[0].candidate_id, plan.blocked_candidate_ids)
+
+        config = json.loads(self.config.read_text())
+        self.assertEqual(config["default_agent"], "gentle-orchestrator")
+        self.assertIn("gentle-orchestrator", config["agents"])
+
+    def test_default_agent_conflicting_singular_plural_proof_fails_closed(self) -> None:
+        data = json.loads(self.config.read_text())
+        data["agent"]["general"] = {"description": "Configured fallback"}
+        data["agent"]["gentle-orchestrator"] = {"description": "User-authored same-name default"}
+        data["agents"] = {
+            "general": {"description": "Configured fallback"},
+            "gentle-orchestrator": {
+                "description": "Gentle OpenCode orchestrator",
+                "managed_marker": "<!-- gentle-ai:gentle-orchestrator -->",
+            },
+        }
         self.config.write_text(json.dumps(data, indent=2) + "\n")
 
         inventory = build_inventory(self.context, (OpenCodeAdapter(self.catalog),))
