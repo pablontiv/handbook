@@ -112,10 +112,10 @@ class DeclarativeAdapter:
                 if target.is_file() and _contains_marker_block(target, rule):
                     candidates.append(self._candidate(rule, target, Ownership.PROVEN, rule.data.get("proposed_action", ACTION_BY_KIND[rule.kind]), [{"kind": "balanced_marker_block", "rule_id": rule.id}], "recognized balanced marker block"))
             elif rule.kind == "json_key":
-                if target.is_file() and _json_key_present(target, rule):
+                if target.is_file() and _json_key_present(target, rule, block_invalid=True):
                     candidates.append(self._candidate(rule, target, Ownership.PROVEN, rule.data.get("proposed_action", ACTION_BY_KIND[rule.kind]), [{"kind": "json_key", "rule_id": rule.id, "pointer": rule.data["pointer"], "key": rule.data["key"]}], "recognized exact JSON key"))
             elif rule.kind == "json_array_value":
-                if target.is_file() and _json_array_value_present(target, rule):
+                if target.is_file() and _json_array_value_present(target, rule, block_invalid=True):
                     candidates.append(self._candidate(rule, target, Ownership.PROVEN, rule.data.get("proposed_action", ACTION_BY_KIND[rule.kind]), [{"kind": "json_array_value", "rule_id": rule.id, "pointer": rule.data["pointer"], "value": rule.data["value"]}], "recognized exact JSON array value"))
         return tuple(candidates)
 
@@ -819,22 +819,64 @@ def _contains_marker_block(path: Path, rule: DeclarativeRule) -> bool:
         return False
 
 
-def _json_key_present(path: Path, rule: DeclarativeRule) -> bool:
+def _json_key_present(path: Path, rule: DeclarativeRule, *, block_invalid: bool = False) -> bool:
     try:
-        data = json.loads(path.read_text())
-        parent = _json_pointer_get(data, str(rule.data["pointer"]))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, IndexError, ValueError):
+        root = _parse_json_syntax(path.read_bytes())
+        parent = _json_pointer_get_node(root, str(rule.data["pointer"]))
+    except OSError as exc:
+        if block_invalid:
+            raise ValueError("declarative_json_unreadable") from exc
         return False
-    return isinstance(parent, dict) and rule.data["key"] in parent
+    except UnicodeDecodeError as exc:
+        if block_invalid:
+            raise ValueError("declarative_json_malformed") from exc
+        return False
+    except (KeyError, TypeError, IndexError) as exc:
+        if block_invalid:
+            raise ValueError("declarative_json_invalid_layout") from exc
+        return False
+    except ValueError as exc:
+        if block_invalid:
+            raise ValueError(_json_malformed_code(exc)) from exc
+        return False
+    if parent.kind != "object":
+        if block_invalid:
+            raise ValueError("declarative_json_invalid_layout")
+        return False
+    return any(member.key == rule.data["key"] for member in parent.members)
 
 
-def _json_array_value_present(path: Path, rule: DeclarativeRule) -> bool:
+def _json_array_value_present(path: Path, rule: DeclarativeRule, *, block_invalid: bool = False) -> bool:
     try:
-        data = json.loads(path.read_text())
-        array = _json_pointer_get(data, str(rule.data["pointer"]))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, IndexError, ValueError):
+        root = _parse_json_syntax(path.read_bytes())
+        array = _json_pointer_get_node(root, str(rule.data["pointer"]))
+    except OSError as exc:
+        if block_invalid:
+            raise ValueError("declarative_json_unreadable") from exc
         return False
-    return isinstance(array, list) and rule.data["value"] in array
+    except UnicodeDecodeError as exc:
+        if block_invalid:
+            raise ValueError("declarative_json_malformed") from exc
+        return False
+    except (KeyError, TypeError, IndexError) as exc:
+        if block_invalid:
+            raise ValueError("declarative_json_invalid_layout") from exc
+        return False
+    except ValueError as exc:
+        if block_invalid:
+            raise ValueError(_json_malformed_code(exc)) from exc
+        return False
+    if array.kind != "array":
+        if block_invalid:
+            raise ValueError("declarative_json_invalid_layout")
+        return False
+    return any(item.value == rule.data["value"] for item in array.items)
+
+
+def _json_malformed_code(exc: ValueError) -> str:
+    if str(exc) == "json_duplicate_object_key":
+        return "declarative_json_malformed_duplicate_key"
+    return "declarative_json_malformed"
 
 
 def _json_pointer_get(data: Any, pointer: str) -> Any:

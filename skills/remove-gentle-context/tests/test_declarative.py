@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from typing import Any
 
 from helper.adapter import AdapterRegistry
@@ -14,6 +15,7 @@ from helper.engine import build_inventory, build_plan
 from helper.models import OperationKind, Ownership, PlatformProfile, ReceiptStatus, RuntimeContext
 from helper.ownership import canonical_tree_sha256
 from helper.transaction import execute_plan
+from helper.verifier import verify_receipt
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -677,12 +679,130 @@ class DeclarativeCompilerTests(unittest.TestCase):
             self.assertTrue(postimage.endswith(b"\r\n"))
             self.assertNotIn(b"\n\t", postimage.replace(b"\r\n\t", b""))
 
+    def test_json_inventory_blocks_governed_invalid_existing_json(self):
+        cases = {
+            "malformed": (b'{"hooks": [', [
+                {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+            ], "declarative_json_malformed"),
+            "duplicate_key": (b'{"parent": {"remove": 1, "remove": 2}, "keep": true}', [
+                {"id": "duplicate", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/parent", "key": "remove"},
+            ], "declarative_json_malformed_duplicate_key"),
+            "undecodable": (b'\xff\xfe', [
+                {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+            ], "declarative_json_malformed"),
+            "missing_pointer_parent": (json.dumps({"other": []}).encode("utf-8"), [
+                {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+            ], "declarative_json_invalid_layout"),
+            "wrong_pointer_target_type": (json.dumps({"hooks": {"0": "gentle-ai:sdd-init"}}).encode("utf-8"), [
+                {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+            ], "declarative_json_invalid_layout"),
+        }
+        for case, (content, rules, expected_message) in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+                home = Path(td) / "home"
+                target = home / ".custom" / "settings.json"
+                target.parent.mkdir(parents=True)
+                target.write_bytes(content)
+                adapter_path = Path(td) / "adapter.json"
+                self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=rules)
+                adapter = load_declarative_adapter(adapter_path)
+                context = self._context(home)
+
+                inventory = build_inventory(context, (adapter,))
+                plan = build_plan(inventory, context, (adapter,))
+
+                self.assertEqual(inventory.candidates, ())
+                self.assertEqual(len(inventory.findings), 1)
+                self.assertEqual(inventory.findings[0].client, "custom")
+                self.assertEqual(inventory.findings[0].code, "inventory_io_or_layout")
+                self.assertEqual(inventory.findings[0].message, expected_message)
+                self.assertNotIn(str(home), inventory.findings[0].message)
+                self.assertEqual(plan.operations, ())
+                self.assertEqual(plan.blocked_candidate_ids, ())
+
+    def test_json_inventory_blocks_unreadable_governed_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".custom" / "settings.json"
+            target.parent.mkdir(parents=True)
+            target.write_text(json.dumps({"hooks": ["gentle-ai:sdd-init"]}))
+            adapter_path = Path(td) / "adapter.json"
+            self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+            ])
+            adapter = load_declarative_adapter(adapter_path)
+            context = self._context(home)
+            original_read_bytes = Path.read_bytes
+
+            def read_bytes_or_permission_error(path: Path) -> bytes:
+                if path == target:
+                    raise PermissionError("permission denied")
+                return original_read_bytes(path)
+
+            with mock.patch.object(Path, "read_bytes", read_bytes_or_permission_error):
+                inventory = build_inventory(context, (adapter,))
+                plan = build_plan(inventory, context, (adapter,))
+
+            self.assertEqual(inventory.candidates, ())
+            self.assertEqual(len(inventory.findings), 1)
+            self.assertEqual(inventory.findings[0].message, "declarative_json_unreadable")
+            self.assertNotIn(str(home), inventory.findings[0].message)
+            self.assertEqual(plan.operations, ())
+
+    def test_valid_json_with_absent_selector_remains_absent_not_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".custom" / "settings.json"
+            target.parent.mkdir(parents=True)
+            target.write_text(json.dumps({"agents": {"personal": {}}, "hooks": ["personal"]}))
+            adapter_path = Path(td) / "adapter.json"
+            self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                {"id": "missing-agent", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/agents", "key": "sdd-init"},
+                {"id": "missing-hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+            ])
+            adapter = load_declarative_adapter(adapter_path)
+            context = self._context(home)
+
+            inventory = build_inventory(context, (adapter,))
+            plan = build_plan(inventory, context, (adapter,))
+
+            self.assertEqual(inventory.candidates, ())
+            self.assertEqual(inventory.findings, ())
+            self.assertEqual(plan.operations, ())
+
+    def test_verify_fails_when_live_reinventory_sees_governed_malformed_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".custom" / "settings.json"
+            target.parent.mkdir(parents=True)
+            target.write_text('{"hooks": [')
+            adapter_path = Path(td) / "adapter.json"
+            self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+            ])
+            adapter = load_declarative_adapter(adapter_path)
+            context = self._context(home)
+            inventory = build_inventory(context, (adapter,))
+            plan = build_plan(inventory, context, (adapter,))
+            receipt = execute_plan(plan, plan.digest or "", context, NoopLifecycle(), inventory=inventory)
+
+            result = verify_receipt(receipt, context, (adapter,))
+
+            self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
+            self.assertEqual(plan.operations, ())
+            self.assertEqual(result.status, "failed")
+            failed = [check for check in result.checks if check.status == "failed"]
+            self.assertEqual(len(failed), 1)
+            self.assertEqual(failed[0].code, "verify_structured_parse")
+            self.assertEqual(failed[0].evidence["error"], "declarative_json_malformed")
+            self.assertNotIn(str(home), str(failed[0].evidence))
+
     def test_json_compile_fails_closed_on_duplicate_object_keys(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
             target = home / ".custom" / "settings.json"
             target.parent.mkdir(parents=True)
-            target.write_text('{"parent": {"remove": 1, "remove": 2}, "keep": true}')
+            target.write_text('{"parent": {"remove": 1}, "keep": true}')
             adapter_path = Path(td) / "adapter.json"
             self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
                 {"id": "duplicate", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/parent", "key": "remove"},
@@ -691,6 +811,7 @@ class DeclarativeCompilerTests(unittest.TestCase):
             context = self._context(home)
             inventory = build_inventory(context, (adapter,))
             self.assertEqual(len(inventory.candidates), 1)
+            target.write_text('{"parent": {"remove": 1, "remove": 2}, "keep": true}')
 
             with self.assertRaisesRegex(ValueError, "declarative_evidence_drift"):
                 build_plan(inventory, context, (adapter,))
