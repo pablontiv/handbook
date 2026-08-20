@@ -607,6 +607,127 @@ class DeclarativeCompilerTests(unittest.TestCase):
             self.assertEqual(updated["mcp"], {"servers": {"personal": {"command": "keep"}}})
             self._assert_second_plan_is_empty(adapter, context)
 
+    def test_shipped_marker_rule_treats_existing_file_without_markers_as_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            config = home / ".gemini"
+            config.mkdir(parents=True)
+            instructions = config / "GEMINI.md"
+            instructions.write_text("personal heading\nno managed marker block here\n")
+            adapter = load_declarative_adapter(SKILL_ROOT / "adapters" / "gemini.json")
+            context = self._context(home)
+
+            inventory = build_inventory(context, (adapter,))
+            plan = build_plan(inventory, context, (adapter,))
+
+            self.assertEqual(inventory.candidates, ())
+            self.assertEqual(inventory.findings, ())
+            self.assertEqual(plan.operations, ())
+
+    def test_marker_inventory_blocks_malformed_structures_stably(self):
+        cases = {
+            "missing_open": "before\nmanaged\n<!-- gentle-ai:end -->\nafter\n",
+            "missing_close": "before\n<!-- gentle-ai:begin -->\nmanaged\nafter\n",
+            "duplicate_open": "before\n<!-- gentle-ai:begin -->\nmanaged\n<!-- gentle-ai:begin -->\n<!-- gentle-ai:end -->\nafter\n",
+            "duplicate_close": "before\n<!-- gentle-ai:begin -->\nmanaged\n<!-- gentle-ai:end -->\n<!-- gentle-ai:end -->\nafter\n",
+            "reversed": "before\n<!-- gentle-ai:end -->\nmanaged\n<!-- gentle-ai:begin -->\nafter\n",
+            "overlap": "before\nabcde\nafter\n",
+            "nested_like": "before\n<!-- gentle-ai:begin -->\nouter\n<!-- gentle-ai:begin -->\ninner\n<!-- gentle-ai:end -->\n<!-- gentle-ai:end -->\nafter\n",
+        }
+        for case, content in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as td:
+                home = Path(td) / "home"
+                target = home / ".custom" / "README.md"
+                target.parent.mkdir(parents=True)
+                target.write_text(content)
+                adapter_path = Path(td) / "adapter.json"
+                if case == "overlap":
+                    open_marker = "abcde"
+                    close_marker = "cde"
+                else:
+                    open_marker = "<!-- gentle-ai:begin -->"
+                    close_marker = "<!-- gentle-ai:end -->"
+                self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                    {"id": "marker", "kind": "balanced_marker_block", "root": "config", "path": "README.md", "open_marker": open_marker, "close_marker": close_marker},
+                ])
+                adapter = load_declarative_adapter(adapter_path)
+                context = self._context(home)
+
+                inventory = build_inventory(context, (adapter,))
+                plan = build_plan(inventory, context, (adapter,))
+
+                self.assertEqual(inventory.candidates, ())
+                self.assertEqual(len(inventory.findings), 1)
+                self.assertEqual(inventory.findings[0].client, "custom")
+                self.assertEqual(inventory.findings[0].code, "inventory_io_or_layout")
+                self.assertEqual(inventory.findings[0].message, "declarative_marker_malformed")
+                self.assertNotIn(str(home), inventory.findings[0].message)
+                self.assertEqual(plan.operations, ())
+                self.assertEqual(plan.blocked_candidate_ids, ())
+
+    def test_marker_inventory_blocks_unreadable_existing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".custom" / "README.md"
+            target.parent.mkdir(parents=True)
+            target.write_text("before\n<!-- gentle-ai:begin -->\nmanaged\n<!-- gentle-ai:end -->\nafter\n")
+            adapter_path = Path(td) / "adapter.json"
+            self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                {"id": "marker", "kind": "balanced_marker_block", "root": "config", "path": "README.md", "open_marker": "<!-- gentle-ai:begin -->", "close_marker": "<!-- gentle-ai:end -->"},
+            ])
+            adapter = load_declarative_adapter(adapter_path)
+            context = self._context(home)
+            original_read_bytes = Path.read_bytes
+
+            def read_bytes_or_permission_error(path: Path) -> bytes:
+                if path == target:
+                    raise PermissionError("permission denied")
+                return original_read_bytes(path)
+
+            with mock.patch.object(Path, "read_bytes", read_bytes_or_permission_error):
+                inventory = build_inventory(context, (adapter,))
+                plan = build_plan(inventory, context, (adapter,))
+                receipt = execute_plan(plan, plan.digest or "", context, NoopLifecycle(), inventory=inventory)
+                result = verify_receipt(receipt, context, (adapter,))
+
+            self.assertEqual(inventory.candidates, ())
+            self.assertEqual(len(inventory.findings), 1)
+            self.assertEqual(inventory.findings[0].message, "declarative_marker_unreadable")
+            self.assertNotIn(str(home), inventory.findings[0].message)
+            self.assertEqual(plan.operations, ())
+            self.assertEqual(result.status, "failed")
+            failed = [check for check in result.checks if check.status == "failed"]
+            self.assertEqual(len(failed), 1)
+            self.assertEqual(failed[0].code, "verify_structured_parse")
+            self.assertEqual(failed[0].evidence["error"], "declarative_marker_unreadable")
+            self.assertNotIn(str(home), str(failed[0].evidence))
+
+    def test_verify_fails_when_live_reinventory_sees_governed_malformed_marker(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".custom" / "README.md"
+            target.parent.mkdir(parents=True)
+            target.write_text("before\n<!-- gentle-ai:begin -->\nunbalanced\nafter\n")
+            adapter_path = Path(td) / "adapter.json"
+            self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                {"id": "marker", "kind": "balanced_marker_block", "root": "config", "path": "README.md", "open_marker": "<!-- gentle-ai:begin -->", "close_marker": "<!-- gentle-ai:end -->"},
+            ])
+            adapter = load_declarative_adapter(adapter_path)
+            context = self._context(home)
+            inventory = build_inventory(context, (adapter,))
+            plan = build_plan(inventory, context, (adapter,))
+            receipt = execute_plan(plan, plan.digest or "", context, NoopLifecycle(), inventory=inventory)
+
+            result = verify_receipt(receipt, context, (adapter,))
+
+            self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
+            self.assertEqual(plan.operations, ())
+            self.assertEqual(result.status, "failed")
+            failed = [check for check in result.checks if check.status == "failed"]
+            self.assertEqual(len(failed), 1)
+            self.assertEqual(failed[0].code, "verify_structured_parse")
+            self.assertEqual(failed[0].evidence["error"], "declarative_marker_malformed")
+            self.assertNotIn(str(home), str(failed[0].evidence))
 
     def test_json_grouped_postimage_splices_only_configured_member_and_item_bytes(self):
         original = self._fixture_bytes("json-surgery-formatting.json")

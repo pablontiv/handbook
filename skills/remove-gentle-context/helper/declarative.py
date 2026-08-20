@@ -109,7 +109,7 @@ class DeclarativeAdapter:
                 if target.is_dir() and not any(target.iterdir()):
                     candidates.append(self._candidate(rule, target, Ownership.PROVEN, "remove_empty_directory", [{"kind": "empty_directory", "rule_id": rule.id}], "exact empty directory"))
             elif rule.kind == "balanced_marker_block":
-                if target.is_file() and _contains_marker_block(target, rule):
+                if target.is_file() and _contains_marker_block(target, rule, block_invalid=True):
                     candidates.append(self._candidate(rule, target, Ownership.PROVEN, rule.data.get("proposed_action", ACTION_BY_KIND[rule.kind]), [{"kind": "balanced_marker_block", "rule_id": rule.id}], "recognized balanced marker block"))
             elif rule.kind == "json_key":
                 if target.is_file() and _json_key_present(target, rule, block_invalid=True):
@@ -312,16 +312,22 @@ def _grouped_marker_postimage(target: Path, rules: tuple[DeclarativeRule, ...]) 
     return postimage
 
 
-def _marker_block_span(content: bytes, rule: DeclarativeRule) -> tuple[int, int] | None:
+def _marker_block_span(content: bytes, rule: DeclarativeRule, *, block_invalid: bool = False) -> tuple[int, int] | None:
     open_marker = str(rule.data["open_marker"]).encode("utf-8")
     close_marker = str(rule.data["close_marker"]).encode("utf-8")
     open_positions = _find_all(content, open_marker)
     close_positions = _find_all(content, close_marker)
+    if not open_positions and not close_positions:
+        return None
     if len(open_positions) != 1 or len(close_positions) != 1:
+        if block_invalid:
+            raise ValueError("declarative_marker_malformed")
         return None
     start = open_positions[0]
     close_start = close_positions[0]
-    if close_start <= start:
+    if close_start < start + len(open_marker):
+        if block_invalid:
+            raise ValueError("declarative_marker_malformed")
         return None
     end = close_start + len(close_marker)
     if content[end:end + 2] == b"\r\n":
@@ -812,10 +818,12 @@ def _resolve_root(root: DeclarativeRoot, context: RuntimeContext) -> Path:
     raise ValueError("adapter_forbidden_capability")
 
 
-def _contains_marker_block(path: Path, rule: DeclarativeRule) -> bool:
+def _contains_marker_block(path: Path, rule: DeclarativeRule, *, block_invalid: bool = False) -> bool:
     try:
-        return _marker_block_span(path.read_bytes(), rule) is not None
-    except OSError:
+        return _marker_block_span(path.read_bytes(), rule, block_invalid=block_invalid) is not None
+    except OSError as exc:
+        if block_invalid:
+            raise ValueError("declarative_marker_unreadable") from exc
         return False
 
 
