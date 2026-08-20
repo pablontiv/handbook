@@ -22,7 +22,7 @@ from .models import (
     RuntimeContext,
     VerificationResult,
 )
-from .paths import root_map
+from .paths import canonical_environment_roots, root_map
 
 REQUIRED_CODES = (
     "verify_active_residue",
@@ -111,6 +111,8 @@ def _verify_inventory_artifact(inventory: Inventory, context: RuntimeContext, pl
         checks.append(_failed("verify_root_binding", {"artifact": "inventory", "field": "os_name", "expected": inventory.os_name, "actual": context.profile.os_name}))
     if inventory.root_map and dict(sorted(inventory.root_map.items())) != dict(sorted(root_map(context).items())):
         checks.append(_failed("verify_root_binding", {"artifact": "inventory", "field": "root_map", "expected": dict(sorted(inventory.root_map.items())), "actual": dict(sorted(root_map(context).items()))}))
+    if dict(sorted(inventory.environment.items())) != canonical_environment_roots(context.profile.env):
+        checks.append(_failed("verify_root_binding", {"artifact": "inventory", "field": "environment", "expected": dict(sorted(inventory.environment.items())), "actual": canonical_environment_roots(context.profile.env)}))
     return tuple(checks)
 
 

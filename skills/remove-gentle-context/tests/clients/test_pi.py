@@ -17,7 +17,9 @@ FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "pi"
 
 
 def context_for(home: Path, *, project_roots: tuple[Path, ...] = (), os_name: str = "linux", **env: str) -> RuntimeContext:
-    return RuntimeContext(PlatformProfile(os_name, home, dict(env)), project_roots=project_roots)
+    authority_keys = {"XDG_STATE_HOME", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA"}
+    normalized = {key: (str(Path(value).resolve(strict=False)) if key in authority_keys else value) for key, value in env.items()}
+    return RuntimeContext(PlatformProfile(os_name, home, normalized), project_roots=project_roots)
 
 
 def one(items):

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helper.canonical import canonical_bytes
+from helper.canonical import canonical_bytes, digest_json
 from helper.engine import build_inventory, build_plan, validate_approval, verify_receipt
 from helper.transaction import execute_plan
 from helper.models import (
@@ -216,6 +216,7 @@ class EngineTests(unittest.TestCase):
         reordered_inventory = build_inventory(reordered_context, (FakeAdapter("client"),))
 
         self.assertIn("root_map", first_inventory.to_unsigned_dict())
+        self.assertIn("environment", first_inventory.to_unsigned_dict())
         self.assertNotEqual(first_inventory.digest, second_inventory.digest)
         self.assertEqual(stable_inventory.digest, reordered_inventory.digest)
         first_plan = build_plan(first_inventory, first_context, (FakeAdapter("client"),))
@@ -229,6 +230,64 @@ class EngineTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "plan_inventory_roots_mismatch"):
             build_plan(first_inventory, second_context, (FakeAdapter("client"),))
+
+    def test_inventory_environment_binds_semantic_env_keys_and_xdg_state(self):
+        xdg_state = self.home.parent / "state"
+        xdg_config = self.home.parent / "xdg-config"
+        appdata = self.home.parent / "appdata"
+        localappdata = self.home.parent / "localappdata"
+        for path in (xdg_state, xdg_config, appdata, localappdata):
+            path.mkdir()
+        context = RuntimeContext(
+            PlatformProfile(
+                "windows",
+                self.home,
+                {
+                    "LOCALAPPDATA": str(localappdata.resolve()),
+                    "APPDATA": str(appdata.resolve()),
+                    "XDG_CONFIG_HOME": str(xdg_config.resolve()),
+                    "XDG_STATE_HOME": str(xdg_state.resolve()),
+                },
+            )
+        )
+
+        inventory = build_inventory(context, (FakeAdapter("client"),))
+        swapped_by_root_hash = dict(inventory.environment)
+        swapped_by_root_hash["APPDATA"], swapped_by_root_hash["LOCALAPPDATA"] = swapped_by_root_hash["LOCALAPPDATA"], swapped_by_root_hash["APPDATA"]
+        tampered = Inventory(
+            os_name=inventory.os_name,
+            home=inventory.home,
+            root_map=inventory.root_map,
+            environment=swapped_by_root_hash,
+            adapter_versions=inventory.adapter_versions,
+            adapter_layouts=inventory.adapter_layouts,
+            candidates=inventory.candidates,
+            findings=inventory.findings,
+            digest=inventory.digest,
+        )
+
+        self.assertEqual(inventory.environment["APPDATA"], str(appdata.resolve()))
+        self.assertEqual(inventory.environment["LOCALAPPDATA"], str(localappdata.resolve()))
+        self.assertEqual(inventory.environment["XDG_STATE_HOME"], str(xdg_state.resolve()))
+        self.assertNotEqual(inventory.digest, digest_json(tampered.to_unsigned_dict()))
+        with self.assertRaisesRegex(ValueError, "plan_inventory_environment_mismatch"):
+            build_plan(inventory, RuntimeContext(PlatformProfile("windows", self.home, swapped_by_root_hash)), (FakeAdapter("client"),))
+
+    def test_inventory_environment_allows_explicit_duplicate_alias_values(self):
+        shared = self.home.parent / "shared-config"
+        shared.mkdir()
+        context = RuntimeContext(PlatformProfile("windows", self.home, {"APPDATA": str(shared.resolve()), "LOCALAPPDATA": str(shared.resolve())}))
+
+        inventory = build_inventory(context, (FakeAdapter("client"),))
+
+        self.assertEqual(inventory.environment, {"APPDATA": str(shared.resolve()), "LOCALAPPDATA": str(shared.resolve())})
+
+    def test_inventory_environment_ignores_unapproved_keys_and_rejects_relative_authority_roots(self):
+        inventory = build_inventory(RuntimeContext(PlatformProfile("linux", self.home, {"HOME": str(self.home)})), (FakeAdapter("client"),))
+        self.assertEqual(inventory.environment, {})
+
+        with self.assertRaisesRegex(ValueError, "environment_root_invalid"):
+            build_inventory(RuntimeContext(PlatformProfile("linux", self.home, {"XDG_STATE_HOME": "relative-state"})), (FakeAdapter("client"),))
 
     def test_write_operation_embeds_postimage_and_digest_changes_when_a_byte_changes(self):
         target = self.home / "config.json"
@@ -295,7 +354,7 @@ class VerificationTests(unittest.TestCase):
         self.home.mkdir()
         self.project = self.temp_root / "project"
         self.project.mkdir()
-        self.context = RuntimeContext(PlatformProfile("linux", self.home, {"XDG_STATE_HOME": str(self.temp_root / "state")}), project_roots=(self.project,))
+        self.context = RuntimeContext(PlatformProfile("linux", self.home, {"XDG_STATE_HOME": str((self.temp_root / "state").resolve(strict=False))}), project_roots=(self.project,))
 
     def completed_receipt(self, plan: Plan, inventory: Inventory) -> Receipt:
         return Receipt(status=ReceiptStatus.COMPLETED, plan=plan, inventory=inventory)

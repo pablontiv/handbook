@@ -16,7 +16,7 @@ from typing import Iterable
 from .canonical import digest_json
 from .engine import validate_approval
 from .models import BackupEntry, BackupManifest, Inventory, LifecycleOutcome, Operation, OperationKind, OperationOutcome, Plan, ProcessSnapshot, Receipt, ReceiptStatus, RuntimeContext
-from .paths import _is_windows_reparse_point, path_from_root_relative, resolve_state_root, root_map, root_relative_path
+from .paths import _is_windows_reparse_point, canonical_environment_roots, path_from_root_relative, resolve_state_root, root_map, root_relative_path
 
 
 class OperationApplyError(RuntimeError):
@@ -172,6 +172,8 @@ def _validate_execution_artifacts(plan: Plan, inventory: Inventory, context: Run
         raise ValueError("execute_inventory_roots_mismatch")
     if plan_roots != context_roots:
         raise ValueError("execute_plan_roots_mismatch")
+    if dict(sorted(inventory.environment.items())) != canonical_environment_roots(context.profile.env):
+        raise ValueError("execute_inventory_environment_mismatch")
 
 
 def _assert_plan_root_map_matches_context(plan: Plan, context: RuntimeContext, code: str) -> None:

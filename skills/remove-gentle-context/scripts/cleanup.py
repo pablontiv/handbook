@@ -46,7 +46,7 @@ from helper.models import (  # noqa: E402
     VerificationResult,
 )
 from helper.ownership import load_ownership_catalog  # noqa: E402
-from helper.paths import _is_windows_reparse_point, resolve_state_root, root_map  # noqa: E402
+from helper.paths import ENVIRONMENT_ENV_KEYS, _is_windows_reparse_point, canonical_environment_roots, resolve_state_root, root_map  # noqa: E402
 from helper.transaction import restore as restore_manifest  # noqa: E402
 from helper.transaction import write_json_atomic  # noqa: E402
 from helper.transaction import execute_plan  # noqa: E402
@@ -81,12 +81,33 @@ class CliError(Exception):
         self.next_action = next_action
 
 
+class UsageError(Exception):
+    pass
+
+
+class CleanupArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        self._print_message(f"{self.prog}: error: {message}\n", sys.stderr)
+        raise UsageError(message)
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        if status:
+            if message:
+                self._print_message(message, sys.stderr)
+            raise UsageError(message or "invalid arguments")
+        raise SystemExit(status)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     if sys.version_info < (3, 11):
         print("code=python_unsupported phase=startup next_action=run with Python 3.11+", file=sys.stderr)
         return EXIT_USAGE
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except UsageError:
+        return EXIT_USAGE
     try:
         summary = dispatch(args)
     except CliError as exc:
@@ -105,11 +126,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = CleanupArgumentParser(
         prog="cleanup.py",
         description="Remove gentle-ai generated registrations with explicit inventory, plan, apply, verify, and restore phases.",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=CleanupArgumentParser)
 
     inventory = sub.add_parser("inventory", help="build a read-only inventory artifact")
     inventory.add_argument("--output", type=Path)
@@ -308,20 +329,19 @@ def context_from_inventory(inventory: Inventory) -> RuntimeContext:
     home = validate_authority_root(Path(inventory.home), "home", phase="inventory")
     os_name = normalize_platform(inventory.os_name)
     projects = tuple(validate_authority_root(Path(value), "project", phase="inventory") for root_id, value in sorted(inventory.root_map.items()) if root_id.startswith("project-"))
-    env = env_from_inventory_root_map(inventory)
+    env = validate_env_roots(inventory.environment, phase="inventory")
     return RuntimeContext(PlatformProfile(os_name, home, env), project_roots=projects)
 
 
 def selected_env(source: Mapping[str, str], *, extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    keys = ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA")
-    env = {key: str(source[key]) for key in keys if key in source and source[key]}
+    env = {key: str(source[key]) for key in ENVIRONMENT_ENV_KEYS if key in source and source[key]}
     if extra:
         env.update(extra)
     return env
 
 
 def parse_env_args(items: Sequence[str]) -> dict[str, str]:
-    allowed = {"XDG_STATE_HOME", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA"}
+    allowed = set(ENVIRONMENT_ENV_KEYS)
     env: dict[str, str] = {}
     for item in items:
         key, sep, value = item.partition("=")
@@ -332,7 +352,11 @@ def parse_env_args(items: Sequence[str]) -> dict[str, str]:
 
 
 def validate_env_roots(env: Mapping[str, str], *, phase: str) -> dict[str, str]:
-    return {key: str(validate_authority_root(Path(value), f"env_{key.lower()}", phase=phase)) for key, value in sorted(env.items())}
+    try:
+        return canonical_environment_roots(dict(env))
+    except ValueError as exc:
+        code = stable_code(exc, "environment_root_invalid")
+        raise CliError(EXIT_USAGE, phase, code) from exc
 
 
 def validate_authority_root(path: Path, root_name: str, *, phase: str) -> Path:
@@ -349,13 +373,6 @@ def validate_authority_root(path: Path, root_name: str, *, phase: str) -> Path:
     if stat.S_ISLNK(st.st_mode) or _is_windows_reparse_point(st):
         raise CliError(EXIT_USAGE, phase, f"{root_name}_root_link_or_reparse")
     return resolved
-
-
-def env_from_inventory_root_map(inventory: Inventory) -> dict[str, str]:
-    platform_roots = [validate_authority_root(Path(value), "platform_config", phase="inventory") for root_id, value in sorted(inventory.root_map.items()) if root_id.startswith("platform-config-")]
-    keys = ["XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA"]
-    env = {key: str(root) for key, root in zip(keys, platform_roots)}
-    return validate_env_roots(env, phase="inventory")
 
 
 def normalize_platform(value: str) -> str:
@@ -449,13 +466,14 @@ def reject_input_path(path: Path, *, phase: str) -> None:
 def load_inventory(path: Path) -> Inventory:
     data = load_json_artifact(path, phase="inventory")
     require_schema(data, INVENTORY_SCHEMA, phase="inventory", path=path)
-    allowed = {"schema", "os_name", "home", "root_map", "adapter_versions", "adapter_layouts", "candidates", "findings", "digest"}
+    allowed = {"schema", "os_name", "home", "root_map", "environment", "adapter_versions", "adapter_layouts", "candidates", "findings", "digest"}
     reject_unknown(data, allowed, phase="inventory", path=path)
-    require_keys(data, {"schema", "os_name", "home", "root_map", "adapter_versions", "adapter_layouts", "digest"}, phase="inventory", path=path)
+    require_keys(data, {"schema", "os_name", "home", "root_map", "environment", "adapter_versions", "adapter_layouts", "digest"}, phase="inventory", path=path)
     inventory = Inventory(
         os_name=require_str(data, "os_name", phase="inventory", path=path),
         home=require_str(data, "home", phase="inventory", path=path),
         root_map=require_str_map(data.get("root_map"), phase="inventory", path=path),
+        environment=require_environment_map(data.get("environment"), phase="inventory", path=path),
         adapter_versions=require_str_map(data.get("adapter_versions"), phase="inventory", path=path),
         adapter_layouts=require_str_map(data.get("adapter_layouts"), phase="inventory", path=path),
         candidates=tuple(candidate_from_dict(item, phase="inventory", path=path) for item in require_list(data.get("candidates", []), phase="inventory", path=path)),
@@ -529,12 +547,14 @@ def inventory_from_embedded(data: object, *, phase: str, path: Path) -> Inventor
     data = dict(data)
     data.setdefault("schema", INVENTORY_SCHEMA)
     temp = path
-    allowed = {"schema", "os_name", "home", "root_map", "adapter_versions", "adapter_layouts", "candidates", "findings", "digest"}
+    allowed = {"schema", "os_name", "home", "root_map", "environment", "adapter_versions", "adapter_layouts", "candidates", "findings", "digest"}
     reject_unknown(data, allowed, phase=phase, path=temp)
+    require_keys(data, {"schema", "os_name", "home", "root_map", "environment", "adapter_versions", "adapter_layouts", "digest"}, phase=phase, path=temp)
     inv = Inventory(
         os_name=require_str(data, "os_name", phase=phase, path=temp),
         home=require_str(data, "home", phase=phase, path=temp),
         root_map=require_str_map(data.get("root_map"), phase=phase, path=temp),
+        environment=require_environment_map(data.get("environment"), phase=phase, path=temp),
         adapter_versions=require_str_map(data.get("adapter_versions"), phase=phase, path=temp),
         adapter_layouts=require_str_map(data.get("adapter_layouts"), phase=phase, path=temp),
         candidates=tuple(candidate_from_dict(item, phase=phase, path=temp) for item in require_list(data.get("candidates", []), phase=phase, path=temp)),
@@ -695,6 +715,12 @@ def assert_context_matches_inventory(inventory: Inventory, context: RuntimeConte
         raise CliError(EXIT_ARTIFACT, phase, f"{phase}_inventory_root_os_mismatch")
     if dict(sorted(inventory.root_map.items())) != dict(sorted(root_map(context).items())):
         raise CliError(EXIT_ARTIFACT, phase, f"{phase}_inventory_root_map_mismatch")
+    try:
+        context_environment = canonical_environment_roots(context.profile.env)
+    except ValueError as exc:
+        raise CliError(EXIT_ARTIFACT, phase, stable_code(exc, "environment_root_invalid")) from exc
+    if dict(sorted(inventory.environment.items())) != context_environment:
+        raise CliError(EXIT_ARTIFACT, phase, f"{phase}_inventory_environment_mismatch")
 
 
 def assert_inventory_plan_binding(inventory: Inventory, plan: Plan, context: RuntimeContext, *, phase: str) -> None:
@@ -774,6 +800,15 @@ def require_str_map(value: object, *, phase: str, path: Path) -> dict[str, str]:
     if not all(isinstance(key, str) and isinstance(item, str) for key, item in mapping.items()):
         raise CliError(EXIT_ARTIFACT, phase, "artifact_invalid_field", path=path)
     return dict(sorted((str(key), str(item)) for key, item in mapping.items()))
+
+
+def require_environment_map(value: object, *, phase: str, path: Path) -> dict[str, str]:
+    mapping = require_str_map(value, phase=phase, path=path)
+    try:
+        return canonical_environment_roots(mapping, reject_unknown=True)
+    except ValueError as exc:
+        code = stable_code(exc, "environment_root_invalid")
+        raise CliError(EXIT_ARTIFACT, phase, code, path=path) from exc
 
 
 def require_mapping(value: object, *, phase: str, path: Path) -> dict[str, Any]:

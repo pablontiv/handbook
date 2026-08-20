@@ -23,7 +23,9 @@ def fixture(relative: str) -> str:
 
 
 def context_for(home: Path, **env: str) -> RuntimeContext:
-    return RuntimeContext(PlatformProfile("linux", home, dict(env)))
+    authority_keys = {"XDG_STATE_HOME", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA"}
+    normalized = {key: (str(Path(value).resolve(strict=False)) if key in authority_keys else value) for key, value in env.items()}
+    return RuntimeContext(PlatformProfile("linux", home, normalized))
 
 
 def build_codex_fixture(temp_root: Path, *, include_archives: bool = True) -> Path:

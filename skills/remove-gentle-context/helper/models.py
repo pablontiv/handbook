@@ -202,6 +202,7 @@ class Inventory:
     os_name: str = ""
     home: str = ""
     root_map: Mapping[str, str] = field(default_factory=dict)
+    environment: Mapping[str, str] = field(default_factory=dict)
     adapter_versions: Mapping[str, str] = field(default_factory=dict)
     adapter_layouts: Mapping[str, str] = field(default_factory=dict)
     candidates: tuple[Candidate, ...] = ()
@@ -216,6 +217,7 @@ class Inventory:
             data["home"] = self.home
         if self.root_map:
             data["root_map"] = dict(self.root_map)
+        data["environment"] = dict(self.environment)
         if self.adapter_versions:
             data["adapter_versions"] = dict(self.adapter_versions)
         if self.adapter_layouts:

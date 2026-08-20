@@ -175,6 +175,128 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("--approve", result.stderr)
 
+    def test_programmatic_invalid_arguments_return_usage_without_system_exit(self) -> None:
+        cleanup = load_cleanup_module()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = cleanup.main(["apply", "--plan", str(self.artifacts / "plan.json")])
+
+        self.assertEqual(result, cleanup.EXIT_USAGE)
+        self.assertIn("usage:", stderr.getvalue())
+        self.assertIn("--approve", stderr.getvalue())
+
+    def test_environment_artifact_round_trips_semantic_keys_and_default_state_path(self) -> None:
+        appdata = self.temp_root / "roaming"
+        localappdata = self.temp_root / "local"
+        xdg_state = self.temp_root / "xdg-state"
+        xdg_config = self.temp_root / "xdg-config"
+        for root in (appdata, localappdata, xdg_state, xdg_config):
+            root.mkdir()
+
+        inventory = self.run_ok(
+            "inventory",
+            "--home",
+            str(self.home),
+            "--platform",
+            "windows",
+            "--env",
+            f"LOCALAPPDATA={localappdata}",
+            "--env",
+            f"APPDATA={appdata}",
+            "--env",
+            f"XDG_STATE_HOME={xdg_state}",
+            "--env",
+            f"XDG_CONFIG_HOME={xdg_config}",
+            "--output",
+            str(self.artifacts / "windows-inventory.json"),
+        )
+        artifact = json.loads(Path(inventory.output_path).read_text())
+        self.assertEqual(artifact["environment"]["APPDATA"], str(appdata.resolve()))
+        self.assertEqual(artifact["environment"]["LOCALAPPDATA"], str(localappdata.resolve()))
+        self.assertEqual(artifact["environment"]["XDG_STATE_HOME"], str(xdg_state.resolve()))
+        self.assertEqual(set(artifact["environment"]), {"APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_STATE_HOME"})
+
+        plan = self.run_ok("plan", "--inventory", str(inventory.output_path))
+        self.assertTrue(str(plan.output_path).startswith(str(localappdata / "remove-gentle-context" / "state" / "artifacts")))
+
+        linux_inventory = self.run_ok(
+            "inventory",
+            "--home",
+            str(self.home),
+            "--platform",
+            "linux",
+            "--env",
+            f"XDG_STATE_HOME={xdg_state}",
+        )
+        self.assertTrue(str(linux_inventory.output_path).startswith(str(xdg_state / "remove-gentle-context" / "artifacts")))
+
+    def test_inventory_environment_does_not_leak_unapproved_inherited_env(self) -> None:
+        xdg_state = self.temp_root / "state-authority"
+        xdg_state.mkdir()
+        noisy_env = {**self.env, "APPDATA_SHADOW": str(self.temp_root / "shadow"), "GENTLE_PRIVATE_ROOT": str(self.temp_root / "private")}
+        inventory = self.run_cli(
+            "inventory",
+            "--home",
+            str(self.home),
+            "--platform",
+            "linux",
+            "--env",
+            f"XDG_STATE_HOME={xdg_state}",
+            "--output",
+            str(self.artifacts / "bounded-env-inventory.json"),
+            env=noisy_env,
+        )
+        self.assertEqual(inventory.returncode, 0)
+
+        artifact = json.loads(Path(inventory.output_path).read_text())
+        self.assertEqual(artifact["environment"], {"XDG_STATE_HOME": str(xdg_state.resolve())})
+        self.assertNotIn("APPDATA_SHADOW", json.dumps(artifact, sort_keys=True))
+        self.assertNotIn("GENTLE_PRIVATE_ROOT", json.dumps(artifact, sort_keys=True))
+
+    def test_inventory_loader_requires_and_validates_environment_field(self) -> None:
+        cleanup = load_cleanup_module()
+        inventory = self.inventory()
+        assert inventory.output_path is not None
+        original = json.loads(Path(inventory.output_path).read_text())
+
+        missing = self.artifacts / "missing-environment.json"
+        missing_data = dict(original)
+        missing_data.pop("environment", None)
+        missing.write_text(json.dumps(missing_data, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        with self.assertRaisesRegex(cleanup.CliError, "artifact_missing_field"):
+            cleanup.load_inventory(missing)
+
+        relative = self.artifacts / "relative-environment.json"
+        relative_data = dict(original)
+        relative_data["environment"] = {"XDG_STATE_HOME": "relative-state"}
+        unsigned = {key: value for key, value in relative_data.items() if key not in {"schema", "digest"}}
+        relative_data["digest"] = cleanup.digest_json(unsigned)
+        relative.write_text(json.dumps(relative_data, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        with self.assertRaisesRegex(cleanup.CliError, "environment"):
+            cleanup.load_inventory(relative)
+
+        unknown = self.artifacts / "unknown-environment.json"
+        unknown_data = dict(original)
+        unknown_data["environment"] = {"GENTLE_PRIVATE_ROOT": str(self.temp_root / "private")}
+        unsigned = {key: value for key, value in unknown_data.items() if key not in {"schema", "digest"}}
+        unknown_data["digest"] = cleanup.digest_json(unsigned)
+        unknown.write_text(json.dumps(unknown_data, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        with self.assertRaisesRegex(cleanup.CliError, "environment"):
+            cleanup.load_inventory(unknown)
+
+    def test_receipt_embedded_inventory_requires_environment_field(self) -> None:
+        self.seed_cross_client_fixture()
+        receipt = self.apply(self.plan(self.inventory()))
+        cleanup = load_cleanup_module()
+        data = json.loads(Path(receipt.json["receipt_path"]).read_text())
+        data["inventory"].pop("environment", None)
+        data["digest"] = cleanup.digest_json(cleanup.data_without_digest(data))
+        tampered = self.artifacts / "receipt-missing-env.json"
+        tampered.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+        with self.assertRaisesRegex(cleanup.CliError, "artifact_missing_field"):
+            cleanup.load_receipt(tampered)
+
     def test_full_five_command_flow_is_idempotent_in_temporary_home(self) -> None:
         self.seed_cross_client_fixture()
         history = self.home / ".codex" / "sessions" / "history.jsonl"

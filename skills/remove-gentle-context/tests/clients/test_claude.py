@@ -18,7 +18,9 @@ FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "fixtures" / "claude"
 
 
 def context_for(home: Path, **env: str) -> RuntimeContext:
-    return RuntimeContext(PlatformProfile("linux", home, dict(env)))
+    authority_keys = {"XDG_STATE_HOME", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA"}
+    normalized = {key: (str(Path(value).resolve(strict=False)) if key in authority_keys else value) for key, value in env.items()}
+    return RuntimeContext(PlatformProfile("linux", home, normalized))
 
 
 def build_claude_fixture(temp_root: Path) -> Path:
@@ -221,7 +223,7 @@ class ClaudeAdapterTests(unittest.TestCase):
             "<!-- /gentle-ai:sdd-orchestrator -->\n"
             "Keep this line.\n"
         )
-        context = RuntimeContext(PlatformProfile("linux", home, {"XDG_STATE_HOME": str(self.temp_root / "state")}), project_roots=(project,))
+        context = RuntimeContext(PlatformProfile("linux", home, {"XDG_STATE_HOME": str((self.temp_root / "state").resolve(strict=False))}), project_roots=(project,))
         adapter = ClaudeAdapter(self.catalog)
 
         first_inventory = build_inventory(context, (adapter,))

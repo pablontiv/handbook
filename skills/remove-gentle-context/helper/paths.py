@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from .models import PlatformProfile, RuntimeContext
 
 
+ENVIRONMENT_ENV_KEYS = ("XDG_STATE_HOME", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA")
 _PLATFORM_CONFIG_ENV_KEYS = ("XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA")
 
 
@@ -82,6 +83,34 @@ def known_roots(context: RuntimeContext) -> dict[str, Path]:
 
 def root_map(context: RuntimeContext) -> dict[str, str]:
     return {root_id: str(path.expanduser().resolve(strict=False)) for root_id, path in known_roots(context).items()}
+
+
+def canonical_environment_roots(env: object, *, reject_unknown: bool = False) -> dict[str, str]:
+    if not isinstance(env, dict):
+        env = dict(env)  # type: ignore[arg-type]
+    result: dict[str, str] = {}
+    for key, value in sorted(env.items()):
+        if key not in ENVIRONMENT_ENV_KEYS:
+            if reject_unknown:
+                raise ValueError("environment_key_unsupported")
+            continue
+        if not isinstance(value, str) or not value:
+            raise ValueError("environment_root_invalid")
+        path = Path(value)
+        if not path.is_absolute():
+            raise ValueError("environment_root_invalid")
+        resolved = path.resolve(strict=False)
+        if path != resolved:
+            raise ValueError("environment_root_invalid")
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            result[key] = str(resolved)
+            continue
+        if path.is_symlink() or _is_windows_reparse_point(st):
+            raise ValueError("environment_root_invalid")
+        result[key] = str(resolved)
+    return result
 
 
 def explicit_platform_config_root(profile: PlatformProfile, env_key: str) -> Path | None:

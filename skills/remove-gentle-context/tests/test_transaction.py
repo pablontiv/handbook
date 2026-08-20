@@ -193,7 +193,7 @@ class TransactionTests(unittest.TestCase):
         self.home = self.temp_root / "home"
         self.home.mkdir()
         self.state = self.temp_root / "state"
-        self.context = RuntimeContext(PlatformProfile("linux", self.home, {"XDG_STATE_HOME": str(self.state)}))
+        self.context = RuntimeContext(PlatformProfile("linux", self.home, {"XDG_STATE_HOME": str(self.state.resolve(strict=False))}))
 
     def make_file(self, relative: str, content: str, *, mode: int = 0o640) -> Path:
         path = self.home / relative
@@ -207,6 +207,7 @@ class TransactionTests(unittest.TestCase):
             os_name=self.context.profile.os_name,
             home=str(self.home.resolve(strict=False)),
             root_map=dict(sorted(root_map(self.context).items())),
+            environment=dict(sorted(self.context.profile.env.items())),
             adapter_versions={} if adapter_versions is None else dict(sorted(adapter_versions.items())),
         ).with_digest()
 
@@ -244,6 +245,14 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "before")
         self.assertEqual(lifecycle.calls, [])
         self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
+
+    def test_tampered_inventory_environment_aborts_before_lifecycle_backup_or_mutation(self):
+        target, inventory, plan, lifecycle = self.execution_artifact_fixture()
+        other_state = self.temp_root / "other-state"
+        tampered_inventory = replace(inventory, environment={"XDG_STATE_HOME": str(other_state.resolve(strict=False))}).with_digest()
+        rebound_plan = replace(plan, inventory_digest=tampered_inventory.digest).with_digest()
+
+        self.assert_execution_artifact_rejected_without_side_effects(tampered_inventory, rebound_plan, lifecycle, target, "execute_inventory_environment_mismatch")
 
     def test_preimage_drift_aborts_before_backup_or_mutation(self):
         target = self.make_file(".codex/config.toml", "before")
