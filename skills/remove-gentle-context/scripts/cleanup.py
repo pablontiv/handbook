@@ -71,6 +71,13 @@ APPROVAL_CODES = {"plan_approval_mismatch", "restore_approval_mismatch"}
 ROOT_CODES = ("root", "home_mismatch", "os_mismatch", "path_escape", "plan_inventory")
 
 
+class _OmittedValue:
+    pass
+
+
+_OMITTED = _OmittedValue()
+
+
 class CliError(Exception):
     def __init__(self, exit_code: int, phase: str, code: str, *, path: Path | None = None, next_action: str = "inspect diagnostic and retry") -> None:
         super().__init__(code)
@@ -413,7 +420,7 @@ def receipt_command_summary(
     receipt_path: os.PathLike[str],
     receipt: Receipt,
     artifact: Mapping[str, object],
-    backup_manifest_digest: str | None = None,
+    backup_manifest_digest: str | None | _OmittedValue = _OMITTED,
     counts: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     summary = {
@@ -423,7 +430,7 @@ def receipt_command_summary(
         "digest": artifact["digest"],
         "backup_manifest_path": artifact["backup_manifest_path"],
     }
-    if backup_manifest_digest is not None:
+    if backup_manifest_digest is not _OMITTED:
         summary["backup_manifest_digest"] = backup_manifest_digest
     if counts is not None:
         summary["counts"] = dict(counts)

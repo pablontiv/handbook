@@ -223,7 +223,7 @@ class CliTests(unittest.TestCase):
             receipt_path=PureWindowsPath("C:/gentle-example/state/remove-gentle-context/receipt.json"),
             receipt=receipt,
             artifact=artifact,
-            backup_manifest_digest="sha256:" + "a" * 64,
+            backup_manifest_digest=None,
             counts={"operations": 0, "lifecycle": 0},
         )
         restore_summary = cleanup.receipt_command_summary(
@@ -235,6 +235,9 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(apply_summary["backup_manifest_path"], artifact["backup_manifest_path"])
         self.assertEqual(restore_summary["backup_manifest_path"], artifact["backup_manifest_path"])
+        self.assertIn("backup_manifest_digest", apply_summary)
+        self.assertIsNone(apply_summary["backup_manifest_digest"])
+        self.assertNotIn("backup_manifest_digest", restore_summary)
         self.assertNotIn("\\", apply_summary["backup_manifest_path"])
         self.assertNotIn("\\", restore_summary["backup_manifest_path"])
 
@@ -821,6 +824,8 @@ class CliTests(unittest.TestCase):
         receipt = self.apply(plan)
         self.assertEqual(receipt.json["status"], "completed")
         self.assertEqual(receipt.json["counts"], {"operations": 0, "lifecycle": 0})
+        self.assertIn("backup_manifest_digest", receipt.json)
+        self.assertIsNone(receipt.json["backup_manifest_digest"])
         self.assertTrue(registry.is_file())
 
     def test_inventory_context_roots_must_be_absolute_canonical_and_not_links(self) -> None:
