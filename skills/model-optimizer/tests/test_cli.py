@@ -548,10 +548,12 @@ class CliTests(unittest.TestCase):
                 _command(fixture_text("opencode/models-verbose.txt")),
                 _command(fixture_text("opencode/auth-list.txt")),
             )), {"opencode"}, "inventory", "--runtime", "opencode", "--output", str(opencode_inventory))
-            opencode_check_code, _, opencode_check_stderr = run_cli(root, FakeRunner((
-                _command('{"type":"text","part":{"text":"PONG"}}\n'),
-            )), {"opencode"}, "check", "--inventory", str(opencode_inventory), "--model", "openai/gpt-5.6-terra",
-                "--timeout", "1", "--output", str(root / "opencode-health.json"))
+            with patch("helper.adapters.opencode.secrets.token_hex", return_value="a" * 32):
+                opencode_check_code, _, opencode_check_stderr = run_cli(root, FakeRunner((
+                    _command('{"agent":{"model-optimizer-probe-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"permission":"deny"}}}\n'),
+                    _command('{"type":"text","part":{"text":"PONG"}}\n'),
+                )), {"opencode"}, "check", "--inventory", str(opencode_inventory), "--model", "openai/gpt-5.6-terra",
+                    "--timeout", "1", "--output", str(root / "opencode-health.json"))
             after = {path: path.read_bytes() for path in before}
         self.assertEqual(pi_inventory_code, 0, pi_inventory_stderr)
         self.assertEqual(pi_check_code, 0, pi_check_stderr)

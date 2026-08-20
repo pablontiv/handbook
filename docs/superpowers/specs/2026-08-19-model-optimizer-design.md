@@ -279,19 +279,22 @@ The OpenCode adapter uses only OpenCode-local evidence:
 2. parse `opencode auth list` for provider readiness without token material;
 3. parse `opencode models --verbose`, whose output is an exact model ID followed by one JSON metadata object, for servable IDs, family, limits, cost, modalities, tool calling, cache metadata, and supported variants;
 4. read `opencode.json` for current agent assignments and supported options;
-5. live-check with JSON event output and a variant only when the model metadata declares it:
+5. for each live check, generate a unique probe agent name (`model-optimizer-probe-<token_hex_32>`), inject deny-all overlays, verify the effective merged config locally, and only then launch the model path.
 
 ```bash
+OPENCODE_PERMISSION='{"*":"deny"}' \
+opencode debug config
+
 OPENCODE_PERMISSION='{"*":"deny"}' \
 opencode run \
   --format json \
   --model provider/model \
   --variant high \
-  --agent model-optimizer-probe \
+  --agent model-optimizer-probe-<token_hex_32> \
   "Reply exactly: PONG"
 ```
 
-The helper also supplies inline OpenCode config content for a dedicated `model-optimizer-probe` agent with `permission: "deny"`, while setting top-level inline `permission` and `OPENCODE_PERMISSION` to deny-all. Existing valid inline config is merged only at those bounded keys. Malformed or non-object inline config fails closed before launch with `live_unsafe_permission_config`; environment/config content is not serialized in health details.
+The helper supplies inline OpenCode config content for a per-check probe agent with deny-all permission and sets top-level inline `permission` plus `OPENCODE_PERMISSION` to deny-all. Existing valid inline config is merged only at those bounded keys. Before launch, `opencode debug config` must succeed without timeout or stdout truncation, parse as a top-level object, and prove the resolved probe agent remains deny-all with no retained executable behavior (`prompt`, permissive `tools`, or unexpected fields). Any probe failure is fail-closed as `live_unsafe_permission_config`, does not launch `opencode run`, and never serializes resolved config content in health details.
 
 On launch failure, the adapter may inspect a bounded tail of the documented OpenCode log for reason codes such as model-not-found or undefined model. It redacts secrets and never treats helper scripts or external catalogs as stronger than `opencode models` plus the live response.
 

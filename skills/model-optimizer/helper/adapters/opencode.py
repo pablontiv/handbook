@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import secrets
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -44,8 +45,10 @@ _STRUCTURAL_AGENT_KEYS = {"variant", "temperature", "top_p", "steps", "reasoning
 _DEFAULT_TIMEOUT_SECONDS = 15
 _MAX_DETAIL_CHARS = 240
 _LOG_TAIL_CHARS = 4096
-_PROBE_AGENT = "model-optimizer-probe"
+_PROBE_AGENT_PREFIX = "model-optimizer-probe-"
+_PROBE_TOKEN_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
 _DENY_ALL_PERMISSION = {"*": "deny"}
+_ALLOWED_PROBE_AGENT_KEYS = frozenset({"permission", "tools", "options"})
 
 _ERROR_NAME_TO_REASON = {
     "ProviderModelNotFoundError": "live_provider_model_not_found",
@@ -358,7 +361,14 @@ def _append_unique(items: list[str], value: str) -> None:
         items.append(value)
 
 
-def _live_probe_env_overlay(context: RuntimeContext) -> dict[str, str] | None:
+def _new_probe_agent_name() -> str | None:
+    token = secrets.token_hex(16)
+    if not isinstance(token, str) or _PROBE_TOKEN_HEX_RE.fullmatch(token) is None:
+        return None
+    return f"{_PROBE_AGENT_PREFIX}{token}"
+
+
+def _live_probe_env_overlay(context: RuntimeContext, probe_agent_name: str) -> dict[str, str] | None:
     inline_text = context.env.get("OPENCODE_CONFIG_CONTENT")
     if inline_text is None or inline_text == "":
         inline_config: dict[str, Any] = {}
@@ -373,7 +383,7 @@ def _live_probe_env_overlay(context: RuntimeContext) -> dict[str, str] | None:
 
     agents_value = inline_config.get("agent")
     agents = dict(agents_value) if isinstance(agents_value, Mapping) else {}
-    agents[_PROBE_AGENT] = {"permission": "deny"}
+    agents[probe_agent_name] = {"permission": "deny"}
     inline_config["permission"] = dict(_DENY_ALL_PERMISSION)
     inline_config["agent"] = agents
 
@@ -381,6 +391,63 @@ def _live_probe_env_overlay(context: RuntimeContext) -> dict[str, str] | None:
     overlay["OPENCODE_PERMISSION"] = json.dumps(_DENY_ALL_PERMISSION, sort_keys=True, separators=(",", ":"))
     overlay["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline_config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return overlay
+
+
+def _permission_is_deny_all(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() == "deny"
+    if not isinstance(value, Mapping):
+        return False
+    if set(value.keys()) != {"*"}:
+        return False
+    decision = value.get("*")
+    return isinstance(decision, str) and decision.strip().lower() == "deny"
+
+
+def _recursive_deny_only(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return all(isinstance(key, str) and _recursive_deny_only(item) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return all(_recursive_deny_only(item) for item in value)
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, str):
+        return value.strip().lower() == "deny"
+    return False
+
+
+def _is_empty_options(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        return len(value) == 0
+    if isinstance(value, (list, tuple)):
+        return len(value) == 0
+    return False
+
+
+def _probe_agent_config_is_safe(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if "prompt" in value:
+        return False
+    if not _permission_is_deny_all(value.get("permission")):
+        return False
+    for key in value.keys():
+        if not isinstance(key, str) or key not in _ALLOWED_PROBE_AGENT_KEYS:
+            return False
+    if "tools" in value and not _recursive_deny_only(value.get("tools")):
+        return False
+    if "options" in value and not _is_empty_options(value.get("options")):
+        return False
+    return True
+
+
+def _effective_probe_agent_is_safe(value: Any, probe_agent_name: str) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    agents = value.get("agent")
+    if not isinstance(agents, Mapping):
+        return False
+    return _probe_agent_config_is_safe(agents.get(probe_agent_name))
 
 
 def _is_json_structural(value: Any) -> bool:
@@ -578,14 +645,22 @@ class OpenCodeAdapter:
                 response_matched=False,
                 detail="unsupported variant",
             )
-        env_overlay = _live_probe_env_overlay(context)
+        probe_agent_name = _new_probe_agent_name()
+        if probe_agent_name is None:
+            return self._health(model_record, effort, HealthStatus.FAIL, 0, "live_unsafe_permission_config", False, "unsafe permission config")
+
+        env_overlay = _live_probe_env_overlay(context, probe_agent_name)
         if env_overlay is None:
             return self._health(model_record, effort, HealthStatus.FAIL, 0, "live_unsafe_permission_config", False, "unsafe permission config")
+
+        probe_failure = self._verify_effective_permission_config(model_record, effort, context, env_overlay, probe_agent_name)
+        if probe_failure is not None:
+            return probe_failure
 
         argv = ["opencode", "run", "--format", "json", "--model", model_record.exact_id]
         if effort is not None:
             argv.extend(("--variant", effort))
-        argv.extend(("--agent", _PROBE_AGENT))
+        argv.extend(("--agent", probe_agent_name))
         argv.append(f"Reply exactly: {sentinel}")
         result = self.runner.run(tuple(argv), timeout=timeout, cwd=context.cwd, env_overlay=env_overlay)
 
@@ -648,6 +723,55 @@ class OpenCodeAdapter:
             warnings=tuple(dict.fromkeys((*self.warnings, *snapshot.warnings))),
             digest="",
         ))
+
+    def _verify_effective_permission_config(
+        self,
+        model_record: ModelRecord,
+        effort: str | None,
+        context: RuntimeContext,
+        env_overlay: Mapping[str, str],
+        probe_agent_name: str,
+    ) -> HealthCheck | None:
+        result = self.runner.run(
+            ("opencode", "debug", "config"),
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            cwd=context.cwd,
+            env_overlay=env_overlay,
+            stdout_limit=MAX_STDOUT_LIMIT_CHARS,
+        )
+        if result.timed_out or result.returncode != 0 or result.stdout_truncated:
+            return self._health(
+                model_record,
+                effort,
+                HealthStatus.FAIL,
+                result.elapsed_ms,
+                "live_unsafe_permission_config",
+                False,
+                "unsafe permission config",
+            )
+        try:
+            parsed = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return self._health(
+                model_record,
+                effort,
+                HealthStatus.FAIL,
+                result.elapsed_ms,
+                "live_unsafe_permission_config",
+                False,
+                "unsafe permission config",
+            )
+        if not _effective_probe_agent_is_safe(parsed, probe_agent_name):
+            return self._health(
+                model_record,
+                effort,
+                HealthStatus.FAIL,
+                result.elapsed_ms,
+                "live_unsafe_permission_config",
+                False,
+                "unsafe permission config",
+            )
+        return None
 
     def _health(
         self,

@@ -101,6 +101,8 @@ Schema: `model-optimizer.health/v1`.
 
 Required to load: `schema`, `created_at`, and `inventory_digest`. `checks` is serialized by helper output and currently defaults to empty if absent. Each check requires `model`, `status`, `elapsed_ms`, `reason_code`, `response_matched`, and `detail`; `effort` is optional and serializes as `null` when no runtime-supported effort/variant was requested.
 
+OpenCode live checks are fail-closed at a local safety boundary: before any `opencode run`, the adapter injects a per-check unique probe agent (`model-optimizer-probe-<token_hex_32>`), runs `opencode debug config`, and requires effective deny-all permission with no retained executable behavior. Any probe command failure, timeout, truncation, malformed JSON, missing probe agent, or permission conflict returns `live_unsafe_permission_config`, sets `response_matched` to `false`, and skips model launch.
+
 ## Reason-code families
 
 - `runtime_*`: missing, ambiguous, or unavailable runtime/executable/version detection.

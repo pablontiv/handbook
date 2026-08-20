@@ -26,6 +26,27 @@ class EnvCapturingRunner(FakeRunner):
         return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit)
 
 
+def _probe_agent_name(token: str) -> str:
+    return f"model-optimizer-probe-{token}"
+
+
+def _debug_config_command(
+    agent_name: str,
+    *,
+    payload: dict | str | None = None,
+    returncode: int | None = 0,
+    timed_out: bool = False,
+    stdout_truncated: bool = False,
+) -> CompletedCommand:
+    if payload is None:
+        stdout = json.dumps({"agent": {agent_name: {"permission": "deny"}}})
+    elif isinstance(payload, str):
+        stdout = payload
+    else:
+        stdout = json.dumps(payload)
+    return CompletedCommand((), returncode, stdout, "", 1, timed_out, stdout_truncated, False)
+
+
 class OpenCodeAdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -41,6 +62,19 @@ class OpenCodeAdapterTests(unittest.TestCase):
         assert_test_path(target, self.root)
         target.write_text(text or fixture_text("opencode/opencode.json"), encoding="utf-8")
         return target
+
+    def _live_check_with_token(
+        self,
+        runner,
+        model: ModelRecord,
+        effort: str | None,
+        sentinel: str,
+        timeout: float,
+        context: RuntimeContext,
+        token: str = "a" * 32,
+    ):
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value=token):
+            return OpenCodeAdapter(runner).live_check(model, effort, sentinel, timeout, context)
 
     def test_auth_parser_strips_ansi_and_returns_provider_ids(self):
         ready = parse_opencode_auth(fixture_text("opencode/auth-list.txt"))
@@ -351,7 +385,12 @@ openai/gpt-second
             self.assertNotIn(secret, serialized)
 
     def test_live_check_uses_json_events_supported_variant_and_dedicated_deny_all_agent(self):
-        runner = EnvCapturingRunner((_command('{"type":"text","part":{"text":"PONG"}}\n'),))
+        token = "a" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+        ))
         model = ModelRecord(
             exact_id="openai/gpt-5.6-terra",
             provider="openai",
@@ -371,14 +410,14 @@ openai/gpt-second
         }
         context = RuntimeContext(home=self.root, cwd=self.context.cwd, env=original_env)
 
-        check = OpenCodeAdapter(runner).live_check(
-            model, "high", "PONG", 60, context
-        )
+        check = self._live_check_with_token(runner, model, "high", "PONG", 60, context, token=token)
 
         self.assertEqual(check.status, HealthStatus.PASS)
+        self.assertEqual(runner.argv[0], ("opencode", "debug", "config"))
+        self.assertEqual(runner.stdout_limits[0], MAX_STDOUT_LIMIT_CHARS)
         self.assertEqual(runner.argv[-1], (
             "opencode", "run", "--format", "json", "--model",
-            "openai/gpt-5.6-terra", "--variant", "high", "--agent", "model-optimizer-probe",
+            "openai/gpt-5.6-terra", "--variant", "high", "--agent", agent_name,
             "Reply exactly: PONG",
         ))
         self.assertEqual(context.env, original_env)
@@ -388,22 +427,193 @@ openai/gpt-second
         self.assertEqual(inline["theme"], "dark")
         self.assertEqual(inline["permission"], {"*": "deny"})
         self.assertEqual(inline["agent"]["worker"], {"model": "openai/gpt-5.6-terra"})
-        self.assertEqual(inline["agent"]["model-optimizer-probe"], {"permission": "deny"})
+        self.assertEqual(inline["agent"][agent_name], {"permission": "deny"})
 
     def test_live_check_adds_deny_all_inline_config_when_env_has_no_existing_config(self):
-        runner = EnvCapturingRunner((_command('{"type":"text","part":{"text":"PONG"}}\n'),))
+        token = "b" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+        ))
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6")
 
-        check = OpenCodeAdapter(runner).live_check(model, None, "PONG", 60, self.context)
+        check = self._live_check_with_token(runner, model, None, "PONG", 60, self.context, token=token)
 
         self.assertEqual(check.status, HealthStatus.PASS)
         env = runner.env_overlays[-1]
         self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "deny"})
         inline = json.loads(env["OPENCODE_CONFIG_CONTENT"])
         self.assertEqual(inline["permission"], {"*": "deny"})
-        self.assertEqual(inline["agent"]["model-optimizer-probe"], {"permission": "deny"})
+        self.assertEqual(inline["agent"][agent_name], {"permission": "deny"})
         self.assertIn("--agent", runner.argv[-1])
         self.assertNotIn("--auto", runner.argv[-1])
+
+    def test_live_check_rejects_debug_config_permission_conflict_before_model_launch(self):
+        token = "c" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name, payload={
+                "agent": {
+                    agent_name: {
+                        "permission": {"*": "deny", "bash": "allow"},
+                    }
+                }
+            }),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+        ))
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
+
+        self.assertEqual(check.status, HealthStatus.FAIL)
+        self.assertEqual(check.reason_code, "live_unsafe_permission_config")
+        self.assertFalse(check.response_matched)
+        self.assertEqual(runner.argv, [("opencode", "debug", "config")])
+
+    def test_live_check_rejects_debug_config_prompt_carryover_before_model_launch(self):
+        token = "d" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name, payload={
+                "agent": {
+                    agent_name: {
+                        "permission": "deny",
+                        "prompt": "run rm -rf /",
+                    }
+                }
+            }),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+        ))
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
+
+        self.assertEqual(check.status, HealthStatus.FAIL)
+        self.assertEqual(check.reason_code, "live_unsafe_permission_config")
+        self.assertEqual(runner.argv, [("opencode", "debug", "config")])
+
+    def test_live_check_rejects_debug_config_tools_enablement_before_model_launch(self):
+        token = "d" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name, payload={
+                "agent": {
+                    agent_name: {
+                        "permission": "deny",
+                        "tools": {"bash": "allow"},
+                    }
+                }
+            }),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+        ))
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
+
+        self.assertEqual(check.status, HealthStatus.FAIL)
+        self.assertEqual(check.reason_code, "live_unsafe_permission_config")
+        self.assertEqual(runner.argv, [("opencode", "debug", "config")])
+
+    def test_live_check_rejects_debug_config_failures_before_model_launch(self):
+        token = "e" * 32
+        agent_name = _probe_agent_name(token)
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+        cases = (
+            (_debug_config_command(agent_name, payload={"agent": {} }), "missing-agent"),
+            (_debug_config_command(agent_name, payload="{",), "malformed-json"),
+            (_debug_config_command(agent_name, returncode=2), "nonzero"),
+            (_debug_config_command(agent_name, timed_out=True, returncode=None), "timeout"),
+            (_debug_config_command(agent_name, stdout_truncated=True), "truncated"),
+        )
+        for response, label in cases:
+            with self.subTest(case=label):
+                runner = EnvCapturingRunner((
+                    response,
+                    _command('{"type":"text","part":{"text":"PONG"}}\n'),
+                ))
+                check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
+                self.assertEqual(check.status, HealthStatus.FAIL)
+                self.assertEqual(check.reason_code, "live_unsafe_permission_config")
+                self.assertFalse(check.response_matched)
+                self.assertEqual(runner.argv, [("opencode", "debug", "config")])
+
+    def test_live_check_accepts_normalized_deny_permission_and_then_runs_model(self):
+        token = "f" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name, payload={
+                "agent": {
+                    agent_name: {
+                        "permission": {"*": "deny"},
+                        "tools": {
+                            "bash": "deny",
+                            "nested": {"http": False},
+                        },
+                        "options": {},
+                    }
+                }
+            }),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+        ))
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
+
+        self.assertEqual(check.status, HealthStatus.PASS)
+        self.assertEqual([item[:3] for item in runner.argv], [
+            ("opencode", "debug", "config"),
+            ("opencode", "run", "--format"),
+        ])
+
+    def test_live_check_uses_unique_agent_name_per_invocation_with_no_fixed_reuse(self):
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+        first_token = "1" * 32
+        second_token = "2" * 32
+        first_agent = _probe_agent_name(first_token)
+        second_agent = _probe_agent_name(second_token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(first_agent),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+            _debug_config_command(second_agent),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+        ))
+        adapter = OpenCodeAdapter(runner)
+
+        with patch("helper.adapters.opencode.secrets.token_hex", side_effect=[first_token, second_token]):
+            first = adapter.live_check(model, "low", "PONG", 60, self.context)
+            second = adapter.live_check(model, "low", "PONG", 60, self.context)
+
+        self.assertEqual(first.status, HealthStatus.PASS)
+        self.assertEqual(second.status, HealthStatus.PASS)
+        run_agents = [argv[argv.index("--agent") + 1] for argv in runner.argv if argv[:2] == ("opencode", "run")]
+        self.assertEqual(len(run_agents), 2)
+        self.assertNotEqual(run_agents[0], run_agents[1])
+        self.assertTrue(all(name.startswith("model-optimizer-probe-") for name in run_agents))
+        self.assertTrue(all(len(name) == len("model-optimizer-probe-") + 32 for name in run_agents))
+        self.assertNotIn("model-optimizer-probe", run_agents)
+
+    def test_live_check_debug_config_secret_output_never_leaks_into_health_detail(self):
+        token = "9" * 32
+        agent_name = _probe_agent_name(token)
+        secret = "sk-debug-config-should-not-leak"
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name, payload={
+                "agent": {
+                    agent_name: {
+                        "permission": "deny",
+                        "prompt": secret,
+                    }
+                }
+            }),
+        ))
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
+
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
+
+        self.assertEqual(check.status, HealthStatus.FAIL)
+        self.assertEqual(check.reason_code, "live_unsafe_permission_config")
+        self.assertNotIn(secret, check.detail)
 
     def test_live_check_malformed_inline_config_fails_closed_without_launch_or_leak(self):
         runner = EnvCapturingRunner((_command('{"type":"text","part":{"text":"PONG"}}\n'),))
@@ -423,13 +633,16 @@ openai/gpt-second
         self.assertNotIn("OPENCODE_CONFIG_CONTENT", check.detail)
 
     def test_error_event_is_fail_even_when_process_exit_is_zero(self):
-        runner = FakeRunner.stdout(fixture_text("opencode/live-error.jsonl"))
+        token = "a" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name),
+            _command(fixture_text("opencode/live-error.jsonl")),
+        ))
         model = ModelRecord(
             exact_id="nan/qwen3.6", provider="nan", model="qwen3.6", variants=("low",),
         )
-        check = OpenCodeAdapter(runner).live_check(
-            model, "low", "PONG", 60, self.context
-        )
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
         self.assertEqual(check.status, HealthStatus.FAIL)
         self.assertEqual(check.reason_code, "live_runtime_error")
         self.assertIn("Unexpected server error", check.detail)
@@ -437,6 +650,8 @@ openai/gpt-second
         self.assertNotIn("err_fixture", check.detail)
 
     def test_error_event_structural_name_maps_known_reason_with_generic_message(self):
+        token = "a" * 32
+        agent_name = _probe_agent_name(token)
         event = {
             "type": "error",
             "sessionID": "ses_structural_fixture",
@@ -448,9 +663,12 @@ openai/gpt-second
                 },
             },
         }
-        runner = FakeRunner.stdout(json.dumps(event) + "\n")
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name),
+            _command(json.dumps(event) + "\n"),
+        ))
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
-        check = OpenCodeAdapter(runner).live_check(model, "low", "PONG", 60, self.context)
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
         self.assertEqual(check.status, HealthStatus.FAIL)
         self.assertEqual(check.reason_code, "live_provider_model_not_found")
         self.assertIn("Model lookup failed", check.detail)
@@ -460,6 +678,8 @@ openai/gpt-second
         self.assertLessEqual(len(check.detail), 240)
 
     def test_session_and_ref_redaction_accepts_case_insensitive_dash_or_underscore_forms(self):
+        token = "a" * 32
+        agent_name = _probe_agent_name(token)
         event = {
             "type": "error",
             "error": {
@@ -468,9 +688,12 @@ openai/gpt-second
                 },
             },
         }
-        runner = FakeRunner.stdout(json.dumps(event) + "\n")
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name),
+            _command(json.dumps(event) + "\n"),
+        ))
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
-        check = OpenCodeAdapter(runner).live_check(model, "low", "PONG", 60, self.context)
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
         self.assertEqual(check.status, HealthStatus.FAIL)
         self.assertEqual(check.reason_code, "live_runtime_error")
         for token in ("SES-DASH", "Err_Dash", "ses_under", "err-under"):
@@ -508,9 +731,14 @@ openai/gpt-second
         self.assertEqual(reason, "live_sentinel_matched")
 
     def test_step_start_only_is_empty_response_not_pass(self):
-        runner = FakeRunner.stdout('{"type":"step_start","message":"PONG"}\n')
+        token = "a" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name),
+            _command('{"type":"step_start","message":"PONG"}\n'),
+        ))
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
-        check = OpenCodeAdapter(runner).live_check(model, "low", "PONG", 60, self.context)
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
         self.assertEqual(check.status, HealthStatus.FAIL)
         self.assertEqual(check.reason_code, "live_empty_response")
 
@@ -541,6 +769,8 @@ openai/gpt-second
         self.assertEqual(runner.argv, [])
 
     def test_live_nonzero_maps_known_model_errors_to_bounded_reason_codes(self):
+        token = "a" * 32
+        agent_name = _probe_agent_name(token)
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
         cases = (
             ("model_not_supported: nan/qwen3.6", "live_model_not_supported"),
@@ -549,26 +779,33 @@ openai/gpt-second
         for stderr, reason in cases:
             with self.subTest(reason=reason):
                 command = type(_command(""))((), 1, "", stderr, 1, False)
-                check = OpenCodeAdapter(FakeRunner((command,))).live_check(model, "low", "PONG", 60, self.context)
+                runner = EnvCapturingRunner((_debug_config_command(agent_name), command))
+                check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
                 self.assertEqual(check.status, HealthStatus.FAIL)
                 self.assertEqual(check.reason_code, reason)
                 self.assertLessEqual(len(check.detail), 240)
 
     def test_timeout_precedes_nonzero_error_and_sentinel_evidence(self):
+        token = "a" * 32
+        agent_name = _probe_agent_name(token)
         command = type(_command(""))((), 2, fixture_text("opencode/live-error.jsonl") + '{"type":"text","part":{"text":"PONG"}}', "", 1, True)
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
-        check = OpenCodeAdapter(FakeRunner((command,))).live_check(model, "low", "PONG", 1, self.context)
+        runner = EnvCapturingRunner((_debug_config_command(agent_name), command))
+        check = self._live_check_with_token(runner, model, "low", "PONG", 1, self.context, token=token)
         self.assertEqual(check.status, HealthStatus.HANG)
         self.assertEqual(check.reason_code, "live_timeout")
 
     def test_bounded_log_tail_enriches_fail_but_cannot_turn_it_into_pass(self):
+        token = "a" * 32
+        agent_name = _probe_agent_name(token)
         log = self.root / ".local" / "share" / "opencode" / "log" / "opencode.log"
         assert_test_path(log, self.root)
         log.parent.mkdir(parents=True)
         log.write_text("token=secret-token\n" + "x" * 400 + "\nProviderModelNotFoundError: missing ses_secret err_secret\n", encoding="utf-8")
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
         command = type(_command(""))((), 1, "", "launch failed", 1, False)
-        check = OpenCodeAdapter(FakeRunner((command,))).live_check(model, "low", "PONG", 60, self.context)
+        runner = EnvCapturingRunner((_debug_config_command(agent_name), command))
+        check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
         self.assertEqual(check.status, HealthStatus.FAIL)
         self.assertEqual(check.reason_code, "live_provider_model_not_found")
         self.assertIn("ProviderModelNotFoundError", check.detail)
@@ -577,6 +814,8 @@ openai/gpt-second
         self.assertLessEqual(len(check.detail), 240)
 
     def test_log_tail_uses_bounded_binary_read_and_tail_marker(self):
+        token = "a" * 32
+        agent_name = _probe_agent_name(token)
         log = self.root / ".local" / "share" / "opencode" / "log" / "opencode.log"
         assert_test_path(log, self.root)
         log.parent.mkdir(parents=True)
@@ -587,8 +826,9 @@ openai/gpt-second
             handle.write(tail_marker.encode("utf-8"))
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low",))
         command = type(_command(""))((), 1, "", "launch failed", 1, False)
+        runner = EnvCapturingRunner((_debug_config_command(agent_name), command))
         with patch.object(Path, "read_text", side_effect=AssertionError("full log read forbidden")):
-            check = OpenCodeAdapter(FakeRunner((command,))).live_check(model, "low", "PONG", 60, self.context)
+            check = self._live_check_with_token(runner, model, "low", "PONG", 60, self.context, token=token)
         self.assertEqual(check.status, HealthStatus.FAIL)
         self.assertEqual(check.reason_code, "live_provider_model_not_found")
         self.assertIn("bounded tail marker", check.detail)
