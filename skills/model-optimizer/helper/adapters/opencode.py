@@ -44,6 +44,8 @@ _STRUCTURAL_AGENT_KEYS = {"variant", "temperature", "top_p", "steps", "reasoning
 _DEFAULT_TIMEOUT_SECONDS = 15
 _MAX_DETAIL_CHARS = 240
 _LOG_TAIL_CHARS = 4096
+_PROBE_AGENT = "model-optimizer-probe"
+_DENY_ALL_PERMISSION = {"*": "deny"}
 
 _ERROR_NAME_TO_REASON = {
     "ProviderModelNotFoundError": "live_provider_model_not_found",
@@ -356,6 +358,31 @@ def _append_unique(items: list[str], value: str) -> None:
         items.append(value)
 
 
+def _live_probe_env_overlay(context: RuntimeContext) -> dict[str, str] | None:
+    inline_text = context.env.get("OPENCODE_CONFIG_CONTENT")
+    if inline_text is None or inline_text == "":
+        inline_config: dict[str, Any] = {}
+    else:
+        try:
+            parsed = json.loads(inline_text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, Mapping):
+            return None
+        inline_config = dict(parsed)
+
+    agents_value = inline_config.get("agent")
+    agents = dict(agents_value) if isinstance(agents_value, Mapping) else {}
+    agents[_PROBE_AGENT] = {"permission": "deny"}
+    inline_config["permission"] = dict(_DENY_ALL_PERMISSION)
+    inline_config["agent"] = agents
+
+    overlay = dict(context.env)
+    overlay["OPENCODE_PERMISSION"] = json.dumps(_DENY_ALL_PERMISSION, sort_keys=True, separators=(",", ":"))
+    overlay["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline_config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return overlay
+
+
 def _is_json_structural(value: Any) -> bool:
     if value is None or isinstance(value, (str, bool, int, float)):
         return not (isinstance(value, float) and not math.isfinite(value))
@@ -551,11 +578,16 @@ class OpenCodeAdapter:
                 response_matched=False,
                 detail="unsupported variant",
             )
+        env_overlay = _live_probe_env_overlay(context)
+        if env_overlay is None:
+            return self._health(model_record, effort, HealthStatus.FAIL, 0, "live_unsafe_permission_config", False, "unsafe permission config")
+
         argv = ["opencode", "run", "--format", "json", "--model", model_record.exact_id]
         if effort is not None:
             argv.extend(("--variant", effort))
+        argv.extend(("--agent", _PROBE_AGENT))
         argv.append(f"Reply exactly: {sentinel}")
-        result = self.runner.run(tuple(argv), timeout=timeout, cwd=context.cwd, env_overlay=context.env)
+        result = self.runner.run(tuple(argv), timeout=timeout, cwd=context.cwd, env_overlay=env_overlay)
 
         if result.timed_out:
             return self._health(model_record, effort, HealthStatus.HANG, result.elapsed_ms, "live_timeout", False, result.stdout or result.stderr or "timeout")

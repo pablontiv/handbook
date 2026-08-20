@@ -1,6 +1,9 @@
 import json
+import math
+import os
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from helper.artifacts import (
@@ -18,6 +21,7 @@ from helper.models import (
     HealthCheck,
     HealthStatus,
     Inventory,
+    ModelRecord,
     RuntimeInfo,
     RuntimeKind,
 )
@@ -28,6 +32,49 @@ class ArtifactTests(unittest.TestCase):
     def test_canonical_digest_ignores_mapping_insertion_order(self):
         self.assertEqual(canonical_bytes({"b": 2, "a": 1}), b'{"a":1,"b":2}')
         self.assertEqual(digest_json({"b": 2, "a": 1}), digest_json({"a": 1, "b": 2}))
+
+    def test_canonical_json_rejects_non_finite_numbers_with_stable_error(self):
+        for value in (math.nan, math.inf, -math.inf):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "artifact_invalid_number") as caught:
+                    canonical_bytes({"bad": value})
+                self.assertNotIn(str(value), str(caught.exception))
+
+    def test_inventory_and_model_non_finite_values_are_rejected_without_raw_data(self):
+        bad_inventory = Inventory(
+            schema="model-optimizer.inventory/v1",
+            created_at="1970-01-01T00:00:00Z",
+            runtime=RuntimeInfo(RuntimeKind.PI, "0.84.2", "/work"),
+            sources=(), current_assignments=(),
+            catalog_local=(ModelRecord("nan/qwen", "nan", "qwen", input_cost=math.nan),),
+            provider_readiness=(), exclusions=(), warnings=(), digest="",
+        )
+        bad_health = HealthArtifact(
+            schema="model-optimizer.health/v1",
+            created_at="1970-01-01T00:00:00Z",
+            inventory_digest="sha256:inventory",
+            checks=(HealthCheck("nan/qwen", None, HealthStatus.PASS, math.inf, "ok", True, "ok"),),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, writer, artifact in (
+                ("inventory", write_inventory, bad_inventory),
+                ("health", write_health, bad_health),
+            ):
+                with self.subTest(name=name):
+                    with self.assertRaisesRegex(ValueError, "artifact_invalid_number") as caught:
+                        writer(root / f"{name}.json", artifact)
+                    self.assertFalse((root / f"{name}.json").exists())
+                    self.assertNotIn("nan", str(caught.exception).lower())
+                    self.assertNotIn("inf", str(caught.exception).lower())
+
+    def test_load_inventory_rejects_non_finite_json_constant_with_stable_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "inventory.json"
+            path.write_text('{"schema":"model-optimizer.inventory/v1","value":NaN}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "artifact_invalid_number") as caught:
+                load_inventory(path)
+        self.assertNotIn("NaN", str(caught.exception))
 
     def test_inventory_round_trip_preserves_schema_and_digest(self):
         inventory = Inventory.empty(RuntimeInfo(RuntimeKind.PI, "0.84.2", "/work"))
@@ -174,6 +221,79 @@ class ArtifactTests(unittest.TestCase):
             path.write_text(json.dumps(value), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "artifact_digest_mismatch"):
                 load_inventory(path)
+
+    def test_write_inventory_replaces_hardlink_without_overwriting_original_inode(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = root / "settings.json"
+            output = root / "inventory.json"
+            config.write_bytes(b"original-config")
+            try:
+                os.link(config, output)
+            except (AttributeError, NotImplementedError, OSError) as exc:
+                self.skipTest(f"hardlinks unsupported: {exc}")
+            before_inode = config.stat().st_ino
+
+            write_inventory(output, Inventory.empty(RuntimeInfo(RuntimeKind.PI, "0.84.2", "/work")))
+
+            self.assertEqual(config.read_bytes(), b"original-config")
+            self.assertEqual(config.stat().st_ino, before_inode)
+            self.assertNotEqual(output.stat().st_ino, before_inode)
+            self.assertEqual(load_inventory(output).runtime.kind, RuntimeKind.PI)
+
+    def test_write_health_replaces_hardlink_without_overwriting_original_inode(self):
+        health = HealthArtifact(
+            schema="model-optimizer.health/v1",
+            created_at="1970-01-01T00:00:00Z",
+            inventory_digest="sha256:inventory",
+            checks=(),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = root / "opencode.json"
+            output = root / "health.json"
+            config.write_bytes(b"original-config")
+            try:
+                os.link(config, output)
+            except (AttributeError, NotImplementedError, OSError) as exc:
+                self.skipTest(f"hardlinks unsupported: {exc}")
+            before_inode = config.stat().st_ino
+
+            write_health(output, health)
+
+            self.assertEqual(config.read_bytes(), b"original-config")
+            self.assertEqual(config.stat().st_ino, before_inode)
+            self.assertNotEqual(output.stat().st_ino, before_inode)
+            self.assertEqual(load_health(output).inventory_digest, "sha256:inventory")
+
+    def test_concurrent_inventory_writes_leave_one_loadable_artifact_and_no_temp_debris(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "inventory.json"
+            inventories = [Inventory.empty(RuntimeInfo(RuntimeKind.PI, f"0.84.{index}", "/work")) for index in range(8)]
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                list(executor.map(lambda inventory: write_inventory(output, inventory), inventories))
+
+            loaded = load_inventory(output)
+            self.assertIn(loaded.runtime.version, {inventory.runtime.version for inventory in inventories})
+            self.assertEqual(list(root.glob(".inventory.json.*.tmp")), [])
+
+    def test_concurrent_health_writes_leave_one_loadable_artifact_and_no_temp_debris(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "health.json"
+            artifacts = [HealthArtifact(
+                schema="model-optimizer.health/v1",
+                created_at=f"1970-01-01T00:00:0{index}Z",
+                inventory_digest=f"sha256:{index}",
+                checks=(),
+            ) for index in range(8)]
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                list(executor.map(lambda health: write_health(output, health), artifacts))
+
+            loaded = load_health(output)
+            self.assertIn(loaded.inventory_digest, {health.inventory_digest for health in artifacts})
+            self.assertEqual(list(root.glob(".health.json.*.tmp")), [])
 
     def test_health_round_trip_preserves_schema_without_self_digest(self):
         health = HealthArtifact(

@@ -16,6 +16,16 @@ from helper.runner import MAX_STDOUT_LIMIT_CHARS, CompletedCommand
 from tests.support import FakeRunner, _command, assert_test_path, fixture_text
 
 
+class EnvCapturingRunner(FakeRunner):
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.env_overlays = []
+
+    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None):
+        self.env_overlays.append(dict(env_overlay or {}))
+        return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit)
+
+
 class OpenCodeAdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -340,22 +350,77 @@ openai/gpt-second
         for secret in ("sk-nested-secret", "tok-secret", "Bearer secret", "secret-value", "pw-secret", "cred-secret"):
             self.assertNotIn(secret, serialized)
 
-    def test_live_check_uses_json_events_and_supported_variant(self):
-        runner = FakeRunner.stdout('{"type":"text","part":{"text":"PONG"}}\n')
+    def test_live_check_uses_json_events_supported_variant_and_dedicated_deny_all_agent(self):
+        runner = EnvCapturingRunner((_command('{"type":"text","part":{"text":"PONG"}}\n'),))
         model = ModelRecord(
             exact_id="openai/gpt-5.6-terra",
             provider="openai",
             model="gpt-5.6-terra",
             variants=("high", "max"),
         )
+        original_env = {
+            "OPENCODE_CONFIG_CONTENT": json.dumps({
+                "theme": "dark",
+                "permission": {"read": "ask"},
+                "agent": {
+                    "worker": {"model": "openai/gpt-5.6-terra"},
+                    "model-optimizer-probe": {"model": "attacker/model", "permission": "allow"},
+                },
+            }),
+            "OPENCODE_PERMISSION": '{"write":"allow"}',
+        }
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env=original_env)
+
         check = OpenCodeAdapter(runner).live_check(
-            model, "high", "PONG", 60, self.context
+            model, "high", "PONG", 60, context
         )
+
         self.assertEqual(check.status, HealthStatus.PASS)
         self.assertEqual(runner.argv[-1], (
             "opencode", "run", "--format", "json", "--model",
-            "openai/gpt-5.6-terra", "--variant", "high", "Reply exactly: PONG",
+            "openai/gpt-5.6-terra", "--variant", "high", "--agent", "model-optimizer-probe",
+            "Reply exactly: PONG",
         ))
+        self.assertEqual(context.env, original_env)
+        env = runner.env_overlays[-1]
+        self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "deny"})
+        inline = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(inline["theme"], "dark")
+        self.assertEqual(inline["permission"], {"*": "deny"})
+        self.assertEqual(inline["agent"]["worker"], {"model": "openai/gpt-5.6-terra"})
+        self.assertEqual(inline["agent"]["model-optimizer-probe"], {"permission": "deny"})
+
+    def test_live_check_adds_deny_all_inline_config_when_env_has_no_existing_config(self):
+        runner = EnvCapturingRunner((_command('{"type":"text","part":{"text":"PONG"}}\n'),))
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6")
+
+        check = OpenCodeAdapter(runner).live_check(model, None, "PONG", 60, self.context)
+
+        self.assertEqual(check.status, HealthStatus.PASS)
+        env = runner.env_overlays[-1]
+        self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "deny"})
+        inline = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(inline["permission"], {"*": "deny"})
+        self.assertEqual(inline["agent"]["model-optimizer-probe"], {"permission": "deny"})
+        self.assertIn("--agent", runner.argv[-1])
+        self.assertNotIn("--auto", runner.argv[-1])
+
+    def test_live_check_malformed_inline_config_fails_closed_without_launch_or_leak(self):
+        runner = EnvCapturingRunner((_command('{"type":"text","part":{"text":"PONG"}}\n'),))
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6")
+        secret_config = '{"apiKey":"sk-inline-secret"'
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENCODE_CONFIG_CONTENT": secret_config})
+
+        check = OpenCodeAdapter(runner).live_check(model, None, "PONG", 60, context)
+
+        self.assertEqual(check.status, HealthStatus.FAIL)
+        self.assertEqual(check.reason_code, "live_unsafe_permission_config")
+        self.assertFalse(check.response_matched)
+        self.assertEqual(runner.argv, [])
+        self.assertEqual(runner.env_overlays, [])
+        self.assertEqual(context.env["OPENCODE_CONFIG_CONTENT"], secret_config)
+        self.assertNotIn("sk-inline-secret", check.detail)
+        self.assertNotIn("OPENCODE_CONFIG_CONTENT", check.detail)
 
     def test_error_event_is_fail_even_when_process_exit_is_zero(self):
         runner = FakeRunner.stdout(fixture_text("opencode/live-error.jsonl"))

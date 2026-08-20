@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -10,7 +12,7 @@ from helper.models import HealthArtifact, Inventory
 
 
 def canonical_bytes(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return _json_dumps_strict(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def digest_json(value: Any) -> str:
@@ -24,7 +26,7 @@ def inventory_with_digest(inventory: Inventory) -> Inventory:
 
 
 def write_inventory(path: Path, inventory: Inventory) -> None:
-    path.write_text(json.dumps(inventory.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _atomic_write_text(path, _json_dumps_strict(inventory.to_dict(), indent=2) + "\n")
 
 
 def load_inventory(path: Path) -> Inventory:
@@ -42,7 +44,7 @@ def load_inventory(path: Path) -> Inventory:
 
 
 def write_health(path: Path, health: HealthArtifact) -> None:
-    path.write_text(json.dumps(health.to_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _atomic_write_text(path, _json_dumps_strict(health.to_dict(), indent=2) + "\n")
 
 
 def load_health(path: Path) -> HealthArtifact:
@@ -72,14 +74,71 @@ def reject_runtime_config_output(path: Path, *, home: Path, cwd: Path, inventory
 
 def _load_json_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
     except UnicodeDecodeError:
         raise ValueError("artifact_invalid_encoding") from None
     except json.JSONDecodeError:
         raise ValueError("artifact_invalid_json") from None
+    except ValueError as exc:
+        if str(exc) == "artifact_invalid_number":
+            raise ValueError("artifact_invalid_number") from None
+        raise
     if not isinstance(value, dict):
         raise ValueError("artifact_invalid_shape")
     return value
+
+
+def _json_dumps_strict(value: Any, **kwargs: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, allow_nan=False, **kwargs)
+    except ValueError as exc:
+        if "Out of range float values" in str(exc):
+            raise ValueError("artifact_invalid_number") from None
+        raise
+
+
+def _reject_json_constant(_constant: str) -> None:
+    raise ValueError("artifact_invalid_number")
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    target = Path(path)
+    encoded = text.encode("utf-8")
+    fd: int | None = None
+    temp_name: str | None = None
+    try:
+        fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+        with os.fdopen(fd, "wb") as handle:
+            fd = None
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, target)
+        temp_name = None
+        _fsync_directory(target.parent)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temp_name is not None:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+
+
+def _fsync_directory(directory: Path) -> None:
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _resolved(path: Path) -> Path:

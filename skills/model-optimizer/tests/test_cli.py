@@ -172,6 +172,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual(runner.argv, [])
         self.assertFalse((root / "i.json").exists())
 
+    def test_auto_detection_explicit_pi_signal_still_requires_pi_executable_before_runtime_reads(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runner = FakeRunner(())
+            code, _, stderr = run_cli(root, runner, set(),
+                "inventory", "--runtime", "auto", "--output", str(root / "i.json"),
+                environ={"PI_SESSION_ID": "pi-1"})
+        self.assertEqual(code, 3)
+        self.assertIn("runtime_missing:pi", stderr)
+        self.assertEqual(runner.argv, [])
+        self.assertFalse((root / "i.json").exists())
+
+    def test_auto_detection_explicit_opencode_signal_still_requires_opencode_executable_before_runtime_reads(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            runner = FakeRunner(())
+            code, _, stderr = run_cli(root, runner, set(),
+                "inventory", "--runtime", "auto", "--output", str(root / "i.json"),
+                environ={"OPENCODE_SESSION_ID": "oc-1"})
+        self.assertEqual(code, 3)
+        self.assertIn("runtime_missing:opencode", stderr)
+        self.assertEqual(runner.argv, [])
+        self.assertFalse((root / "i.json").exists())
+
     def test_auto_detection_by_executable_requires_exactly_one_runtime(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

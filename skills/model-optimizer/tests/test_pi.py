@@ -1,11 +1,13 @@
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
 
 from helper.adapters import RuntimeContext
-from helper.adapters.pi import PiAdapter, parse_pi_auth, parse_pi_model_listing
-from helper.models import HealthStatus, ModelRecord, ReadinessStatus
+from helper.adapters.pi import PiAdapter, parse_pi_auth, parse_pi_model_listing, _find_model_metadata
+from helper.models import HealthStatus, ModelRecord, ProviderReadiness, ReadinessStatus
+from helper.runner import CompletedCommand, MAX_STDOUT_LIMIT_CHARS
 from tests.support import (
     FakeRunner,
     _command,
@@ -121,6 +123,110 @@ ok-provider     ok-model    1K       2K       yes       no
                 self.assertEqual(check.status, status)
                 self.assertEqual(check.reason_code, reason)
                 self.assertLessEqual(len(check.detail), 240)
+
+    def test_list_models_uses_structured_stdout_limit_and_warns_on_truncation(self):
+        ids = tuple(f"nan-builders/qwen-{index:03d}" for index in range(72))
+        listing = "provider model context max-out thinking images notes\n" + "".join(
+            f"nan-builders qwen-{index:03d} 262K 16K yes yes {'x' * 120}\n"
+            for index in range(len(ids))
+        )
+        self.assertGreater(len(listing), 8192)
+        runner = FakeRunner((_command(listing),))
+        adapter = PiAdapter(runner)
+
+        models = adapter.list_models(self.context)
+
+        self.assertEqual(runner.stdout_limits, [MAX_STDOUT_LIMIT_CHARS])
+        parsed_ids = [model.exact_id for model in models]
+        self.assertEqual(parsed_ids[0], ids[0])
+        self.assertEqual(parsed_ids[-1], ids[-1])
+
+        truncated_runner = FakeRunner((CompletedCommand((), 0, listing, "", 1, False, True, False),))
+        truncated_adapter = PiAdapter(truncated_runner)
+        truncated_models = truncated_adapter.list_models(self.context)
+        self.assertEqual([model.exact_id for model in truncated_models][:1], [ids[0]])
+        self.assertIn("inventory_list_models_truncated", truncated_adapter.warnings)
+
+    def test_profile_options_omit_non_finite_structural_numbers_without_crashing(self):
+        project_agent = self.context.cwd / ".pi" / "agent"
+        project_agent.mkdir(parents=True)
+        (project_agent / "subagents.json").write_text(json.dumps({
+            "model_profiles": {
+                "worker": {
+                    "model": "nan-builders/qwen3.6",
+                    "temperature": math.nan,
+                    "tools": {"enabled": True},
+                }
+            }
+        }), encoding="utf-8")
+
+        snapshot = PiAdapter(FakeRunner.stdout("0.84.2\n")).snapshot(self.context)
+
+        worker = next(item for item in snapshot.current_assignments if item.agent == "worker")
+        self.assertEqual(worker.options, {"tools": {"enabled": True}})
+
+    def test_find_model_metadata_does_not_recurse_through_processed_models_list(self):
+        metadata = {
+            "providers": {
+                "nan-builders": {
+                    "models": [{
+                        "id": "qwen3.6",
+                        "cost": {"input": 0},
+                        "models": [{"id": "qwen3.6", "provider": "nan-builders", "cost": {"input": 9.9}}],
+                    }]
+                }
+            }
+        }
+
+        found = list(_find_model_metadata(metadata))
+
+        self.assertEqual([exact_id for exact_id, _ in found], ["nan-builders/qwen3.6"])
+        self.assertEqual(found[0][1]["cost"], {"input": 0})
+
+    def test_metadata_costs_reject_bool_negative_non_finite_and_pathological_but_keep_zero(self):
+        agent_dir = self.root / ".pi" / "agent"
+        agent_dir.mkdir(parents=True)
+        huge_json_integer = "1" + ("0" * 400)
+        (agent_dir / "models-store.json").write_text(f"""{{
+          "providers": {{
+            "nan-builders": {{
+              "models": [{{
+                "id": "qwen3.6",
+                "cost": {{
+                  "input": 0,
+                  "output": -1,
+                  "cacheRead": true,
+                  "cacheWrite": NaN
+                }},
+                "cache": {{"read": Infinity, "write": {huge_json_integer}}}
+              }}]
+            }}
+          }}
+        }}""", encoding="utf-8")
+
+        models = PiAdapter(FakeRunner.stdout(fixture_text("pi/list-models.txt"))).list_models(self.context)
+
+        qwen = {model.exact_id: model for model in models}["nan-builders/qwen3.6"]
+        self.assertEqual(qwen.input_cost, 0)
+        self.assertIsNone(qwen.output_cost)
+        self.assertIsNone(qwen.cache_read)
+        self.assertIsNone(qwen.cache_write)
+        json.dumps(qwen.to_dict(), allow_nan=False)
+
+    def test_inventory_excludes_catalog_model_when_readiness_record_is_missing(self):
+        class MissingReadinessPiAdapter(PiAdapter):
+            def check_readiness(self, providers, context):
+                return (ProviderReadiness("github-copilot", ReadinessStatus.READY, "test", "auth_ready"),)
+
+        inventory = MissingReadinessPiAdapter(FakeRunner((
+            _command("0.84.2\n"),
+            _command(fixture_text("pi/list-models.txt")),
+        ))).inventory(self.context)
+
+        missing = [item for item in inventory.exclusions if item.subject == "nan-builders/qwen3.6"]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0].reason_code, "provider_not_ready")
+        self.assertEqual(missing[0].detail, "auth_provider_not_listed")
 
     def test_secret_decoy_is_not_extracted_from_models_store(self):
         copy_pi_fixtures_to_home(self.root)

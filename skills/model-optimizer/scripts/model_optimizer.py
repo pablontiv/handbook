@@ -182,8 +182,10 @@ def _resolve_runtime(requested: str, environ: dict[str, str], which: Callable[[s
     if pi_signal and opencode_signal:
         raise RuntimeError("runtime_ambiguous:harness_signals")
     if pi_signal:
+        _ensure_runtime_executable(RuntimeKind.PI, which)
         return RuntimeKind.PI
     if opencode_signal:
+        _ensure_runtime_executable(RuntimeKind.OPENCODE, which)
         return RuntimeKind.OPENCODE
 
     found = tuple(kind for kind, executable in _RUNTIME_EXECUTABLE.items() if which(executable) is not None)

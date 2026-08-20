@@ -226,7 +226,7 @@ run(argv, timeout, cwd, env_overlay) -> CompletedCommand
 The runner:
 
 - inherits the current process environment so runtime-native credential resolution still works, applies only explicit controlled overrides, and never serializes the environment;
-- captures bounded stdout and stderr;
+- captures bounded stdout and stderr; structured catalog commands request the larger structured stdout cap and emit an explicit partial-discovery warning if the returned stream is still truncated;
 - terminates timed-out process trees using platform-appropriate standard-library APIs;
 - returns elapsed milliseconds and exit status;
 - redacts secrets before returning or serializing output;
@@ -282,12 +282,16 @@ The OpenCode adapter uses only OpenCode-local evidence:
 5. live-check with JSON event output and a variant only when the model metadata declares it:
 
 ```bash
+OPENCODE_PERMISSION='{"*":"deny"}' \
 opencode run \
   --format json \
   --model provider/model \
   --variant high \
+  --agent model-optimizer-probe \
   "Reply exactly: PONG"
 ```
+
+The helper also supplies inline OpenCode config content for a dedicated `model-optimizer-probe` agent with `permission: "deny"`, while setting top-level inline `permission` and `OPENCODE_PERMISSION` to deny-all. Existing valid inline config is merged only at those bounded keys. Malformed or non-object inline config fails closed before launch with `live_unsafe_permission_config`; environment/config content is not serialized in health details.
 
 On launch failure, the adapter may inspect a bounded tail of the documented OpenCode log for reason codes such as model-not-found or undefined model. It redacts secrets and never treats helper scripts or external catalogs as stronger than `opencode models` plus the live response.
 
@@ -314,7 +318,7 @@ Canonical UTF-8 JSON uses schema `model-optimizer.inventory/v1`. Required top-le
 }
 ```
 
-`ready_local` is derived from catalog IDs and provider readiness rather than duplicated as mutable state. The inventory digest is serialized in v1 and is computed over canonical JSON with `digest` blanked.
+`ready_local` is derived from catalog IDs and provider readiness rather than duplicated as mutable state. The inventory digest is serialized in v1 and is computed over canonical JSON with `digest` blanked. Canonical artifact JSON rejects non-finite numbers with `artifact_invalid_number` instead of serializing `NaN` or infinity.
 
 ### Health
 
@@ -339,7 +343,7 @@ Canonical UTF-8 JSON uses schema `model-optimizer.health/v1`:
 }
 ```
 
-The inventory digest binds health evidence to the local snapshot it tested. It is evidence, not authorization to mutate configuration. A changed inventory requires new health evidence before apply.
+The inventory digest binds health evidence to the local snapshot it tested. It is evidence, not authorization to mutate configuration. A changed inventory requires new health evidence before apply. Inventory and health writes use a same-directory temporary file followed by flush, fsync, and `os.replace`, so a final-path hardlink or symlink directory entry is replaced rather than writing through to the linked target. This does not claim protection against hostile parent-directory rename races.
 
 ## Error handling
 
@@ -349,10 +353,10 @@ Stable reason-code families are:
 - `inventory_*` for command, parse, config, or source failures;
 - `auth_*` for ready, missing, expired, or unknown credential paths;
 - `live_*` for sentinel match, empty output, nonzero exit, unsupported model, or timeout;
-- `artifact_*` for schema, digest, or serialization errors;
+- `artifact_*` for schema, digest, invalid non-finite numbers, or serialization errors;
 - `redaction_*` for output that cannot be proven safe to persist.
 
-A partial inventory is written only when every missing surface is represented by a warning or exclusion. Silent omission is forbidden. If output redaction cannot prove that a captured diagnostic is safe, the helper persists only the stable reason code.
+A partial inventory is written only when every missing surface is represented by a warning or exclusion. If a structured catalog output is truncated, the helper parses available rows and adds `inventory_list_models_truncated`. Silent omission is forbidden. If output redaction cannot prove that a captured diagnostic is safe, the helper persists only the stable reason code.
 
 ## Security and privacy
 

@@ -48,7 +48,7 @@ def _validate_argv(argv: Sequence[str]) -> tuple[str, ...]:
 def _sensitive_env_values(env: Mapping[str, str]) -> tuple[str, ...]:
     values: list[str] = []
     for key, value in env.items():
-        if value and SENSITIVE_KEY_RE.search(key):
+        if value and (key == "OPENCODE_CONFIG_CONTENT" or SENSITIVE_KEY_RE.search(key)):
             values.append(value)
     return tuple(values)
 
@@ -85,7 +85,7 @@ def redact_text(text: str, sensitive_values: Sequence[str] = ()) -> str:
         redacted,
     )
     redacted = re.sub(
-        r"(?i)(\b(?:api[_-]?key|token|secret|password|cookie|credential)\b\s*[=:]\s*)([^\s,;]+)",
+        r'''(?i)(["']?\b(?:api[_-]?key|token|secret|password|cookie|credential)\b["']?\s*[=:]\s*["']?)([^"'\s,;}]+)''',
         r"\1[REDACTED]",
         redacted,
     )

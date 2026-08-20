@@ -74,7 +74,7 @@ Schema: `model-optimizer.inventory/v1`.
 
 Required to load: `schema`, `created_at`, `runtime.kind`, `runtime.version`, `runtime.cwd`, and `digest`. Helper output also serializes `sources`, `current_assignments`, `catalog_local`, `provider_readiness`, `exclusions`, and `warnings`; the current loader treats missing collection fields as empty. Nested required fields are the constructor-required fields in `helper.models`: assignments need `agent`, `model`, and `source`; model records need `exact_id`, `provider`, and `model`; provider readiness needs `provider`, `status`, and `reason_code`; exclusions need `subject` and `reason_code`. Optional metadata fields may be omitted by loaders or serialized as `null`: `family`, `context_window`, `max_output`, `reasoning`, `tool_call`, `cache_read`, `cache_write`, `input_cost`, `output_cost`, and `auth_type`. Empty arrays mean no evidence/items; `null` means the field exists but the helper did not know the value.
 
-Digest rule: compute canonical JSON with sorted keys, compact separators, UTF-8, and `ensure_ascii=false` after setting the inventory `digest` field to the empty string. The stored value is `sha256:` plus the SHA-256 hex digest. Health evidence must bind to this exact digest.
+Digest rule: compute canonical JSON with sorted keys, compact separators, UTF-8, `ensure_ascii=false`, and strict finite JSON numbers after setting the inventory `digest` field to the empty string. Non-finite artifact numbers are rejected with `artifact_invalid_number`. The stored value is `sha256:` plus the SHA-256 hex digest. Health evidence must bind to this exact digest.
 
 ## Health artifact
 
@@ -107,7 +107,7 @@ Required to load: `schema`, `created_at`, and `inventory_digest`. `checks` is se
 - `inventory_*`: list, parse, source shape, current-assignment, metadata, or partial-discovery findings.
 - `auth_*`: ready, not-ready, missing, expired, unknown, timeout, failed, or unlisted credential readiness.
 - `live_*`: sentinel matched/missing, empty output, nonzero exit, timeout, unsupported model/variant, malformed events, or runtime error.
-- `artifact_*`: schema, JSON, encoding, digest, shape, serialization, or option validation.
+- `artifact_*`: schema, JSON, encoding, digest, shape, invalid non-finite numbers, serialization, or option validation.
 - `usage_*`: invalid CLI arguments, timeout, or forbidden output paths.
 - `redaction_*`: reserved for diagnostics that cannot be proven safe to persist.
 - `provider_not_ready`: exclusion family for catalog-local models whose provider is not ready.
@@ -117,7 +117,7 @@ Required to load: `schema`, `created_at`, and `inventory_digest`. `checks` is se
 - `0`: command completed and wrote complete successful evidence.
 - `2`: usage, schema, artifact, invalid timeout/output path, or live precondition error.
 - `3`: runtime detection or required runtime executable failure.
-- `4`: inventory completed with explicit warnings/partial discovery.
+- `4`: inventory completed with explicit warnings/partial discovery, including `inventory_list_models_truncated` when structured catalog stdout was truncated after parsing available rows.
 - `5`: health check completed and at least one candidate was `FAIL` or `HANG`.
 
 ## Provenance and uncertainty labels

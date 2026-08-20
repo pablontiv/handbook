@@ -22,6 +22,7 @@ from helper.models import (
     RuntimeInfo,
     RuntimeKind,
 )
+from helper.runner import MAX_STDOUT_LIMIT_CHARS
 
 from . import RuntimeContext
 
@@ -154,8 +155,10 @@ def _prune_secret_keys(value: Any) -> Any:
 
 
 def _is_json_structural(value: Any) -> bool:
-    if value is None or isinstance(value, (str, bool, int, float)):
+    if value is None or isinstance(value, (str, bool, int)):
         return True
+    if isinstance(value, float):
+        return math.isfinite(value)
     if isinstance(value, list):
         return all(_is_json_structural(item) for item in value)
     if isinstance(value, Mapping):
@@ -268,8 +271,10 @@ def _find_model_metadata(value: Any, provider_hint: str | None = None) -> Iterab
                 exact = model_id if "/" in model_id else f"{model_provider}/{model_id}"
                 yield exact, model
         for key, item in value.items():
+            if key == "models":
+                continue
             next_provider = provider_hint
-            if isinstance(item, Mapping) and key != "models":
+            if isinstance(item, Mapping):
                 next_provider = str(key)
             yield from _find_model_metadata(item, next_provider)
     elif isinstance(value, list):
@@ -292,11 +297,15 @@ def _number_from_metadata(value: Any) -> int | None:
 
 
 def _float_from_metadata(value: Any) -> float | None:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None
+    try:
+        converted = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(converted) or converted < 0:
+        return None
+    return converted
 
 
 def _reasoning_from_metadata(value: Any) -> bool | None:
@@ -461,7 +470,13 @@ class PiAdapter:
         return RuntimeSnapshot(tuple(sources), tuple(assignments), tuple(warnings))
 
     def list_models(self, context: RuntimeContext) -> tuple[ModelRecord, ...]:
-        result = self.runner.run(("pi", "--list-models"), timeout=_DEFAULT_TIMEOUT_SECONDS, cwd=context.cwd, env_overlay=context.env)
+        result = self.runner.run(
+            ("pi", "--list-models"),
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            cwd=context.cwd,
+            env_overlay=context.env,
+            stdout_limit=MAX_STDOUT_LIMIT_CHARS,
+        )
         if result.timed_out:
             self._warn("inventory_list_models_timeout")
             return ()
@@ -469,6 +484,8 @@ class PiAdapter:
             self._warn("inventory_list_models_failed")
             return ()
         records = {record.exact_id: record for record in parse_pi_model_listing(result.stdout)}
+        if result.stdout_truncated:
+            self._warn("inventory_list_models_truncated")
         if not records:
             self._warn("inventory_list_models_empty")
         for filename in _METADATA_FILENAMES:
@@ -569,8 +586,12 @@ class PiAdapter:
 
         for record in catalog_local:
             provider_readiness = readiness_by_provider.get(record.provider)
-            if provider_readiness and provider_readiness.status is not ReadinessStatus.READY:
-                exclusions.append(Exclusion(record.exact_id, "provider_not_ready", provider_readiness.reason_code))
+            if provider_readiness is None or provider_readiness.status is not ReadinessStatus.READY:
+                exclusions.append(Exclusion(
+                    record.exact_id,
+                    "provider_not_ready",
+                    provider_readiness.reason_code if provider_readiness else "auth_provider_not_listed",
+                ))
 
         created_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         return inventory_with_digest(Inventory(

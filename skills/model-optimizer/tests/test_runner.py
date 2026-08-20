@@ -163,6 +163,23 @@ class RunnerTests(unittest.TestCase):
                         stdout_limit=value,
                     )
 
+    def test_inline_opencode_config_and_quoted_json_secret_fields_are_redacted(self):
+        inline = '{"provider":{"options":{"apiKey":"sk-inline-private"}}}'
+        result = CommandRunner().run(
+            (
+                sys.executable,
+                "-c",
+                "import os,sys; value=os.environ['OPENCODE_CONFIG_CONTENT']; print(value); sys.stderr.write('{\"token\":\"nested-private\"}')",
+            ),
+            timeout=5,
+            cwd=Path.cwd(),
+            env_overlay={"OPENCODE_CONFIG_CONTENT": inline},
+        )
+        combined = result.stdout + result.stderr
+        self.assertNotIn("sk-inline-private", combined)
+        self.assertNotIn("nested-private", combined)
+        self.assertIn("[REDACTED]", combined)
+
     def test_sensitive_inherited_and_overlay_env_are_redacted_from_both_streams(self):
         inherited_key = "RUNNER_TEST_TOKEN"
         inherited_secret = "TASK3_INHERITED_TOKEN_SENTINEL"
