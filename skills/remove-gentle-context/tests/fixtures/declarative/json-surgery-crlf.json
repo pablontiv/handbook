@@ -1,0 +1,13 @@
+{
+	"b" : 2,
+	"settings" : {
+		"keep" : "yes",
+		"remove" : "owned"
+	},
+	"hooks" : [
+		"personal",
+		"gentle-ai:sdd-init",
+		"tail"
+	],
+	"a" : 1
+}

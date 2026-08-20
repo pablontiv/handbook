@@ -1,0 +1,51 @@
+{
+  "zeta" : "keep-first",
+  "objects" : {
+    "first" : {
+      "remove" : { "owned": true },
+      "keep" : "first-survivor"
+    },
+    "middle" : {
+      "before" : "stay",
+      "remove" : { "owned": true },
+      "after" : "stay"
+    },
+    "last" : {
+      "keep" : "last-survivor",
+      "remove" : { "owned": true }
+    },
+    "only" : {
+      "remove" : { "owned": true }
+    }
+  },
+  "nested" : [
+    {"skip" : true},
+    {"escaped~key/segment" : { "keep" : "nested", "remove/key" : {"nested" : [true, false]} }}
+  ],
+  "arrays" : {
+    "first" : [
+      {"owned": "gentle", "meta": [1, {"x": true}]},
+      {"keep": "first-survivor"}
+    ],
+    "middle" : [
+      "before",
+      "gentle-ai:sdd-init",
+      "after"
+    ],
+    "last" : [
+      "before",
+      "gentle-ai:sdd-init"
+    ],
+    "only" : [
+      "gentle-ai:sdd-init"
+    ],
+    "duplicates" : [
+      {"text": "gentle-ai:sdd-init"},
+      {"text": "keep"},
+      {"text": "gentle-ai:sdd-init"},
+      {"text": "gentle-ai:sdd-init"}
+    ]
+  },
+  "mcp" : {"servers":{"personal":{"command":"keep", "args":["--flag", "value"]}}},
+  "alpha" : "keep-last"
+}

@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from helper.canonical import canonical_bytes
 from helper.models import (
     ArtifactClass,
     Candidate,
@@ -345,42 +344,284 @@ def _find_all(content: bytes, needle: bytes) -> list[int]:
 
 def _grouped_json_postimage(target: Path, rules: tuple[DeclarativeRule, ...]) -> bytes:
     try:
-        data = json.loads(target.read_text())
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        content = target.read_bytes()
+        root = _parse_json_syntax(content)
+        text = content.decode("utf-8")
+        edits = _json_surgery_edits(root, rules)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, IndexError, ValueError) as exc:
         raise ValueError("declarative_evidence_drift") from exc
+    postimage = text
+    for start, end in reversed(edits):
+        postimage = postimage[:start] + postimage[end:]
+    try:
+        json.loads(postimage)
+    except json.JSONDecodeError as exc:
+        raise ValueError("declarative_evidence_drift") from exc
+    return postimage.encode("utf-8")
+
+
+@dataclass(frozen=True)
+class _JsonMember:
+    key: str
+    key_start: int
+    key_end: int
+    value: "_JsonNode"
+
+    @property
+    def start(self) -> int:
+        return self.key_start
+
+    @property
+    def end(self) -> int:
+        return self.value.end
+
+
+@dataclass(frozen=True)
+class _JsonNode:
+    kind: str
+    start: int
+    end: int
+    value: Any
+    members: tuple[_JsonMember, ...] = ()
+    items: tuple["_JsonNode", ...] = ()
+    commas: tuple[int, ...] = ()
+
+
+class _JsonSyntaxParser:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.length = len(text)
+
+    def parse(self) -> _JsonNode:
+        index = self._skip_ws(0)
+        node, index = self._parse_value(index)
+        index = self._skip_ws(index)
+        if index != self.length:
+            raise ValueError("json_trailing_content")
+        return node
+
+    def _parse_value(self, index: int) -> tuple[_JsonNode, int]:
+        if index >= self.length:
+            raise ValueError("json_unexpected_end")
+        char = self.text[index]
+        if char == '"':
+            value, end = self._parse_string(index)
+            return _JsonNode("string", index, end, value), end
+        if char == "{":
+            return self._parse_object(index)
+        if char == "[":
+            return self._parse_array(index)
+        if char == "t" and self.text.startswith("true", index):
+            return _JsonNode("literal", index, index + 4, True), index + 4
+        if char == "f" and self.text.startswith("false", index):
+            return _JsonNode("literal", index, index + 5, False), index + 5
+        if char == "n" and self.text.startswith("null", index):
+            return _JsonNode("literal", index, index + 4, None), index + 4
+        if char == "-" or char.isdigit():
+            return self._parse_number(index)
+        raise ValueError("json_invalid_value")
+
+    def _parse_object(self, start: int) -> tuple[_JsonNode, int]:
+        index = self._skip_ws(start + 1)
+        members: list[_JsonMember] = []
+        commas: list[int] = []
+        keys: set[str] = set()
+        if index < self.length and self.text[index] == "}":
+            return _JsonNode("object", start, index + 1, {}, tuple(members), (), tuple(commas)), index + 1
+        while True:
+            index = self._skip_ws(index)
+            if index >= self.length or self.text[index] != '"':
+                raise ValueError("json_object_key_expected")
+            key_start = index
+            key, index = self._parse_string(index)
+            key_end = index
+            if key in keys:
+                raise ValueError("json_duplicate_object_key")
+            keys.add(key)
+            index = self._skip_ws(index)
+            if index >= self.length or self.text[index] != ":":
+                raise ValueError("json_colon_expected")
+            value, index = self._parse_value(self._skip_ws(index + 1))
+            members.append(_JsonMember(key, key_start, key_end, value))
+            index = self._skip_ws(index)
+            if index >= self.length:
+                raise ValueError("json_unexpected_end")
+            if self.text[index] == ",":
+                commas.append(index)
+                index += 1
+                continue
+            if self.text[index] == "}":
+                value_map = {member.key: member.value.value for member in members}
+                return _JsonNode("object", start, index + 1, value_map, tuple(members), (), tuple(commas)), index + 1
+            raise ValueError("json_object_separator_expected")
+
+    def _parse_array(self, start: int) -> tuple[_JsonNode, int]:
+        index = self._skip_ws(start + 1)
+        items: list[_JsonNode] = []
+        commas: list[int] = []
+        if index < self.length and self.text[index] == "]":
+            return _JsonNode("array", start, index + 1, [], (), tuple(items), tuple(commas)), index + 1
+        while True:
+            item, index = self._parse_value(index)
+            items.append(item)
+            index = self._skip_ws(index)
+            if index >= self.length:
+                raise ValueError("json_unexpected_end")
+            if self.text[index] == ",":
+                commas.append(index)
+                index = self._skip_ws(index + 1)
+                continue
+            if self.text[index] == "]":
+                return _JsonNode("array", start, index + 1, [item.value for item in items], (), tuple(items), tuple(commas)), index + 1
+            raise ValueError("json_array_separator_expected")
+
+    def _parse_string(self, start: int) -> tuple[str, int]:
+        try:
+            return json.decoder.scanstring(self.text, start + 1, True)
+        except ValueError as exc:
+            raise ValueError("json_invalid_string") from exc
+
+    def _parse_number(self, start: int) -> tuple[_JsonNode, int]:
+        index = start
+        if self.text[index] == "-":
+            index += 1
+            if index >= self.length:
+                raise ValueError("json_invalid_number")
+        if self.text[index] == "0":
+            index += 1
+        elif "1" <= self.text[index] <= "9":
+            index += 1
+            while index < self.length and self.text[index].isdigit():
+                index += 1
+        else:
+            raise ValueError("json_invalid_number")
+        if index < self.length and self.text[index] == ".":
+            index += 1
+            if index >= self.length or not self.text[index].isdigit():
+                raise ValueError("json_invalid_number")
+            while index < self.length and self.text[index].isdigit():
+                index += 1
+        if index < self.length and self.text[index] in {"e", "E"}:
+            index += 1
+            if index < self.length and self.text[index] in {"+", "-"}:
+                index += 1
+            if index >= self.length or not self.text[index].isdigit():
+                raise ValueError("json_invalid_number")
+            while index < self.length and self.text[index].isdigit():
+                index += 1
+        try:
+            value = json.loads(self.text[start:index])
+        except json.JSONDecodeError as exc:
+            raise ValueError("json_invalid_number") from exc
+        return _JsonNode("number", start, index, value), index
+
+    def _skip_ws(self, index: int) -> int:
+        while index < self.length and self.text[index] in " \t\r\n":
+            index += 1
+        return index
+
+
+def _parse_json_syntax(content: bytes) -> _JsonNode:
+    return _JsonSyntaxParser(content.decode("utf-8")).parse()
+
+
+def _json_surgery_edits(root: _JsonNode, rules: tuple[DeclarativeRule, ...]) -> tuple[tuple[int, int], ...]:
+    object_removals: dict[int, tuple[_JsonNode, set[int]]] = {}
+    array_removals: dict[int, tuple[_JsonNode, set[int]]] = {}
     for rule in rules:
         if rule.kind == "json_key":
-            _remove_json_key(data, rule)
+            target = _json_pointer_get_node(root, str(rule.data["pointer"]))
+            if target.kind != "object":
+                raise ValueError("json_pointer_target_not_object")
+            key = rule.data["key"]
+            matches = [index for index, member in enumerate(target.members) if member.key == key]
+            if len(matches) != 1:
+                raise ValueError("json_key_match_drift")
+            entry = object_removals.setdefault(id(target), (target, set()))
+            entry[1].add(matches[0])
         elif rule.kind == "json_array_value":
-            _remove_json_array_value(data, rule)
+            target = _json_pointer_get_node(root, str(rule.data["pointer"]))
+            if target.kind != "array":
+                raise ValueError("json_pointer_target_not_array")
+            value = rule.data["value"]
+            matches = [index for index, item in enumerate(target.items) if item.value == value]
+            if not matches:
+                raise ValueError("json_array_value_match_drift")
+            entry = array_removals.setdefault(id(target), (target, set()))
+            entry[1].update(matches)
         else:
             raise ValueError("declarative_mixed_target_rules")
-    return canonical_bytes(data)
+
+    edits: list[tuple[int, int]] = []
+    for node, indices in object_removals.values():
+        edits.extend(_container_removal_spans([(member.start, member.end) for member in node.members], node.commas, indices))
+    for node, indices in array_removals.values():
+        edits.extend(_container_removal_spans([(item.start, item.end) for item in node.items], node.commas, indices))
+    return _validate_json_edit_spans(edits)
 
 
-def _remove_json_key(data: Any, rule: DeclarativeRule) -> None:
-    try:
-        parent = _json_pointer_get(data, str(rule.data["pointer"]))
-    except (KeyError, TypeError, IndexError, ValueError) as exc:
-        raise ValueError("declarative_evidence_drift") from exc
-    key = rule.data["key"]
-    if not isinstance(parent, dict) or key not in parent:
-        raise ValueError("declarative_evidence_drift")
-    del parent[key]
+def _container_removal_spans(elements: list[tuple[int, int]], commas: tuple[int, ...], indices: set[int]) -> list[tuple[int, int]]:
+    if not indices:
+        return []
+    count = len(elements)
+    if any(index < 0 or index >= count for index in indices):
+        raise ValueError("json_removal_index_out_of_range")
+    ordered = sorted(indices)
+    if len(ordered) == count:
+        return [(elements[0][0], elements[-1][1])]
+
+    spans: list[tuple[int, int]] = []
+    run_start = ordered[0]
+    previous = ordered[0]
+    for index in ordered[1:]:
+        if index == previous + 1:
+            previous = index
+            continue
+        spans.append(_container_run_removal_span(elements, commas, run_start, previous))
+        run_start = previous = index
+    spans.append(_container_run_removal_span(elements, commas, run_start, previous))
+    return spans
 
 
-def _remove_json_array_value(data: Any, rule: DeclarativeRule) -> None:
-    try:
-        array = _json_pointer_get(data, str(rule.data["pointer"]))
-    except (KeyError, TypeError, IndexError, ValueError) as exc:
-        raise ValueError("declarative_evidence_drift") from exc
-    if not isinstance(array, list):
-        raise ValueError("declarative_evidence_drift")
-    value = rule.data["value"]
-    filtered = [item for item in array if item != value]
-    if len(filtered) == len(array):
-        raise ValueError("declarative_evidence_drift")
-    array[:] = filtered
+def _container_run_removal_span(elements: list[tuple[int, int]], commas: tuple[int, ...], start_index: int, end_index: int) -> tuple[int, int]:
+    if end_index < len(elements) - 1:
+        return elements[start_index][0], elements[end_index + 1][0]
+    if start_index == 0:
+        return elements[start_index][0], elements[end_index][1]
+    return commas[start_index - 1], elements[end_index][1]
+
+
+def _validate_json_edit_spans(edits: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    ordered = sorted(edits)
+    previous_end = -1
+    for start, end in ordered:
+        if start < previous_end or start >= end:
+            raise ValueError("json_overlapping_or_empty_edit")
+        previous_end = end
+    return tuple(ordered)
+
+
+def _json_pointer_get_node(root: _JsonNode, pointer: str) -> _JsonNode:
+    if pointer == "":
+        return root
+    current = root
+    for raw_token in pointer.split("/")[1:]:
+        token = raw_token.replace("~1", "/").replace("~0", "~")
+        if current.kind == "object":
+            for member in current.members:
+                if member.key == token:
+                    current = member.value
+                    break
+            else:
+                raise KeyError(token)
+        elif current.kind == "array":
+            if not token.isdigit():
+                raise IndexError("invalid array index")
+            index = int(token)
+            current = current.items[index]
+        else:
+            raise TypeError("not traversable")
+    return current
 
 
 def _write_operation(candidate: Candidate, target: Path, postimage: bytes, *, content_type: str, rule_ids: tuple[str, ...]) -> Operation:

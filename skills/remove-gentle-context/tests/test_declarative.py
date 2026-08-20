@@ -428,6 +428,37 @@ class DeclarativeCompilerTests(unittest.TestCase):
         self.assertEqual(operation.postimage_sha256, "sha256:" + hashlib.sha256(decoded).hexdigest())
         return decoded
 
+
+    def _fixture_bytes(self, name: str) -> bytes:
+        return (SKILL_ROOT / "tests" / "fixtures" / "declarative" / name).read_bytes()
+
+    def _span(self, content: bytes, needle: bytes, *, occurrence: int = 1) -> tuple[int, int]:
+        start = -1
+        search_from = 0
+        for _ in range(occurrence):
+            start = content.find(needle, search_from)
+            self.assertNotEqual(start, -1, f"missing span fixture needle: {needle!r}")
+            search_from = start + 1
+        return start, start + len(needle)
+
+    def _without_spans(self, content: bytes, spans: list[tuple[int, int]]) -> bytes:
+        ordered = sorted(spans)
+        previous_end = -1
+        chunks: list[bytes] = []
+        cursor = 0
+        for start, end in ordered:
+            self.assertGreaterEqual(start, previous_end)
+            chunks.append(content[cursor:start])
+            cursor = end
+            previous_end = end
+        chunks.append(content[cursor:])
+        return b"".join(chunks)
+
+    def _assert_json_splice_postimage(self, *, original: bytes, postimage: bytes, removed_spans: list[tuple[int, int]]) -> None:
+        expected = self._without_spans(original, removed_spans)
+        self.assertEqual(postimage, expected)
+        json.loads(postimage.decode("utf-8"))
+
     def test_exact_file_plan_apply_deletes_only_exact_owned_file(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
@@ -573,6 +604,96 @@ class DeclarativeCompilerTests(unittest.TestCase):
             ])
             self.assertEqual(updated["mcp"], {"servers": {"personal": {"command": "keep"}}})
             self._assert_second_plan_is_empty(adapter, context)
+
+
+    def test_json_grouped_postimage_splices_only_configured_member_and_item_bytes(self):
+        original = self._fixture_bytes("json-surgery-formatting.json")
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".custom" / "settings.json"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(original)
+            adapter_path = Path(td) / "adapter.json"
+            self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                {"id": "object-first", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/objects/first", "key": "remove"},
+                {"id": "object-middle", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/objects/middle", "key": "remove"},
+                {"id": "object-last", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/objects/last", "key": "remove"},
+                {"id": "object-only", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/objects/only", "key": "remove"},
+                {"id": "escaped-nested-object", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/nested/1/escaped~0key~1segment", "key": "remove/key"},
+                {"id": "array-first", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/arrays/first", "value": {"owned": "gentle", "meta": [1, {"x": True}]}},
+                {"id": "array-middle", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/arrays/middle", "value": "gentle-ai:sdd-init"},
+                {"id": "array-last", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/arrays/last", "value": "gentle-ai:sdd-init"},
+                {"id": "array-only", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/arrays/only", "value": "gentle-ai:sdd-init"},
+                {"id": "array-duplicates", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/arrays/duplicates", "value": {"text": "gentle-ai:sdd-init"}},
+            ])
+
+            _adapter, _context, inventory, plan = self._build_plan(adapter_path, home)
+
+            self.assertEqual(len(inventory.candidates), 10)
+            self.assertEqual(len(plan.operations), 1)
+            postimage = self._decoded_postimage(plan.operations[0])
+            removed_spans = [
+                self._span(original, b'"remove" : { "owned": true },\n      '),
+                self._span(original, b'"remove" : { "owned": true },\n      ', occurrence=2),
+                self._span(original, b',\n      "remove" : { "owned": true }', occurrence=2),
+                self._span(original, b'"remove" : { "owned": true }', occurrence=4),
+                self._span(original, b', "remove/key" : {"nested" : [true, false]}'),
+                self._span(original, b'{"owned": "gentle", "meta": [1, {"x": true}]},\n      '),
+                self._span(original, b'"gentle-ai:sdd-init",\n      '),
+                self._span(original, b',\n      "gentle-ai:sdd-init"', occurrence=2),
+                self._span(original, b'"gentle-ai:sdd-init"', occurrence=3),
+                self._span(original, b'{"text": "gentle-ai:sdd-init"},\n      '),
+                self._span(original, b',\n      {"text": "gentle-ai:sdd-init"},\n      {"text": "gentle-ai:sdd-init"}'),
+            ]
+            self._assert_json_splice_postimage(original=original, postimage=postimage, removed_spans=removed_spans)
+            mcp_bytes = b'"mcp" : {"servers":{"personal":{"command":"keep", "args":["--flag", "value"]}}}'
+            self.assertIn(mcp_bytes, postimage)
+            updated = json.loads(postimage.decode("utf-8"))
+            self.assertEqual(list(updated), ["zeta", "objects", "nested", "arrays", "mcp", "alpha"])
+            self.assertEqual(updated["arrays"]["duplicates"], [{"text": "keep"}])
+
+    def test_json_grouped_postimage_preserves_crlf_tabs_and_final_newline(self):
+        original = self._fixture_bytes("json-surgery-crlf.json")
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".custom" / "settings.json"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(original)
+            adapter_path = Path(td) / "adapter.json"
+            self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                {"id": "setting", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/settings", "key": "remove"},
+                {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+            ])
+
+            _adapter, _context, _inventory, plan = self._build_plan(adapter_path, home)
+
+            self.assertEqual(len(plan.operations), 1)
+            postimage = self._decoded_postimage(plan.operations[0])
+            removed_spans = [
+                self._span(original, b',\r\n\t\t"remove" : "owned"'),
+                self._span(original, b'"gentle-ai:sdd-init",\r\n\t\t'),
+            ]
+            self._assert_json_splice_postimage(original=original, postimage=postimage, removed_spans=removed_spans)
+            self.assertTrue(postimage.endswith(b"\r\n"))
+            self.assertNotIn(b"\n\t", postimage.replace(b"\r\n\t", b""))
+
+    def test_json_compile_fails_closed_on_duplicate_object_keys(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".custom" / "settings.json"
+            target.parent.mkdir(parents=True)
+            target.write_text('{"parent": {"remove": 1, "remove": 2}, "keep": true}')
+            adapter_path = Path(td) / "adapter.json"
+            self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                {"id": "duplicate", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/parent", "key": "remove"},
+            ])
+            adapter = load_declarative_adapter(adapter_path)
+            context = self._context(home)
+            inventory = build_inventory(context, (adapter,))
+            self.assertEqual(len(inventory.candidates), 1)
+
+            with self.assertRaisesRegex(ValueError, "declarative_evidence_drift"):
+                build_plan(inventory, context, (adapter,))
 
     def test_multi_rule_same_target_json_composes_one_deterministic_write(self):
         with tempfile.TemporaryDirectory() as td:
