@@ -14,8 +14,10 @@ Use when active Gentle AI context must be cleared from supported clients while p
 
 Quick discovery:
 
+- Browse [`skills/remove-gentle-context/`](skills/remove-gentle-context/) and read [`SKILL.md`](skills/remove-gentle-context/SKILL.md).
+- Run the helper help with your Python 3.11+ executable; the examples use `python`, but some platforms expose it as `python3` or `python3.11`.
+
 ```bash
-ls skills/remove-gentle-context
 python skills/remove-gentle-context/scripts/cleanup.py --help
 ```
 

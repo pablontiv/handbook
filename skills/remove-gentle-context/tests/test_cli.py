@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,22 @@ class CliTests(unittest.TestCase):
         if result.returncode != 0:
             self.fail(f"CLI failed with {result.returncode}\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")
         return result
+
+    def contract_json_example(self, heading: str) -> dict[str, object]:
+        text = CONTRACTS.read_text(encoding="utf-8")
+        pattern = rf"(?ms)^### {re.escape(heading)}\n\n```json\n(?P<body>.*?)\n```"
+        match = re.search(pattern, text)
+        if match is None:
+            self.fail(f"missing JSON example for {heading}")
+        data = json.loads(match.group("body"))
+        if not isinstance(data, dict):
+            self.fail(f"JSON example for {heading} is not an object")
+        return data
+
+    def write_contract_json_example(self, name: str, data: dict[str, object]) -> Path:
+        path = self.artifacts / name
+        path.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        return path
 
     def inventory(self) -> CliResult:
         return self.run_ok(
@@ -251,6 +268,75 @@ class CliTests(unittest.TestCase):
         signature_lines = [line.strip() for line in text.splitlines() if line.strip().startswith("python scripts/cleanup.py ")]
         self.assertEqual(len(signature_lines), 5)
 
+    def test_reference_contract_json_examples_validate_against_production_schemas(self) -> None:
+        cleanup = load_cleanup_module()
+        examples = {
+            heading: self.contract_json_example(heading)
+            for heading in (
+                "Inventory JSON",
+                "Plan JSON",
+                "Backup manifest JSON",
+                "Receipt JSON",
+                "Verification JSON",
+            )
+        }
+        serialized_examples = json.dumps(examples, sort_keys=True)
+        self.assertIn("C:/gentle-example/home", serialized_examples)
+        self.assertNotIn("$HOME", serialized_examples)
+
+        inventory_path = self.write_contract_json_example("contract-inventory.json", examples["Inventory JSON"])
+        plan_path = self.write_contract_json_example("contract-plan.json", examples["Plan JSON"])
+        manifest_path = self.write_contract_json_example("contract-manifest.json", examples["Backup manifest JSON"])
+        receipt_path = self.write_contract_json_example("contract-receipt.json", examples["Receipt JSON"])
+
+        inventory = cleanup.load_inventory(inventory_path)
+        self.assertEqual(cleanup.inventory_artifact(inventory), examples["Inventory JSON"])
+        plan = cleanup.load_plan(plan_path)
+        self.assertEqual(cleanup.plan_artifact(plan), examples["Plan JSON"])
+        self.assertEqual(inventory.os_name, "windows")
+        self.assertEqual(plan.inventory_digest, inventory.digest)
+        self.assertEqual(plan.home, inventory.home)
+        self.assertEqual(plan.os_name, inventory.os_name)
+        self.assertEqual(dict(plan.root_map), dict(inventory.root_map))
+
+        manifest = cleanup.load_backup_manifest(manifest_path)
+        self.assertEqual(cleanup.backup_manifest_digest(manifest_path), examples["Backup manifest JSON"]["digest"])
+        self.assertEqual(manifest.to_dict(), examples["Backup manifest JSON"])
+        self.assertEqual(manifest.plan_digest, plan.digest)
+        operations_by_index = {index: operation for index, operation in enumerate(plan.operations)}
+        for entry in manifest.entries:
+            operation = operations_by_index[entry.operation_index]
+            self.assertEqual(entry.kind, str(operation.kind))
+            self.assertEqual(entry.original_path, operation.path)
+            self.assertEqual(entry.sha256, operation.preimage_sha256)
+
+        receipt = cleanup.load_receipt(receipt_path)
+        self.assertEqual(cleanup.receipt_artifact(receipt), examples["Receipt JSON"])
+        cleanup.assert_receipt_binding(receipt, inventory, plan, phase="docs")
+        self.assertEqual(str(receipt.backup_manifest_path), examples["Receipt JSON"]["backup_manifest_path"])
+        self.assertEqual(receipt.checks[0].evidence["manifest_digest"], manifest.digest)
+        for outcome in receipt.operation_outcomes:
+            operation = operations_by_index[outcome.operation_index]
+            self.assertEqual(outcome.kind, str(operation.kind))
+            self.assertEqual(outcome.path, operation.path)
+            self.assertEqual(outcome.status, "completed")
+
+        verification_data = examples["Verification JSON"]
+        verification_path = self.artifacts / "contract-verification.json"
+        cleanup.require_schema(verification_data, cleanup.VERIFICATION_SCHEMA, phase="verification", path=verification_path)
+        cleanup.reject_unknown(verification_data, {"schema", "status", "checks", "digest"}, phase="verification", path=verification_path)
+        cleanup.require_keys(verification_data, {"schema", "status", "checks", "digest"}, phase="verification", path=verification_path)
+        self.assertEqual(verification_data["digest"], cleanup.digest_json(cleanup.data_without_digest(verification_data)))
+        verification_checks = tuple(
+            cleanup.check_from_dict(item, phase="verification", path=verification_path)
+            for item in cleanup.require_list(verification_data["checks"], phase="verification", path=verification_path)
+        )
+        verification = cleanup.VerificationResult(
+            status=cleanup.require_str(verification_data, "status", phase="verification", path=verification_path),
+            checks=verification_checks,
+        )
+        self.assertEqual(cleanup.verification_artifact(verification), verification_data)
+
     def test_preservation_reference_covers_required_scopes_and_vetoes(self) -> None:
         text = PRESERVATION.read_text(encoding="utf-8")
         required_terms = (
@@ -281,6 +367,13 @@ class CliTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             for term in forbidden:
                 self.assertNotIn(term, text, f"{path} contains {term}")
+
+    def test_readme_quick_discovery_is_platform_neutral(self) -> None:
+        text = README.read_text(encoding="utf-8")
+        self.assertIn("[`skills/remove-gentle-context/`](skills/remove-gentle-context/)", text)
+        self.assertIn("Python 3.11+ executable", text)
+        self.assertIn("python3", text)
+        self.assertNotIn("ls skills/remove-gentle-context", text)
 
     def test_workflow_matrix_uses_three_operating_systems_and_portable_commands(self) -> None:
         text = WORKFLOW.read_text(encoding="utf-8")
