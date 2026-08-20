@@ -15,7 +15,7 @@ from unittest.mock import patch
 from helper.canonical import digest_json
 from helper.models import Inventory, LifecycleAction, LifecycleOutcome, Operation, OperationKind, Plan, PlatformProfile, ProcessSnapshot, ReceiptStatus, RuntimeContext
 from helper.paths import resolve_state_root, root_map
-from helper.transaction import OperationApplyError, _same_file_identity, apply_operations, create_backup, execute_plan, restore
+from helper.transaction import OperationApplyError, _read_regular_file_bound, _same_file_identity, apply_operations, create_backup, execute_plan, restore
 
 
 class NoopLifecycle:
@@ -183,6 +183,53 @@ class FileIdentityTests(unittest.TestCase):
     def test_same_file_identity_accepts_stable_inode_when_device_is_zero(self):
         self.assertTrue(_same_file_identity(SyntheticStat(st_ino=7, st_dev=0), SyntheticStat(st_ino=7, st_dev=0)))
         self.assertTrue(_same_file_identity(SyntheticStat(st_ino=7, st_dev="missing"), SyntheticStat(st_ino=7, st_dev="missing")))
+
+    def test_bound_read_includes_binary_flag_when_available(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "binary-flag.txt"
+            target.write_bytes(b"raw\r\nbytes")
+            synthetic_binary = 0x800000
+            original_open = os.open
+            opened_flags: list[int] = []
+
+            def open_stripping_synthetic_binary(path, flags, *args, **kwargs):
+                opened_flags.append(flags)
+                return original_open(path, flags & ~synthetic_binary, *args, **kwargs)
+
+            with patch("helper.transaction.os.O_BINARY", synthetic_binary, create=True), patch("helper.transaction.os.open", side_effect=open_stripping_synthetic_binary):
+                _stat_result, content = _read_regular_file_bound(
+                    target,
+                    expected_content=b"raw\r\nbytes",
+                    expected_sha256=sha256_bytes(b"raw\r\nbytes"),
+                    expected_size=len(b"raw\r\nbytes"),
+                    mismatch_code="preflight_preimage_drift",
+                    link_code="preflight_unexpected_link",
+                    not_regular_code="preflight_not_regular_file",
+                )
+
+            self.assertEqual(content, b"raw\r\nbytes")
+            self.assertEqual(len(opened_flags), 1)
+            self.assertTrue(opened_flags[0] & synthetic_binary)
+            if hasattr(os, "O_NOFOLLOW"):
+                self.assertTrue(opened_flags[0] & os.O_NOFOLLOW)
+
+    def test_bound_read_preserves_raw_crlf_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "crlf.txt"
+            raw = b"line-one\r\nline-two\r\n"
+            target.write_bytes(raw)
+
+            _stat_result, content = _read_regular_file_bound(
+                target,
+                expected_content=raw,
+                expected_sha256=sha256_bytes(raw),
+                expected_size=len(raw),
+                mismatch_code="preflight_preimage_drift",
+                link_code="preflight_unexpected_link",
+                not_regular_code="preflight_not_regular_file",
+            )
+
+        self.assertEqual(content, raw)
 
 
 class TransactionTests(unittest.TestCase):
@@ -646,19 +693,18 @@ class TransactionTests(unittest.TestCase):
         replacement = self.home / "replacement-source.txt"
         replacement.write_text("before")
         plan = delete_plan(target, b"before", home=self.home)
-        original_lstat = os.lstat
+        original_open = os.open
         swapped = False
 
-        def swap_after_lstat(path, *args, **kwargs):
+        def swap_before_guarded_open(path, flags, *args, **kwargs):
             nonlocal swapped
-            st = original_lstat(path, *args, **kwargs)
             if Path(path) == target and not swapped:
                 swapped = True
                 target.unlink()
                 replacement.rename(target)
-            return st
+            return original_open(path, flags, *args, **kwargs)
 
-        with patch("helper.transaction.os.lstat", side_effect=swap_after_lstat):
+        with patch("helper.transaction.os.open", side_effect=swap_before_guarded_open):
             with self.assertRaisesRegex(ValueError, "preflight_preimage_drift"):
                 create_backup(plan, self.context)
 
@@ -672,19 +718,18 @@ class TransactionTests(unittest.TestCase):
         replacement.write_text("before")
         plan = write_plan(target, b"before", b"after", home=self.home)
         manifest = create_backup(plan, self.context)
-        original_lstat = os.lstat
+        original_open = os.open
         swapped = False
 
-        def swap_after_lstat(path, *args, **kwargs):
+        def swap_before_guarded_open(path, flags, *args, **kwargs):
             nonlocal swapped
-            st = original_lstat(path, *args, **kwargs)
             if Path(path) == target and not swapped:
                 swapped = True
                 target.unlink()
                 replacement.rename(target)
-            return st
+            return original_open(path, flags, *args, **kwargs)
 
-        with patch("helper.transaction.os.lstat", side_effect=swap_after_lstat):
+        with patch("helper.transaction.os.open", side_effect=swap_before_guarded_open):
             with self.assertRaisesRegex(Exception, "preflight_preimage_drift"):
                 apply_operations(plan, manifest, self.context)
 

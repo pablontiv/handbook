@@ -777,6 +777,8 @@ def _read_regular_file_bound(
         raise ValueError(not_regular_code)
 
     flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
