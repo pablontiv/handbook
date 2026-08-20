@@ -2,33 +2,52 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from helper.engine import build_inventory, build_plan, validate_approval
+from helper.canonical import canonical_bytes
+from helper.engine import build_inventory, build_plan, validate_approval, verify_receipt
 from helper.models import (
     ArtifactClass,
     Candidate,
+    Inventory,
+    LifecycleOutcome,
     Operation,
     OperationKind,
     Ownership,
+    Plan,
     PlatformProfile,
     Preimage,
+    Receipt,
+    ReceiptStatus,
     RuntimeContext,
 )
 
 
 class FakeAdapter:
-    def __init__(self, client: str, *, version: str = "1", layout_version: str = "layout-1", candidates: tuple[Candidate, ...] = (), operations: tuple[Operation, ...] = (), error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        client: str,
+        *,
+        version: str = "1",
+        layout_version: str = "layout-1",
+        candidates: tuple[Candidate, ...] = (),
+        operations: tuple[Operation, ...] = (),
+        error: Exception | None = None,
+        verify_error: Exception | None = None,
+    ) -> None:
         self.client = client
         self.version = version
         self.layout_version = layout_version
         self._candidates = candidates
         self._operations = operations
         self._error = error
+        self._verify_error = verify_error
         self.inventory_calls = 0
         self.compile_calls: list[str] = []
+        self.verify_calls = 0
 
     def inventory(self, context: RuntimeContext) -> tuple[Candidate, ...]:
         self.inventory_calls += 1
@@ -41,6 +60,9 @@ class FakeAdapter:
         return self._operations or (Operation(kind=OperationKind.DELETE_FILE, path=candidate.path),)
 
     def verify(self, receipt, context):
+        self.verify_calls += 1
+        if self._verify_error is not None:
+            raise self._verify_error
         return ()
 
 
@@ -217,6 +239,181 @@ class EngineTests(unittest.TestCase):
             validate_approval(plan, "sha256:" + "0" * 64)
         with self.assertRaisesRegex(ValueError, "plan_approval_mismatch"):
             validate_approval(plan, str(plan.digest) + "\n")
+
+
+class VerificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.temp_root = Path(self.temp.name)
+        self.home = self.temp_root / "home"
+        self.home.mkdir()
+        self.project = self.temp_root / "project"
+        self.project.mkdir()
+        self.context = RuntimeContext(PlatformProfile("linux", self.home, {"XDG_STATE_HOME": str(self.temp_root / "state")}), project_roots=(self.project,))
+
+    def completed_receipt(self, plan: Plan, inventory: Inventory) -> Receipt:
+        return Receipt(status=ReceiptStatus.COMPLETED, plan=plan, inventory=inventory)
+
+    def plan_receipt_for(self, adapters: tuple[FakeAdapter, ...]) -> tuple[Inventory, Plan, Receipt]:
+        inventory = build_inventory(self.context, adapters)
+        plan = build_plan(inventory, self.context, adapters)
+        return inventory, plan, self.completed_receipt(plan, inventory)
+
+    def check_codes(self, result) -> list[str]:
+        return [check.code for check in result.checks if check.status == "failed"]
+
+    def test_verification_reads_live_state_not_apply_outcomes(self):
+        inventory, plan, receipt = self.plan_receipt_for((FakeAdapter("codex"),))
+        live_target = self.home / ".codex" / "config.toml"
+        live_target.parent.mkdir(parents=True)
+        live_target.write_text('default_permissions = "gentle-dev"\n')
+        live_candidate = candidate("codex", "live-gentle-profile", str(live_target), details={"kind": "config_toml"})
+
+        result = verify_receipt(receipt, self.context, (FakeAdapter("codex", candidates=(live_candidate,)),))
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("verify_active_residue", self.check_codes(result))
+        self.assertIn("verify_adapter_live", [check.code for check in result.checks])
+        self.assertEqual(inventory.candidates, ())
+        self.assertEqual(plan.operations, ())
+
+    def test_mcp_json_and_toml_drift_fails_even_when_receipt_completed(self):
+        json_config = self.home / ".config" / "opencode" / "opencode.json"
+        json_config.parent.mkdir(parents=True)
+        json_config.write_text(json.dumps({"mcp": {"approved": {"command": "ok"}}, "agent": {}}, indent=2) + "\n")
+        toml_config = self.home / ".codex" / "config.toml"
+        toml_config.parent.mkdir(parents=True)
+        toml_config.write_text('[mcp_servers.approved]\ncommand = "ok"\n')
+        adapters = (
+            FakeAdapter("codex", candidates=(candidate("codex", "codex-mcp", str(toml_config), Ownership.PRESERVED, "report_only", details={"kind": "mcp"}),)),
+            FakeAdapter("opencode", candidates=(candidate("opencode", "opencode-mcp", str(json_config), Ownership.PRESERVED, "report_only", details={"kind": "mcp"}),)),
+        )
+        inventory, plan, receipt = self.plan_receipt_for(adapters)
+
+        json_config.write_text(json.dumps({"mcp": {"unexpected": {"command": "x"}}, "agent": {}}, indent=2) + "\n")
+        toml_config.write_text('[mcp_servers.unexpected]\ncommand = "x"\n')
+        result = verify_receipt(receipt, self.context, adapters)
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("verify_preservation_mismatch", self.check_codes(result))
+        self.assertEqual(len(plan.preservation_assertions), 2)
+
+    def test_success_report_is_byte_stable_and_sorted(self):
+        package = self.home / ".pi" / "node_modules" / "gentle-pi"
+        binary = self.home / ".pi" / "node_modules" / ".bin" / "gentle-pi"
+        history = self.home / ".codex" / "sessions" / "session.jsonl"
+        cosmetic = self.home / ".pi" / "gentle-ai"
+        package.mkdir(parents=True)
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("#!/bin/sh\n")
+        history.parent.mkdir(parents=True)
+        history.write_text('{"prompt":"historical gentle mention only"}\n')
+        cosmetic.mkdir(parents=True)
+        adapters = (
+            FakeAdapter("codex", candidates=(candidate("codex", "history", str(history), Ownership.PRESERVED, "report_only", details={"kind": "historical_jsonl"}),)),
+            FakeAdapter("pi", candidates=(
+                candidate("pi", "package", str(package), Ownership.PRESERVED, "report_only", details={"kind": "installed_package"}),
+                candidate("pi", "binary", str(binary), Ownership.PRESERVED, "report_only", details={"kind": "installed_binary"}),
+                candidate("pi", "cosmetic", str(cosmetic), Ownership.PRESERVED, "report_only", details={"kind": "cosmetic_empty_directory"}),
+            )),
+        )
+        _inventory, _plan, receipt = self.plan_receipt_for(adapters)
+
+        first = verify_receipt(receipt, self.context, tuple(reversed(adapters)))
+        second = verify_receipt(receipt, self.context, adapters)
+
+        self.assertEqual(first.status, "passed")
+        self.assertEqual(first.to_json_bytes(), second.to_json_bytes())
+        self.assertEqual(first.to_json_bytes(), canonical_bytes(first.to_dict()))
+        self.assertEqual([check.code for check in first.checks], sorted(check.code for check in first.checks))
+
+    def test_each_injected_failure_class_has_stable_failed_code(self):
+        target = self.home / "settings.json"
+        target.write_text('{"clean": true}\n')
+        before_b64, before_digest = image(b'{"clean": true}\n')
+        after_b64, after_digest = image(b'{"clean": false}\n')
+        plan = Plan(
+            os_name="linux",
+            home=str(self.home),
+            root_map={},
+            operations=(Operation(kind=OperationKind.WRITE_FILE, path=str(target), preimage_base64=before_b64, preimage_sha256=before_digest, postimage_base64=after_b64, postimage_sha256=after_digest, details={"content_type": "application/json"}),),
+        ).with_digest()
+        receipt = Receipt(status=ReceiptStatus.COMPLETED, plan=plan, operation_outcomes=())
+
+        result = verify_receipt(receipt, self.context, (FakeAdapter("client"),))
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("verify_planned_postcondition", self.check_codes(result))
+        self.assertIn("verify_backup_evidence", self.check_codes(result))
+
+        target.write_text("not json")
+        malformed_receipt = Receipt(status=ReceiptStatus.COMPLETED, plan=plan, operation_outcomes=())
+        malformed = verify_receipt(malformed_receipt, self.context, (FakeAdapter("client"),))
+        self.assertIn("verify_structured_parse", self.check_codes(malformed))
+
+    def test_package_history_registry_root_lifecycle_and_adapter_failures_are_stable(self):
+        package = self.home / ".pi" / "node_modules" / "gentle-pi"
+        history = self.home / ".codex" / "sessions" / "session.jsonl"
+        registry = self.project / ".atl" / "skill-registry.md"
+        package.mkdir(parents=True)
+        history.parent.mkdir(parents=True)
+        history.write_text("before\n")
+        adapters = (
+            FakeAdapter("codex", candidates=(candidate("codex", "history", str(history), Ownership.PRESERVED, "report_only", details={"kind": "historical_jsonl"}),)),
+            FakeAdapter("pi", candidates=(candidate("pi", "package", str(package), Ownership.PRESERVED, "report_only", details={"kind": "installed_package"}),)),
+        )
+        _inventory, plan, receipt = self.plan_receipt_for(adapters)
+        package.rmdir()
+        history.write_text("after\n")
+        registry.parent.mkdir(parents=True)
+        registry.write_text("<!-- Auto-generated by gentle-pi extensions/skill-registry.ts. -->\n# Skill Registry\n\n| Skill | Path |\n| --- | --- |\n")
+        drifted_plan = Plan(os_name=plan.os_name, home=plan.home, root_map={"home": str(self.temp_root / "other")}, preservation_assertions=plan.preservation_assertions, digest=plan.digest)
+        failed_receipt = Receipt(
+            status=ReceiptStatus.COMPLETED,
+            plan=drifted_plan,
+            lifecycle_outcomes=(LifecycleOutcome(action="restart", client="pi", target="Pi", status="failed", code="lifecycle_restart_failed", pid=7),),
+        )
+
+        result = verify_receipt(failed_receipt, self.context, (FakeAdapter("codex", verify_error=ValueError("codex_toml_malformed")), FakeAdapter("pi", candidates=(candidate("pi", "regrown", str(registry), details={"kind": "generated_registry"}),))))
+
+        failures = self.check_codes(result)
+        self.assertIn("verify_root_binding", failures)
+        self.assertIn("verify_lifecycle_state", failures)
+        self.assertIn("verify_package_presence", failures)
+        self.assertIn("verify_history_preservation", failures)
+        self.assertIn("verify_generated_regrowth", failures)
+        self.assertIn("verify_structured_parse", failures)
+
+    def test_receipt_success_with_live_postimage_drift_still_fails(self):
+        target = self.home / "config.json"
+        target.write_text('{"enabled": false}\n')
+        plan = write_plan(target, b'{"enabled": true}\n', b'{"enabled": false}\n')
+        receipt = Receipt(
+            status=ReceiptStatus.COMPLETED,
+            plan=plan,
+            operation_outcomes=(type("Outcome", (), {"operation_index": 0, "kind": str(OperationKind.WRITE_FILE), "path": str(target), "status": "completed"})(),),
+        )
+        target.write_text('{"enabled": true}\n')
+
+        result = verify_receipt(receipt, self.context, (FakeAdapter("client"),))
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("verify_planned_postcondition", self.check_codes(result))
+
+
+def write_plan(path: Path, before: bytes, after: bytes) -> Plan:
+    pre_b64, pre_digest = image(before)
+    post_b64, post_digest = image(after)
+    return Plan(
+        os_name="linux",
+        home=str(path.parents[0]),
+        operations=(Operation(kind=OperationKind.WRITE_FILE, path=str(path), preimage_base64=pre_b64, preimage_sha256=pre_digest, postimage_base64=post_b64, postimage_sha256=post_digest, details={"content_type": "application/json"}),),
+    ).with_digest()
+
+
+def image(content: bytes) -> tuple[str, str]:
+    return base64.b64encode(content).decode("ascii"), "sha256:" + hashlib.sha256(content).hexdigest()
 
 
 def write_operation(path: Path, postimage: bytes) -> Operation:

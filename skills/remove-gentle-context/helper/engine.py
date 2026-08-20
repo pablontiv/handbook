@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import tomllib
 from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from helper.canonical import digest_json
 from helper.paths import root_map
 from helper.models import (
     Candidate,
@@ -184,14 +187,56 @@ def _operation_kind(operation: Operation) -> OperationKind:
 
 
 def _preservation_assertion(candidate: Candidate) -> PreservationAssertion:
+    details = dict(candidate.details)
+    preservation = _normalized_preservation(candidate)
+    if preservation is not None:
+        details["preservation"] = preservation
     return PreservationAssertion(
         candidate_id=candidate.candidate_id,
         client=candidate.client,
         path=candidate.path,
         reason=candidate.reason,
         evidence=tuple(candidate.evidence),
-        details=dict(candidate.details),
+        details=details,
     )
+
+
+def _normalized_preservation(candidate: Candidate) -> dict[str, object] | None:
+    path = Path(candidate.path)
+    kind = str(candidate.details.get("kind", ""))
+    if kind == "mcp":
+        return _mcp_preservation(path)
+    if kind == "historical_jsonl":
+        digest = str(candidate.details.get("sha256") or _sha256(path.read_bytes()))
+        return {"kind": "file_sha256", "sha256": digest, "semantic": "history"}
+    if kind in {"installed_package", "node_module"}:
+        return {"kind": "directory_exists"}
+    if kind == "installed_binary":
+        return {"kind": "path_exists"}
+    if kind == "cosmetic_empty_directory":
+        return {"kind": "empty_directory"}
+    if kind == "plugin_order":
+        values = tuple(str(value) for value in candidate.details.get("preserved_values", ()) if isinstance(value, str))
+        return {"kind": "json_array_order", "pointer": ["plugin"], "values": list(values), "digest": digest_json({"values": list(values)})}
+    if candidate.preimage is not None and path.is_file():
+        return {"kind": "file_sha256", "sha256": _sha256(path.read_bytes())}
+    if path.is_dir():
+        return {"kind": "directory_exists"}
+    if path.exists() or path.is_symlink():
+        return {"kind": "path_exists"}
+    return None
+
+
+def _mcp_preservation(path: Path) -> dict[str, object]:
+    if path.suffix == ".toml":
+        data = tomllib.loads(path.read_text())
+        value = data.get("mcp_servers", {}) if isinstance(data, Mapping) else {}
+        return {"kind": "toml_value", "pointer": ["mcp_servers"], "value": value, "digest": digest_json(value)}
+    data = json.loads(path.read_text())
+    if not isinstance(data, Mapping):
+        raise ValueError("plan_preservation_json_not_object")
+    value = data.get("mcp", {})
+    return {"kind": "json_value", "pointer": ["mcp"], "value": value, "digest": digest_json(value)}
 
 
 def _candidate_lifecycle_actions(candidate: Candidate) -> list[LifecycleAction]:
@@ -247,3 +292,6 @@ def _adapter_version(adapter: object) -> str:
 def _adapter_layout(adapter: object) -> str:
     value = getattr(adapter, "layout_version", getattr(adapter, "layout", "unknown"))
     return str(value)
+
+
+from .verifier import verify_receipt  # noqa: E402

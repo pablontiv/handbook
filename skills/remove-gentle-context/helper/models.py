@@ -289,7 +289,18 @@ class Plan:
 
 @dataclass(frozen=True)
 class Check:
-    pass
+    code: str = ""
+    status: str = "passed"
+    severity: str = "info"
+    evidence: Mapping[str, object] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "status": self.status,
+            "severity": self.severity,
+            "evidence": _json_safe(self.evidence),
+        }
 
 
 @dataclass(frozen=True)
@@ -478,7 +489,17 @@ class LifecycleOutcome:
 
 @dataclass(frozen=True)
 class VerificationResult:
-    pass
+    status: str = "failed"
+    checks: tuple[Check, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "checks": [check.to_dict() for check in self.checks],
+            "status": self.status,
+        }
+
+    def to_json_bytes(self) -> bytes:
+        return digestable_json_bytes(self.to_dict())
 
 
 @dataclass(frozen=True)
@@ -488,12 +509,44 @@ class Receipt:
     lifecycle_outcomes: tuple[LifecycleOutcome, ...] = ()
     checks: tuple[Check, ...] = ()
     status: ReceiptStatus | None = None
+    plan: Plan | None = None
+    inventory: Inventory | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "operation_outcomes": [o.to_dict() if hasattr(o, "to_dict") else o.__dict__ for o in self.operation_outcomes],
+            "operation_outcomes": [_to_dict(o) for o in self.operation_outcomes],
             "backup_manifest_path": None if self.backup_manifest_path is None else str(self.backup_manifest_path),
-            "lifecycle_outcomes": [o.__dict__ for o in self.lifecycle_outcomes],
-            "checks": [c.__dict__ for c in self.checks],
+            "lifecycle_outcomes": [_to_dict(o) for o in self.lifecycle_outcomes],
+            "checks": [c.to_dict() if hasattr(c, "to_dict") else _json_safe(getattr(c, "__dict__", {})) for c in self.checks],
             "status": None if self.status is None else str(self.status),
+            "plan": None if self.plan is None else self.plan.to_dict(),
+            "inventory": None if self.inventory is None else self.inventory.to_dict(),
         }
+
+
+def digestable_json_bytes(value: object) -> bytes:
+    from .canonical import canonical_bytes
+
+    return canonical_bytes(_json_safe(value))
+
+
+def _to_dict(value: object) -> dict[str, object]:
+    if hasattr(value, "to_dict"):
+        data = value.to_dict()  # type: ignore[no-any-return, attr-defined]
+        return _json_safe(data) if isinstance(data, dict) else {"value": _json_safe(data)}
+    raw = getattr(value, "__dict__", {})
+    return _json_safe(raw) if isinstance(raw, dict) else {"value": _json_safe(raw)}
+
+
+def _json_safe(value: object) -> object:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)

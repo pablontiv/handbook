@@ -95,7 +95,7 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
     validate_approval(plan, approval)
     _assert_plan_root_map_matches_context(plan, context, "execute_plan_roots_mismatch")
     if not plan.operations:
-        return Receipt(status=ReceiptStatus.COMPLETED)
+        return Receipt(status=ReceiptStatus.COMPLETED, plan=plan)
 
     lifecycle_outcomes: list[LifecycleOutcome] = []
     stopped: list[ProcessSnapshot] = []
@@ -115,7 +115,7 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
         restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
         lifecycle_outcomes.extend(restart_outcomes)
         status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.FAILED
-        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status)
+        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan)
 
     try:
         _validate_plan_preimages(plan, context, drift_code="preflight_preimage_drift_after_shutdown")
@@ -124,7 +124,7 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
         restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
         lifecycle_outcomes.extend(restart_outcomes)
         status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.FAILED
-        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status)
+        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan)
 
     manifest = create_backup(plan, context)
     try:
@@ -136,12 +136,12 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
         status = ReceiptStatus.ROLLED_BACK
         if any(outcome.status == "failed" for outcome in rollback_outcomes) or _has_restart_failure(restart_outcomes):
             status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED
-        return Receipt(operation_outcomes=tuple(exc.outcomes + rollback_outcomes), backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status)
+        return Receipt(operation_outcomes=tuple(exc.outcomes + rollback_outcomes), backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan)
 
     restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
     lifecycle_outcomes.extend(restart_outcomes)
     status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.COMPLETED
-    return Receipt(operation_outcomes=outcomes, backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status)
+    return Receipt(operation_outcomes=outcomes, backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan)
 
 
 def _assert_plan_root_map_matches_context(plan: Plan, context: RuntimeContext, code: str) -> None:
