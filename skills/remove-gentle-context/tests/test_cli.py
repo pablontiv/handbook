@@ -314,12 +314,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(cleanup.receipt_artifact(receipt), examples["Receipt JSON"])
         cleanup.assert_receipt_binding(receipt, inventory, plan, phase="docs")
         self.assertEqual(str(receipt.backup_manifest_path), examples["Receipt JSON"]["backup_manifest_path"])
-        self.assertEqual(receipt.checks[0].evidence["manifest_digest"], manifest.digest)
+        self.assertEqual(tuple(receipt.checks), ())
         for outcome in receipt.operation_outcomes:
             operation = operations_by_index[outcome.operation_index]
             self.assertEqual(outcome.kind, str(operation.kind))
             self.assertEqual(outcome.path, operation.path)
             self.assertEqual(outcome.status, "completed")
+
+        runtime_context = cleanup.RuntimeContext(cleanup.PlatformProfile("linux", self.home, {}))
+        runtime_inventory = cleanup.build_inventory(runtime_context, ())
+        runtime_plan = cleanup.build_plan(runtime_inventory, runtime_context, ())
+        runtime_receipt = cleanup.execute_plan(runtime_plan, runtime_plan.digest, runtime_context, object(), inventory=runtime_inventory)
+        runtime_receipt_artifact = cleanup.receipt_artifact(runtime_receipt)
+        self.assertEqual(runtime_receipt.status, cleanup.ReceiptStatus.COMPLETED)
+        self.assertEqual(runtime_receipt_artifact["checks"], [])
+        self.assertEqual(runtime_receipt_artifact["checks"], examples["Receipt JSON"]["checks"])
 
         verification_data = examples["Verification JSON"]
         verification_path = self.artifacts / "contract-verification.json"
@@ -327,15 +336,33 @@ class CliTests(unittest.TestCase):
         cleanup.reject_unknown(verification_data, {"schema", "status", "checks", "digest"}, phase="verification", path=verification_path)
         cleanup.require_keys(verification_data, {"schema", "status", "checks", "digest"}, phase="verification", path=verification_path)
         self.assertEqual(verification_data["digest"], cleanup.digest_json(cleanup.data_without_digest(verification_data)))
+        from helper.verifier import REQUIRED_CODES, SUPPORT_CODES
+
+        allowed_verification_codes = set(REQUIRED_CODES + SUPPORT_CODES)
+        verification_check_items = cleanup.require_list(verification_data["checks"], phase="verification", path=verification_path)
+        for item in verification_check_items:
+            self.assertIsInstance(item, dict)
+            self.assertIn(cleanup.require_str(item, "code", phase="verification", path=verification_path), allowed_verification_codes)
         verification_checks = tuple(
             cleanup.check_from_dict(item, phase="verification", path=verification_path)
-            for item in cleanup.require_list(verification_data["checks"], phase="verification", path=verification_path)
+            for item in verification_check_items
         )
         verification = cleanup.VerificationResult(
             status=cleanup.require_str(verification_data, "status", phase="verification", path=verification_path),
             checks=verification_checks,
         )
         self.assertEqual(cleanup.verification_artifact(verification), verification_data)
+
+        runtime_verification = cleanup.verify_receipt(runtime_receipt, runtime_context, ())
+        obtainable_checks = {
+            (check.code, check.status, check.severity, json.dumps(check.evidence, sort_keys=True, separators=(",", ":")))
+            for check in runtime_verification.checks
+        }
+        for check in verification_checks:
+            self.assertIn(
+                (check.code, check.status, check.severity, json.dumps(check.evidence, sort_keys=True, separators=(",", ":"))),
+                obtainable_checks,
+            )
 
     def test_preservation_reference_covers_required_scopes_and_vetoes(self) -> None:
         text = PRESERVATION.read_text(encoding="utf-8")
