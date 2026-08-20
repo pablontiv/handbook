@@ -218,6 +218,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(artifact["backup_manifest_path"], "C:/gentle-example/state/remove-gentle-context/backups/example/manifest.json")
         self.assertNotIn("\\", artifact["backup_manifest_path"])
 
+        apply_summary = cleanup.receipt_command_summary(
+            command="apply",
+            receipt_path=PureWindowsPath("C:/gentle-example/state/remove-gentle-context/receipt.json"),
+            receipt=receipt,
+            artifact=artifact,
+            backup_manifest_digest="sha256:" + "a" * 64,
+            counts={"operations": 0, "lifecycle": 0},
+        )
+        restore_summary = cleanup.receipt_command_summary(
+            command="restore",
+            receipt_path=PureWindowsPath("C:/gentle-example/state/remove-gentle-context/restore.json"),
+            receipt=receipt,
+            artifact=artifact,
+        )
+
+        self.assertEqual(apply_summary["backup_manifest_path"], artifact["backup_manifest_path"])
+        self.assertEqual(restore_summary["backup_manifest_path"], artifact["backup_manifest_path"])
+        self.assertNotIn("\\", apply_summary["backup_manifest_path"])
+        self.assertNotIn("\\", restore_summary["backup_manifest_path"])
+
         native_manifest = self.artifacts / "manifest.json"
         native_manifest.write_text('{"schema":"remove-gentle-context.backup/v1"}\n', encoding="utf-8")
         native_receipt = cleanup.Receipt(backup_manifest_path=native_manifest, status=cleanup.ReceiptStatus.COMPLETED)

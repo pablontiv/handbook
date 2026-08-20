@@ -231,15 +231,14 @@ def command_apply(args: argparse.Namespace) -> dict[str, object]:
     artifact = receipt_artifact(receipt)
     write_artifact(receipt_path, artifact, phase="apply")
     backup_digest = backup_manifest_digest(receipt.backup_manifest_path)
-    summary = {
-        "status": None if receipt.status is None else str(receipt.status),
-        "command": "apply",
-        "receipt_path": str(receipt_path),
-        "digest": artifact["digest"],
-        "backup_manifest_path": None if receipt.backup_manifest_path is None else str(receipt.backup_manifest_path),
-        "backup_manifest_digest": backup_digest,
-        "counts": {"operations": len(receipt.operation_outcomes), "lifecycle": len(receipt.lifecycle_outcomes)},
-    }
+    summary = receipt_command_summary(
+        command="apply",
+        receipt_path=receipt_path,
+        receipt=receipt,
+        artifact=artifact,
+        backup_manifest_digest=backup_digest,
+        counts={"operations": len(receipt.operation_outcomes), "lifecycle": len(receipt.lifecycle_outcomes)},
+    )
     if receipt.status != ReceiptStatus.COMPLETED:
         exit_with_summary(summary, EXIT_APPLY, "apply", f"apply_{summary['status']}")
     return summary
@@ -290,13 +289,12 @@ def command_restore(args: argparse.Namespace) -> dict[str, object]:
         raise CliError(exit_code, "restore", code, next_action="restore with matching root map and approval") from exc
     artifact = receipt_artifact(restore_receipt)
     write_artifact(output, artifact, phase="restore")
-    summary = {
-        "status": None if restore_receipt.status is None else str(restore_receipt.status),
-        "command": "restore",
-        "receipt_path": str(output),
-        "digest": artifact["digest"],
-        "backup_manifest_path": None if restore_receipt.backup_manifest_path is None else str(restore_receipt.backup_manifest_path),
-    }
+    summary = receipt_command_summary(
+        command="restore",
+        receipt_path=output,
+        receipt=restore_receipt,
+        artifact=artifact,
+    )
     if restore_receipt.status != ReceiptStatus.COMPLETED:
         exit_with_summary(summary, EXIT_RESTORE, "restore", f"restore_{summary['status']}")
     return summary
@@ -407,6 +405,29 @@ def receipt_artifact(receipt: Receipt) -> dict[str, object]:
     data = {"schema": RECEIPT_SCHEMA, **unsigned}
     data["digest"] = digest_json(data_without_digest(data))
     return data
+
+
+def receipt_command_summary(
+    *,
+    command: str,
+    receipt_path: os.PathLike[str],
+    receipt: Receipt,
+    artifact: Mapping[str, object],
+    backup_manifest_digest: str | None = None,
+    counts: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    summary = {
+        "status": None if receipt.status is None else str(receipt.status),
+        "command": command,
+        "receipt_path": str(receipt_path),
+        "digest": artifact["digest"],
+        "backup_manifest_path": artifact["backup_manifest_path"],
+    }
+    if backup_manifest_digest is not None:
+        summary["backup_manifest_digest"] = backup_manifest_digest
+    if counts is not None:
+        summary["counts"] = dict(counts)
+    return summary
 
 
 def verification_artifact(result: VerificationResult) -> dict[str, object]:
