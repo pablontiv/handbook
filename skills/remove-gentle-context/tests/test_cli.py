@@ -15,8 +15,14 @@ from unittest import mock
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = SKILL_ROOT.parents[1]
 SCRIPT = SKILL_ROOT / "scripts" / "cleanup.py"
 FIXTURES = SKILL_ROOT / "tests" / "fixtures"
+CONTRACTS = SKILL_ROOT / "references" / "contracts.md"
+PRESERVATION = SKILL_ROOT / "references" / "preservation.md"
+README = REPO_ROOT / "README.md"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+DOC_PATHS = (SKILL_ROOT / "SKILL.md", CONTRACTS, PRESERVATION, README)
 REMOVED_MODE_ENV = "REMOVE_GENTLE_CONTEXT_" + "TEST" + "_MODE"
 REMOVED_HOME_ENV = "REMOVE_GENTLE_CONTEXT_" + "TEST" + "_HOME"
 REMOVED_ATOMIC_ENV = "REMOVE_GENTLE_CONTEXT_" + "INJECT" + "_ATOMIC_FAIL"
@@ -155,6 +161,12 @@ class CliTests(unittest.TestCase):
         shutil.copy2(FIXTURES / "pi" / "skill-registry.md", registry)
         return registry
 
+    def test_cli_file_has_portable_shebang_and_posix_executable_mode(self) -> None:
+        first_line = SCRIPT.read_text(encoding="utf-8").splitlines()[0]
+        self.assertEqual(first_line, "#!/usr/bin/env python3")
+        if os.name == "posix":
+            self.assertTrue(os.access(SCRIPT, os.X_OK), "cleanup.py must be executable on POSIX")
+
     def test_help_lists_exact_five_commands(self) -> None:
         result = self.run_cli("--help")
         self.assertEqual(result.returncode, 0)
@@ -169,6 +181,143 @@ class CliTests(unittest.TestCase):
         self.assertIn("--home", inventory_help.stdout)
         self.assertIn("--platform", inventory_help.stdout)
         self.assertIn("--env", inventory_help.stdout)
+
+    def test_skill_mentions_every_phase_and_never_authorizes_freeform_delete(self) -> None:
+        text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        for command in ("inventory", "plan", "apply", "verify", "restore"):
+            self.assertIn(f"cleanup.py {command}", text)
+        self.assertIn("--approve", text)
+        self.assertIn("Never improvise deletion commands outside scripts/cleanup.py.", text)
+
+    def test_skill_frontmatter_and_trigger_description_are_agentskills_compatible(self) -> None:
+        text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\n"))
+        end = text.index("\n---\n", 4)
+        frontmatter = text[4:end]
+        self.assertRegex(frontmatter, r"(?m)^name: remove-gentle-context$")
+        description_lines = []
+        capture = False
+        for line in frontmatter.splitlines():
+            if line.startswith("description: >-"):
+                capture = True
+                continue
+            if capture:
+                if line.startswith("  "):
+                    description_lines.append(line.strip())
+                else:
+                    break
+        description = " ".join(description_lines)
+        self.assertTrue(description.startswith("Use when"), description)
+        forbidden_workflow_terms = ("inventory", "back up", "backup", "remove", "verify", "preserve", "approval", "digest")
+        for term in forbidden_workflow_terms:
+            self.assertNotIn(term, description.lower())
+
+    def test_skill_quick_path_has_exactly_five_command_signatures(self) -> None:
+        text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        expected = [
+            "python scripts/cleanup.py inventory --home <absolute-home> --platform <linux|macos|windows> --output <inventory.json>",
+            "python scripts/cleanup.py plan --inventory <inventory.json> --output <plan.json>",
+            "python scripts/cleanup.py apply --inventory <inventory.json> --plan <plan.json> --approve <plan-digest> --receipt <receipt.json>",
+            "python scripts/cleanup.py verify --inventory <inventory.json> --plan <plan.json> --receipt <receipt.json> --output <verification.json>",
+            "python scripts/cleanup.py restore --manifest <backup-manifest.json> --receipt <receipt.json> --approve <manifest-digest> --output <restore.json>",
+        ]
+        command_lines = [line.strip() for line in text.splitlines() if line.strip().startswith("python scripts/cleanup.py ")]
+        self.assertEqual(command_lines, expected)
+
+    def test_reference_contracts_define_artifacts_codes_authority_and_recovery(self) -> None:
+        text = CONTRACTS.read_text(encoding="utf-8")
+        required_terms = (
+            "remove-gentle-context.inventory/v1",
+            "remove-gentle-context.plan/v1",
+            "remove-gentle-context.backup/v1",
+            "remove-gentle-context.receipt/v1",
+            "remove-gentle-context.verification/v1",
+            "plan and manifest digests omit their own digest field",
+            "EXIT_USAGE = 2",
+            "EXIT_UNSAFE_PATH = 11",
+            "EXIT_ARTIFACT = 12",
+            "EXIT_IO = 13",
+            "EXIT_APPROVAL = 20",
+            "EXIT_APPLY = 21",
+            "EXIT_VERIFY_FAILED = 30",
+            "EXIT_RESTORE = 40",
+            "restore authority",
+            "root/environment binding",
+            "atomic publication",
+            "recovery states",
+        )
+        for term in required_terms:
+            self.assertIn(term, text)
+        signature_lines = [line.strip() for line in text.splitlines() if line.strip().startswith("python scripts/cleanup.py ")]
+        self.assertEqual(len(signature_lines), 5)
+
+    def test_preservation_reference_covers_required_scopes_and_vetoes(self) -> None:
+        text = PRESERVATION.read_text(encoding="utf-8")
+        required_terms = (
+            "MCP",
+            "Engram",
+            "packages",
+            "binaries",
+            "source",
+            "node_modules",
+            "history",
+            "prompts",
+            "messages",
+            "caches",
+            "backups",
+            ".git/gentle-ai",
+            "pablontiv",
+            "personal skill veto",
+            "provenance",
+            "Pi registry authority",
+            "report-only",
+        )
+        for term in required_terms:
+            self.assertIn(term, text)
+
+    def test_docs_have_no_personal_absolute_paths(self) -> None:
+        forbidden = ("/Users/", "C:\\Users\\", "\\Users\\", "/home/pablontiv", "/home/pablo")
+        for path in DOC_PATHS:
+            text = path.read_text(encoding="utf-8")
+            for term in forbidden:
+                self.assertNotIn(term, text, f"{path} contains {term}")
+
+    def test_workflow_matrix_uses_three_operating_systems_and_portable_commands(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("ubuntu-latest", text)
+        self.assertIn("macos-latest", text)
+        self.assertIn("windows-latest", text)
+        self.assertEqual(text.count('python-version: "3.11"'), 1)
+        self.assertIn("working-directory: skills/remove-gentle-context", text)
+        self.assertIn("python -m unittest discover -s tests -t . -v", text)
+        self.assertIn("python -m py_compile scripts/cleanup.py", text)
+        self.assertIn("python scripts/cleanup.py --help", text)
+        self.assertNotIn("cd skills/remove-gentle-context", text)
+        self.assertNotIn("./scripts/cleanup.py", text)
+
+    def test_pressure_contract_requires_canonical_safe_flow(self) -> None:
+        text = "\n".join(path.read_text(encoding="utf-8") for path in DOC_PATHS)
+        required_terms = (
+            "canonical inventory",
+            "plan approval",
+            "fd-bound validation",
+            "verified backup",
+            "atomic rollback",
+            "receipt",
+            "live verification",
+            "exact authority",
+            "ambiguity blockers",
+        )
+        for term in required_terms:
+            self.assertIn(term, text)
+        forbidden_patterns = (
+            r"(?:may|can|should|safe to|authorized? to)\s+[^.\n]*(?:delete|remove)\s+[^.\n]*(?:marker|name|path|text|fingerprint|author)",
+            r"grep\s+[^.\n]*(?:then|and)\s+[^.\n]*(?:delete|remove)",
+            r"(?:may|can|should|safe to|authorized? to)\s+[^.\n]*implicit restart",
+            r"(?:may|can|should|safe to|authorized? to)\s+[^.\n]*skip(?:ped)? plan approval",
+        )
+        for pattern in forbidden_patterns:
+            self.assertIsNone(__import__("re").search(pattern, text, __import__("re").IGNORECASE), pattern)
 
     def test_apply_requires_exact_approval(self) -> None:
         result = self.run_cli("apply", "--plan", str(self.artifacts / "plan.json"))

@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run unit tests
+        working-directory: skills/remove-gentle-context
+        run: python -m unittest discover -s tests -t . -v
+      - name: Compile CLI
+        working-directory: skills/remove-gentle-context
+        run: python -m py_compile scripts/cleanup.py
+      - name: CLI help
+        working-directory: skills/remove-gentle-context
+        run: python scripts/cleanup.py --help
