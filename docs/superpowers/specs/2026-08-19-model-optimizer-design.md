@@ -136,10 +136,9 @@ python scripts/model_optimizer.py inventory \
 - locally listed exact model IDs;
 - provider readiness;
 - local context, output, reasoning, input-mode, cache, and cost metadata when available;
-- exclusions and bounded reason codes;
-- runtime reload semantics known to the adapter.
+- exclusions and bounded reason codes.
 
-It never writes runtime state or prints credential material.
+The `inventory` orchestration also invokes the adapter's reload-semantics hook, but `model-optimizer.inventory/v1` does not serialize its result. The reasoning/report layer must state the runtime-native hot-reload, `/reload`, restart, or new-session semantics. Inventory never writes runtime state or prints credential material.
 
 ### 3. Criteria and candidate selection
 
@@ -262,6 +261,7 @@ The Pi adapter uses only Pi-local evidence:
 
 ```bash
 pi --no-session -p \
+  --no-tools \
   --model provider/model \
   --thinking minimal \
   "Reply exactly: PONG"
@@ -309,11 +309,12 @@ Canonical UTF-8 JSON uses schema `model-optimizer.inventory/v1`. Required top-le
   "catalog_local": [],
   "provider_readiness": [],
   "exclusions": [],
-  "warnings": []
+  "warnings": [],
+  "digest": "sha256:..."
 }
 ```
 
-`ready_local` is derived from catalog IDs and provider readiness rather than duplicated as mutable state.
+`ready_local` is derived from catalog IDs and provider readiness rather than duplicated as mutable state. The inventory digest is serialized in v1 and is computed over canonical JSON with `digest` blanked.
 
 ### Health
 

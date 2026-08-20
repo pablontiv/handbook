@@ -41,6 +41,14 @@ class SkillContractTests(unittest.TestCase):
         self.assertRegex(text, r"model_optimizer\.py check .+ --timeout \d+")
         self.assertNotRegex(text, r"model_optimizer\.py\s+(apply|write|configure)")
 
+    def test_reference_documents_both_schemas_and_exit_codes(self):
+        reference = (SKILL.parent / "references" / "contracts.md").read_text(encoding="utf-8")
+        self.assertIn("model-optimizer.inventory/v1", reference)
+        self.assertIn("model-optimizer.health/v1", reference)
+        for code in ("0", "2", "3", "4", "5"):
+            self.assertIn(f"`{code}`", reference)
+        self.assertIn("The helper never authorizes configuration mutation", reference)
+
 
 class PressureHarnessTests(unittest.TestCase):
     def test_skill_content_is_injected_while_runtime_skill_loading_stays_disabled(self):
