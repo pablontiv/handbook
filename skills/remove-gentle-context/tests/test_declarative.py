@@ -230,12 +230,12 @@ metadata:
                 self.assertEqual(candidate.proposed_action, "report_only")
 
     def test_complete_gentle_html_marker_corroborates_exact_file(self):
-        content = "<!-- gentle-ai:sdd-init -->\n# Gentle upstream asset\n"
+        content = b"<!-- gentle-ai:sdd-init -->\n# Gentle upstream asset\n"
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
             target = home / ".gemini" / "agents" / "sdd-init.md"
             target.parent.mkdir(parents=True)
-            target.write_text(content)
+            target.write_bytes(content)
             adapter_path = Path(td) / "adapter.json"
             adapter_path.write_text(json.dumps({
                 "schema": "remove-gentle-context.adapter/v1",
@@ -248,13 +248,13 @@ metadata:
             self.assertIn("marker", {item["kind"] for item in candidate.evidence})
 
     def test_byte_identical_gentle_asset_is_not_preserved(self):
-        content = "---\nname: sdd-init\n---\n# Gentle upstream asset\n"
-        digest = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+        content = b"---\nname: sdd-init\n---\n# Gentle upstream asset\n"
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
             target = home / ".gemini" / "agents" / "sdd-init.md"
             target.parent.mkdir(parents=True)
-            target.write_text(content)
+            target.write_bytes(content)
             adapter_path = Path(td) / "adapter.json"
             adapter_path.write_text(json.dumps({
                 "schema": "remove-gentle-context.adapter/v1",
@@ -274,7 +274,7 @@ metadata:
             self.assertNotEqual(candidate.ownership, Ownership.PRESERVED)
 
     def test_author_only_personal_adaptation_is_ambiguous_and_vetoes_delete(self):
-        content = """---
+        content = b"""---
 name: systemic-issue-triage
 metadata:
   author: "pablontiv"
@@ -288,7 +288,7 @@ metadata:
             home = Path(td) / "home"
             target = home / ".gemini" / "agents" / "systemic-issue-triage.md"
             target.parent.mkdir(parents=True)
-            target.write_text(content)
+            target.write_bytes(content)
             adapter_path = Path(td) / "adapter.json"
             self._write_exact_file_adapter(adapter_path)
             (candidate,) = load_declarative_adapter(adapter_path).inventory(self._context(home))
@@ -297,15 +297,15 @@ metadata:
             self.assertTrue(candidate.details["auto_deletion_veto"])
 
     def test_temp_catalog_release_receipt_and_installed_tree_preserve_personal_adaptation(self):
-        content = self._personal_content()
+        content = self._personal_content().encode("utf-8")
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
             receipts = Path(td) / "receipts"
             receipts.mkdir()
             target = home / ".gemini" / "agents" / "systemic-issue-triage.md"
             target.parent.mkdir(parents=True)
-            target.write_text(content)
-            content_digest = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+            target.write_bytes(content)
+            content_digest = "sha256:" + hashlib.sha256(content).hexdigest()
             tree_digest = canonical_tree_sha256(target)
             (receipts / "systemic-issue-triage.json").write_text(json.dumps(self._receipt(
                 target=target,
@@ -351,9 +351,9 @@ metadata:
                 content = self._personal_content(
                     author="someone-else" if case == "author_not_pablontiv" else "pablontiv",
                     include_adapted_metadata=case != "missing_adapted_metadata",
-                )
-                target.write_text(content)
-                content_digest = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+                ).encode("utf-8")
+                target.write_bytes(content)
+                content_digest = "sha256:" + hashlib.sha256(content).hexdigest()
                 tree_digest = canonical_tree_sha256(target)
                 catalog_tree = "sha256:" + "1" * 64 if case == "wrong_release_tree_sha256" else tree_digest
                 receipt_tree = "sha256:" + "2" * 64 if case == "wrong_receipt_tree_sha256" else tree_digest
@@ -377,7 +377,7 @@ metadata:
                     source_commit=receipt_commit,
                 )))
                 if case == "actual_installed_content_drift":
-                    target.write_text(content + "\nchanged after receipt\n")
+                    target.write_bytes(content + b"\nchanged after receipt\n")
                 adapter_path = Path(td) / "adapter.json"
                 self._write_exact_file_adapter(adapter_path)
                 (candidate,) = load_declarative_adapter(adapter_path, catalog_path=catalog_path).inventory(
@@ -539,14 +539,14 @@ class DeclarativeCompilerTests(unittest.TestCase):
                 "unrelated": {"enabled": True},
             }))
             instructions = config / "GEMINI.md"
-            instructions.write_text("before\n<!-- gentle-ai:begin -->\nmanaged\n<!-- gentle-ai:end -->\nafter\n")
+            instructions.write_bytes(b"before\n<!-- gentle-ai:begin -->\nmanaged\n<!-- gentle-ai:end -->\nafter\n")
 
             adapter, context, _inventory, plan, _receipt = self._execute(SKILL_ROOT / "adapters" / "gemini.json", home)
 
             self.assertEqual({operation.kind for operation in plan.operations}, {OperationKind.WRITE_FILE})
             decoded_by_path = {operation.path: self._decoded_postimage(operation) for operation in plan.operations}
             self.assertEqual(decoded_by_path[str(instructions)], b"before\nafter\n")
-            self.assertEqual(instructions.read_text(), "before\nafter\n")
+            self.assertEqual(instructions.read_bytes(), b"before\nafter\n")
             updated = json.loads(settings.read_text())
             self.assertEqual(updated["hooks"], ["third-party", "other"])
             self.assertEqual(updated["mcp"], {"servers": {"personal": {"command": "keep"}}})
@@ -564,7 +564,7 @@ class DeclarativeCompilerTests(unittest.TestCase):
                 "mcp": {"servers": {"personal": {"command": "keep"}}},
             }))
             instructions = config / "KIMI.md"
-            instructions.write_text("alpha\n<!-- gentle-ai:begin -->\nmanaged\n<!-- gentle-ai:end -->\nomega\n")
+            instructions.write_bytes(b"alpha\n<!-- gentle-ai:begin -->\nmanaged\n<!-- gentle-ai:end -->\nomega\n")
 
             adapter, context, _inventory, plan, _receipt = self._execute(SKILL_ROOT / "adapters" / "kimi.json", home)
 
@@ -592,7 +592,7 @@ class DeclarativeCompilerTests(unittest.TestCase):
                 "mcp": {"servers": {"personal": {"command": "keep"}}},
             }))
             instructions = config / "copilot-instructions.md"
-            instructions.write_text("top\n<!-- gentle-ai:begin -->\nmanaged\n<!-- gentle-ai:end -->\nbottom\n")
+            instructions.write_bytes(b"top\n<!-- gentle-ai:begin -->\nmanaged\n<!-- gentle-ai:end -->\nbottom\n")
 
             adapter, context, _inventory, plan, _receipt = self._execute(SKILL_ROOT / "adapters" / "vscode-copilot.json", home)
 

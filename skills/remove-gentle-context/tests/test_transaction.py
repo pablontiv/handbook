@@ -188,13 +188,19 @@ class FileIdentityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "binary-flag.txt"
             target.write_bytes(b"raw\r\nbytes")
+            native_binary = getattr(os, "O_BINARY", 0)
             synthetic_binary = 0x800000
+            while synthetic_binary & native_binary:
+                synthetic_binary <<= 1
             original_open = os.open
             opened_flags: list[int] = []
+            forwarded_flags: list[int] = []
 
             def open_stripping_synthetic_binary(path, flags, *args, **kwargs):
                 opened_flags.append(flags)
-                return original_open(path, flags & ~synthetic_binary, *args, **kwargs)
+                real_flags = (flags & ~synthetic_binary) | native_binary
+                forwarded_flags.append(real_flags)
+                return original_open(path, real_flags, *args, **kwargs)
 
             with patch("helper.transaction.os.O_BINARY", synthetic_binary, create=True), patch("helper.transaction.os.open", side_effect=open_stripping_synthetic_binary):
                 _stat_result, content = _read_regular_file_bound(
@@ -209,7 +215,11 @@ class FileIdentityTests(unittest.TestCase):
 
             self.assertEqual(content, b"raw\r\nbytes")
             self.assertEqual(len(opened_flags), 1)
+            self.assertEqual(len(forwarded_flags), 1)
             self.assertTrue(opened_flags[0] & synthetic_binary)
+            self.assertFalse(forwarded_flags[0] & synthetic_binary)
+            if native_binary:
+                self.assertTrue(forwarded_flags[0] & native_binary)
             if hasattr(os, "O_NOFOLLOW"):
                 self.assertTrue(opened_flags[0] & os.O_NOFOLLOW)
 
@@ -607,7 +617,9 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(receipt.operation_outcomes[0].error, "operation_failed")
 
     def test_first_declared_json_parse_failure_returns_not_started_with_verified_manifest_and_restart(self):
-        target = self.make_file("settings.json", '{"before": true}\n')
+        target = self.home / "settings.json"
+        target.write_bytes(b'{"before": true}\n')
+        target.chmod(0o640)
         base_plan = lifecycle_write_plan(target, b'{"before": true}\n', b'{"after": ', home=self.home)
         operation = replace(base_plan.operations[0], details={"parse": "json"})
         base_plan = replace(base_plan, operations=(operation,)).with_digest()
@@ -624,7 +636,9 @@ class TransactionTests(unittest.TestCase):
 
     def test_declared_json_parse_failure_after_completed_write_rolls_back_first(self):
         first = self.make_file("parse-first.txt", "before-one")
-        second = self.make_file("parse-second.json", '{"before": true}\n')
+        second = self.home / "parse-second.json"
+        second.write_bytes(b'{"before": true}\n')
+        second.chmod(0o640)
         first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
         second_plan = write_plan(second, b'{"before": true}\n', b'{"after": ', home=self.home, details={"parse": "json"})
         plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], second_plan.operations[0])).with_digest()
