@@ -104,6 +104,59 @@ class ClaudeAdapterTests(unittest.TestCase):
         self.assertEqual(write_ops[0].kind, OperationKind.WRITE_FILE)
         self.assertEqual(base64.b64decode(write_ops[0].postimage_base64 or ""), expected)
 
+    def test_compile_coalesces_distinct_balanced_blocks_in_one_write(self) -> None:
+        home = build_claude_fixture(self.temp_root)
+        target = home / ".claude" / "CLAUDE.md"
+        source = (
+            b"preamble\r\n"
+            b"<!-- gentle-ai:sdd-orchestrator -->\n"
+            b"managed orchestrator\n"
+            b"<!-- /gentle-ai:sdd-orchestrator -->\n"
+            b"between\n"
+            b"<!-- gentle-ai:sdd-apply -->\n"
+            b"managed apply\n"
+            b"<!-- /gentle-ai:sdd-apply -->\r\n"
+            b"tail-no-newline"
+        )
+        target.write_bytes(source)
+        expected = b"preamble\r\nbetween\ntail-no-newline"
+
+        inventory = build_inventory(context_for(home), (ClaudeAdapter(self.catalog),))
+        marker_candidates = [candidate for candidate in inventory.candidates if candidate.path == str(target)]
+        self.assertEqual(len(marker_candidates), 2)
+        self.assertTrue(all(candidate.ownership is Ownership.PROVEN for candidate in marker_candidates))
+
+        plan = build_plan(inventory, context_for(home), (ClaudeAdapter(self.catalog),))
+        write_ops = [operation for operation in plan.operations if operation.path == str(target)]
+
+        self.assertEqual(len(write_ops), 1)
+        self.assertEqual(write_ops[0].kind, OperationKind.WRITE_FILE)
+        self.assertEqual(base64.b64decode(write_ops[0].postimage_base64 or ""), expected)
+
+    def test_mixed_valid_and_malformed_markers_do_not_remove_any_sibling_block(self) -> None:
+        home = build_claude_fixture(self.temp_root)
+        target = home / ".claude" / "CLAUDE.md"
+        target.write_text(
+            "before\n"
+            "<!-- gentle-ai:sdd-orchestrator -->\n"
+            "managed valid block\n"
+            "<!-- /gentle-ai:sdd-orchestrator -->\n"
+            "middle\n"
+            "<!-- gentle-ai:sdd-apply -->\n"
+            "managed but unbalanced\n"
+            "after\n"
+        )
+
+        inventory = build_inventory(context_for(home), (ClaudeAdapter(self.catalog),))
+        marker_candidates = [candidate for candidate in inventory.candidates if candidate.path == str(target)]
+        plan = build_plan(inventory, context_for(home), (ClaudeAdapter(self.catalog),))
+
+        self.assertTrue(marker_candidates)
+        self.assertTrue(all(candidate.ownership is Ownership.AMBIGUOUS for candidate in marker_candidates))
+        self.assertTrue(all(candidate.proposed_action == "report_only" for candidate in marker_candidates))
+        self.assertTrue(all(candidate.candidate_id in plan.blocked_candidate_ids for candidate in marker_candidates))
+        self.assertFalse(any(operation.path == str(target) for operation in plan.operations))
+
     def test_malformed_markers_are_ambiguous_report_only(self) -> None:
         cases = {
             "missing_close": "before\n<!-- gentle-ai:sdd-orchestrator -->\nmanaged\n",

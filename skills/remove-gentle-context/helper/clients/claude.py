@@ -261,15 +261,23 @@ class ClaudeAdapter:
         matching = [block for block in blocks if block.identifier == identifier]
         if malformed or len(matching) != 1:
             return ()
-        block = matching[0]
-        postimage = content[: block.start] + content[block.end :]
+        if candidate.candidate_id != _marker_candidate_id(target, identifier):
+            return ()
+        if candidate.candidate_id != _marker_group_owner_candidate_id(target, blocks):
+            return ()
+        postimage = _remove_marker_blocks(content, blocks)
         return (
             Operation(
                 kind=OperationKind.WRITE_FILE,
                 path=candidate.path,
                 postimage_base64=base64.b64encode(postimage).decode("ascii"),
                 postimage_sha256=_sha256(postimage),
-                details={"content_type": "text/markdown", "operation": "remove_balanced_marker_block", "marker": marker},
+                details={
+                    "content_type": "text/markdown",
+                    "operation": "remove_balanced_marker_block",
+                    "marker": marker,
+                    "markers": tuple(f"gentle-ai:{block.identifier}" for block in blocks),
+                },
             ),
         )
 
@@ -355,6 +363,25 @@ def _analyze_marker_blocks(content: bytes) -> tuple[tuple[_Block, ...], tuple[_M
     if malformed:
         return (), tuple(_MalformedMarker(identifier, state) for identifier, state in sorted(malformed.items()))
     return tuple(blocks), ()
+
+
+def _marker_group_owner_candidate_id(target: Path, blocks: Sequence[_Block]) -> str:
+    return min(_marker_candidate_id(target, block.identifier) for block in blocks)
+
+
+def _marker_candidate_id(target: Path, identifier: str) -> str:
+    candidate_key = f"{CLIENT}\0marker:{identifier}\0{target.resolve(strict=False)}"
+    return "sha256:" + hashlib.sha256(candidate_key.encode("utf-8")).hexdigest()
+
+
+def _remove_marker_blocks(content: bytes, blocks: Sequence[_Block]) -> bytes:
+    postimage = bytearray()
+    cursor = 0
+    for block in sorted(blocks, key=lambda item: item.start):
+        postimage.extend(content[cursor : block.start])
+        cursor = block.end
+    postimage.extend(content[cursor:])
+    return bytes(postimage)
 
 
 def _end_after_line(index: int, content: bytes) -> int:
