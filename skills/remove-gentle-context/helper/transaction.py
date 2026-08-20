@@ -26,6 +26,9 @@ class OperationApplyError(RuntimeError):
         self.outcomes = outcomes
 
 
+_NOT_STARTED_PRE_MUTATION_ERROR_CODES = frozenset({"journal_append_failed", "apply_manifest_missing_entry"})
+
+
 def create_backup(plan: Plan, context: RuntimeContext) -> BackupManifest:
     plan_digest = _require_digest(plan.digest, "backup_plan_missing_digest")
     _assert_plan_root_map_matches_context(plan, context, "backup_plan_roots_mismatch")
@@ -321,10 +324,11 @@ def _failure_status(operation_outcomes: tuple[OperationOutcome, ...], rollback_o
 
 
 def _is_not_started_operation_failure(operation_outcomes: tuple[OperationOutcome, ...]) -> bool:
-    if any(outcome.status == "completed" for outcome in operation_outcomes):
+    completed = [outcome for outcome in operation_outcomes if outcome.status == "completed"]
+    if completed:
         return False
     failed = [outcome for outcome in operation_outcomes if outcome.status == "failed"]
-    return bool(failed) and all(outcome.error == "journal_append_failed" for outcome in failed)
+    return bool(failed) and all(outcome.error in _NOT_STARTED_PRE_MUTATION_ERROR_CODES for outcome in failed)
 
 
 def restore(manifest_path: Path, approval: str, context: RuntimeContext) -> Receipt:

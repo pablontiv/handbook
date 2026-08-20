@@ -872,6 +872,56 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(first.read_text(), "after-one")
         self.assertEqual(second.read_text(), "before-two")
 
+    def test_manifest_missing_first_entry_does_not_mutate_and_reports_not_started_with_verified_manifest(self):
+        target = self.make_file("manifest-missing-first.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        lifecycle = FakeTransactionLifecycle()
+
+        manifest = create_backup(plan, self.context)
+        tampered_manifest = replace(manifest, entries=()).with_digest()
+        manifest.path.write_text(json.dumps(tampered_manifest.to_dict(), sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+        with patch("helper.transaction.create_backup", return_value=tampered_manifest):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.status, ReceiptStatus.NOT_STARTED)
+        self.assertEqual(receipt.backup_manifest_path, tampered_manifest.path)
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "failed", "apply_manifest_missing_entry")],
+        )
+        manifest_data = json.loads(receipt.backup_manifest_path.read_text())
+        self.assertEqual(manifest_data["plan_digest"], plan.digest)
+        self.assertEqual(manifest_data["digest"], digest_json({key: value for key, value in manifest_data.items() if key != "digest"}))
+
+    def test_manifest_missing_first_entry_restart_failure_requires_manual_recovery(self):
+        target = self.make_file("manifest-missing-first-restart.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        lifecycle = FakeTransactionLifecycle(restart_succeeds=False)
+
+        manifest = create_backup(plan, self.context)
+        tampered_manifest = replace(manifest, entries=()).with_digest()
+        manifest.path.write_text(json.dumps(tampered_manifest.to_dict(), sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+        with patch("helper.transaction.create_backup", return_value=tampered_manifest):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
+        self.assertEqual(receipt.lifecycle_outcomes[-1].status, "failed")
+        self.assertEqual(receipt.lifecycle_outcomes[-1].code, "lifecycle_restart_failed")
+        self.assertEqual(receipt.backup_manifest_path, tampered_manifest.path)
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "failed", "apply_manifest_missing_entry")],
+        )
+        manifest_data = json.loads(receipt.backup_manifest_path.read_text())
+        self.assertEqual(manifest_data["plan_digest"], plan.digest)
+        self.assertEqual(manifest_data["digest"], digest_json({key: value for key, value in manifest_data.items() if key != "digest"}))
+
     def test_manifest_missing_second_entry_rolls_back_completed_first_and_restarts(self):
         first = self.make_file("manifest-missing-one.txt", "before-one")
         second = self.make_file("manifest-missing-two.txt", "before-two")
