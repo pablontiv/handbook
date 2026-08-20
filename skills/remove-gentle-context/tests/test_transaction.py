@@ -233,6 +233,14 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(receipt.inventory, inventory)
         return inventory, bound_plan, receipt
 
+    def assert_verified_manifest_for_plan(self, manifest_path: Path | None, plan: Plan) -> None:
+        self.assertIsNotNone(manifest_path)
+        assert manifest_path is not None
+        self.assertTrue(manifest_path.exists())
+        manifest_data = json.loads(manifest_path.read_text())
+        self.assertEqual(manifest_data["plan_digest"], plan.digest)
+        self.assertEqual(manifest_data["digest"], digest_json({key: value for key, value in manifest_data.items() if key != "digest"}))
+
     def execution_artifact_fixture(self) -> tuple[Path, Inventory, Plan, FakeTransactionLifecycle]:
         target = self.make_file("artifact-binding.txt", "before")
         inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
@@ -452,29 +460,137 @@ class TransactionTests(unittest.TestCase):
         self.assertIsNone(receipt.backup_manifest_path)
         self.assertEqual(receipt.operation_outcomes[0].error, "backup_failed")
 
-    def test_postimage_hash_mismatch_aborts_before_write(self):
+    def test_first_postimage_hash_mismatch_returns_not_started_with_verified_manifest_and_restart(self):
         target = self.make_file("config.json", "before")
         pre_b64, pre_digest = image(b"before")
         bad_post_b64 = base64.b64encode(b"after").decode("ascii")
-        plan = Plan(
+        base_plan = Plan(
             os_name="linux",
             home=str(self.home),
             operations=(Operation(kind=OperationKind.WRITE_FILE, path=str(target), preimage_base64=pre_b64, preimage_sha256=pre_digest, postimage_base64=bad_post_b64, postimage_sha256=sha256_bytes(b"different")),),
+            lifecycle_actions=(LifecycleAction(candidate_id="codex-config", client="codex", action="stop", target="codex", reason="quiesce before edit", details={"process_name": "codex", "restart_argv": ["/usr/bin/codex", "--foreground"]}),),
         ).with_digest()
+        inventory, plan = self.bind_plan(base_plan)
+        lifecycle = FakeTransactionLifecycle()
 
-        _inventory, plan, receipt = self.execute_bound(plan)
+        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
 
-        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertEqual(receipt.status, ReceiptStatus.NOT_STARTED)
         self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assert_verified_manifest_for_plan(receipt.backup_manifest_path, plan)
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "failed", "operation_postimage_digest_mismatch")],
+        )
 
-    def test_declared_json_parse_failure_aborts_before_replace(self):
-        target = self.make_file("settings.json", '{"before": true}\n')
-        plan = write_plan(target, b'{"before": true}\n', b'{"after": ', home=self.home, details={"parse": "json"})
+    def test_postimage_hash_mismatch_after_completed_write_rolls_back_first(self):
+        first = self.make_file("postimage-first.txt", "before-one")
+        second = self.make_file("postimage-second.txt", "before-two")
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        second_pre_b64, second_pre_digest = image(b"before-two")
+        bad_post_b64 = base64.b64encode(b"after-two").decode("ascii")
+        second_operation = Operation(kind=OperationKind.WRITE_FILE, path=str(second), preimage_base64=second_pre_b64, preimage_sha256=second_pre_digest, postimage_base64=bad_post_b64, postimage_sha256=sha256_bytes(b"different"))
+        plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], second_operation)).with_digest()
 
         _inventory, plan, receipt = self.execute_bound(plan)
 
         self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertEqual(first.read_text(), "before-one")
+        self.assertEqual(second.read_text(), "before-two")
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "completed", None), (1, "failed", "operation_postimage_digest_mismatch"), (0, "rolled_back", None)],
+        )
+
+    def test_first_postimage_hash_mismatch_with_restart_failure_requires_manual_recovery(self):
+        target = self.make_file("postimage-restart-failure.txt", "before")
+        pre_b64, pre_digest = image(b"before")
+        bad_post_b64 = base64.b64encode(b"after").decode("ascii")
+        base_plan = Plan(
+            os_name="linux",
+            home=str(self.home),
+            operations=(Operation(kind=OperationKind.WRITE_FILE, path=str(target), preimage_base64=pre_b64, preimage_sha256=pre_digest, postimage_base64=bad_post_b64, postimage_sha256=sha256_bytes(b"different")),),
+            lifecycle_actions=(LifecycleAction(candidate_id="codex-config", client="codex", action="stop", target="codex", reason="quiesce before edit", details={"process_name": "codex", "restart_argv": ["/usr/bin/codex", "--foreground"]}),),
+        ).with_digest()
+        inventory, plan = self.bind_plan(base_plan)
+        lifecycle = FakeTransactionLifecycle(restart_succeeds=False)
+
+        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(receipt.lifecycle_outcomes[-1].status, "failed")
+        self.assertEqual(receipt.operation_outcomes[0].error, "operation_postimage_digest_mismatch")
+
+    def test_postimage_hash_mismatch_after_completed_write_with_rollback_failure_requires_manual_recovery(self):
+        first = self.make_file("postimage-rollback-failure-first.txt", "before-one")
+        second = self.make_file("postimage-rollback-failure-second.txt", "before-two")
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        second_pre_b64, second_pre_digest = image(b"before-two")
+        bad_post_b64 = base64.b64encode(b"after-two").decode("ascii")
+        second_operation = Operation(kind=OperationKind.WRITE_FILE, path=str(second), preimage_base64=second_pre_b64, preimage_sha256=second_pre_digest, postimage_base64=bad_post_b64, postimage_sha256=sha256_bytes(b"different"))
+        plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], second_operation)).with_digest()
+        original_replace = os.replace
+
+        def fail_first_rollback(src, dst):
+            if Path(dst) == first and first.read_text() == "after-one":
+                raise OSError("injected rollback failure")
+            return original_replace(src, dst)
+
+        with patch("helper.transaction.os.replace", side_effect=fail_first_rollback):
+            _inventory, plan, receipt = self.execute_bound(plan)
+
+        self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
+        self.assertEqual(first.read_text(), "after-one")
+        self.assertEqual(second.read_text(), "before-two")
+        self.assertEqual(receipt.operation_outcomes[-1].status, "failed")
+
+    def test_first_generic_operation_failure_is_not_reported_not_started(self):
+        target = self.make_file("generic-replace-failure.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        lifecycle = FakeTransactionLifecycle()
+
+        with injected_replace_failure(target):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertNotEqual(receipt.status, ReceiptStatus.NOT_STARTED)
+        self.assertEqual(receipt.operation_outcomes[0].error, "operation_failed")
+
+    def test_first_declared_json_parse_failure_returns_not_started_with_verified_manifest_and_restart(self):
+        target = self.make_file("settings.json", '{"before": true}\n')
+        base_plan = lifecycle_write_plan(target, b'{"before": true}\n', b'{"after": ', home=self.home)
+        operation = replace(base_plan.operations[0], details={"parse": "json"})
+        base_plan = replace(base_plan, operations=(operation,)).with_digest()
+        inventory, plan = self.bind_plan(base_plan)
+        lifecycle = FakeTransactionLifecycle()
+
+        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(receipt.status, ReceiptStatus.NOT_STARTED)
         self.assertEqual(target.read_text(), '{"before": true}\n')
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assert_verified_manifest_for_plan(receipt.backup_manifest_path, plan)
+        self.assertEqual(receipt.operation_outcomes[0].error, "operation_parse_failed")
+
+    def test_declared_json_parse_failure_after_completed_write_rolls_back_first(self):
+        first = self.make_file("parse-first.txt", "before-one")
+        second = self.make_file("parse-second.json", '{"before": true}\n')
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        second_plan = write_plan(second, b'{"before": true}\n', b'{"after": ', home=self.home, details={"parse": "json"})
+        plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], second_plan.operations[0])).with_digest()
+
+        _inventory, plan, receipt = self.execute_bound(plan)
+
+        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertEqual(first.read_text(), "before-one")
+        self.assertEqual(second.read_text(), '{"before": true}\n')
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "completed", None), (1, "failed", "operation_parse_failed"), (0, "rolled_back", None)],
+        )
 
     def test_delete_unlink_failure_leaves_file_and_reports_manual_recovery_when_rollback_fails(self):
         first = self.make_file("first", "before-first")
@@ -574,6 +690,104 @@ class TransactionTests(unittest.TestCase):
 
         self.assertTrue(swapped)
         self.assertEqual(target.read_text(), "before")
+
+    def test_first_apply_preimage_drift_returns_not_started_with_verified_manifest_and_restart(self):
+        target = self.make_file("apply-preimage-drift-first.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        lifecycle = FakeTransactionLifecycle()
+        original_create_backup = create_backup
+
+        def drift_after_backup(plan_arg, context_arg):
+            manifest = original_create_backup(plan_arg, context_arg)
+            target.write_text("drift")
+            return manifest
+
+        with patch("helper.transaction.create_backup", side_effect=drift_after_backup):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(receipt.status, ReceiptStatus.NOT_STARTED)
+        self.assertEqual(target.read_text(), "drift")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assert_verified_manifest_for_plan(receipt.backup_manifest_path, plan)
+        self.assertEqual(receipt.operation_outcomes[0].error, "preflight_preimage_drift")
+
+    def test_apply_preimage_drift_after_completed_write_rolls_back_first(self):
+        first = self.make_file("apply-preimage-drift-one.txt", "before-one")
+        second = self.make_file("apply-preimage-drift-two.txt", "before-two")
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        second_plan = write_plan(second, b"before-two", b"after-two", home=self.home)
+        plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], second_plan.operations[0])).with_digest()
+        original_create_backup = create_backup
+
+        def drift_after_backup(plan_arg, context_arg):
+            manifest = original_create_backup(plan_arg, context_arg)
+            second.write_text("drift")
+            return manifest
+
+        with patch("helper.transaction.create_backup", side_effect=drift_after_backup):
+            _inventory, plan, receipt = self.execute_bound(plan)
+
+        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertEqual(first.read_text(), "before-one")
+        self.assertEqual(second.read_text(), "drift")
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "completed", None), (1, "failed", "preflight_preimage_drift"), (0, "rolled_back", None)],
+        )
+
+    def test_first_remove_directory_type_preguard_returns_not_started_with_verified_manifest_and_restart(self):
+        directory = self.home / "remove-dir-type-first"
+        directory.mkdir()
+        base_plan = Plan(
+            os_name="linux",
+            home=str(self.home),
+            operations=(Operation(kind=OperationKind.REMOVE_EMPTY_DIRECTORY, path=str(directory)),),
+            lifecycle_actions=(LifecycleAction(candidate_id="codex-config", client="codex", action="stop", target="codex", reason="quiesce before edit", details={"process_name": "codex", "restart_argv": ["/usr/bin/codex", "--foreground"]}),),
+        ).with_digest()
+        inventory, plan = self.bind_plan(base_plan)
+        lifecycle = FakeTransactionLifecycle()
+        original_create_backup = create_backup
+
+        def replace_directory_after_backup(plan_arg, context_arg):
+            manifest = original_create_backup(plan_arg, context_arg)
+            directory.rmdir()
+            directory.write_text("not a directory")
+            return manifest
+
+        with patch("helper.transaction.create_backup", side_effect=replace_directory_after_backup):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(receipt.status, ReceiptStatus.NOT_STARTED)
+        self.assertEqual(directory.read_text(), "not a directory")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assert_verified_manifest_for_plan(receipt.backup_manifest_path, plan)
+        self.assertEqual(receipt.operation_outcomes[0].error, "operation_not_directory")
+
+    def test_remove_directory_type_preguard_after_completed_write_rolls_back_first(self):
+        first = self.make_file("remove-dir-type-one.txt", "before-one")
+        directory = self.home / "remove-dir-type-two"
+        directory.mkdir()
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        remove_operation = remove_empty_dir_plan(directory, home=self.home).operations[0]
+        plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], remove_operation)).with_digest()
+        original_create_backup = create_backup
+
+        def replace_directory_after_backup(plan_arg, context_arg):
+            manifest = original_create_backup(plan_arg, context_arg)
+            directory.rmdir()
+            directory.write_text("not a directory")
+            return manifest
+
+        with patch("helper.transaction.create_backup", side_effect=replace_directory_after_backup):
+            _inventory, plan, receipt = self.execute_bound(plan)
+
+        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertEqual(first.read_text(), "before-one")
+        self.assertEqual(directory.read_text(), "not a directory")
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "completed", None), (1, "failed", "operation_not_directory"), (0, "rolled_back", None)],
+        )
 
     def test_manifest_tamper_is_rejected_by_restore_digest(self):
         target = self.make_file("restore.txt", "before")
@@ -708,21 +922,47 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(second.read_text(), "replacement-two")
         self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
 
-    def test_nonempty_directory_refusal_and_empty_directory_removal(self):
+    def test_first_nonempty_directory_refusal_returns_not_started_with_stable_code_verified_manifest_and_restart(self):
         directory = self.home / "dir"
         directory.mkdir()
         (directory / "child").write_text("x")
-        plan = remove_empty_dir_plan(directory, home=self.home)
+        base_plan = Plan(
+            os_name="linux",
+            home=str(self.home),
+            operations=(Operation(kind=OperationKind.REMOVE_EMPTY_DIRECTORY, path=str(directory)),),
+            lifecycle_actions=(LifecycleAction(candidate_id="codex-config", client="codex", action="stop", target="codex", reason="quiesce before edit", details={"process_name": "codex", "restart_argv": ["/usr/bin/codex", "--foreground"]}),),
+        ).with_digest()
+        inventory, plan = self.bind_plan(base_plan)
+        lifecycle = FakeTransactionLifecycle()
+
+        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(receipt.status, ReceiptStatus.NOT_STARTED)
+        self.assertTrue(directory.exists())
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assert_verified_manifest_for_plan(receipt.backup_manifest_path, plan)
+        self.assertEqual(receipt.operation_outcomes[0].error, "operation_directory_not_empty")
+
+        (directory / "child").unlink()
+        _inventory, plan, receipt = self.execute_bound(remove_empty_dir_plan(directory, home=self.home))
+        self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
+        self.assertFalse(directory.exists())
+
+    def test_nonempty_directory_refusal_after_completed_write_rolls_back_first(self):
+        first = self.make_file("nonempty-before-dir.txt", "before-one")
+        directory = self.home / "nonempty-second-dir"
+        directory.mkdir()
+        (directory / "child").write_text("x")
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        remove_operation = remove_empty_dir_plan(directory, home=self.home).operations[0]
+        plan = Plan(os_name="linux", home=str(self.home), operations=(first_plan.operations[0], remove_operation)).with_digest()
 
         _inventory, plan, receipt = self.execute_bound(plan)
 
         self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertEqual(first.read_text(), "before-one")
         self.assertTrue(directory.exists())
-
-        (directory / "child").unlink()
-        _inventory, plan, receipt = self.execute_bound(plan)
-        self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
-        self.assertFalse(directory.exists())
+        self.assertEqual(receipt.operation_outcomes[1].error, "operation_directory_not_empty")
 
     def test_shutdown_drift_after_graceful_stop_aborts_before_backup_or_mutation_and_restarts(self):
         target = self.make_file(".codex/config.toml", "before")

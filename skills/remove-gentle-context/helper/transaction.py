@@ -26,7 +26,22 @@ class OperationApplyError(RuntimeError):
         self.outcomes = outcomes
 
 
-_NOT_STARTED_PRE_MUTATION_ERROR_CODES = frozenset({"journal_append_failed", "apply_manifest_missing_entry"})
+_NOT_STARTED_PRE_MUTATION_ERROR_CODES = frozenset(
+    {
+        "apply_manifest_missing_entry",
+        "journal_append_failed",
+        "operation_directory_not_empty",
+        "operation_invalid_embedded_image",
+        "operation_not_directory",
+        "operation_parse_failed",
+        "operation_postimage_digest_mismatch",
+        "preflight_parent_missing",
+        "preflight_path_escape",
+        "preflight_preimage_digest_mismatch",
+        "preflight_preimage_drift",
+        "preflight_unexpected_link",
+    }
+)
 
 
 def create_backup(plan: Plan, context: RuntimeContext) -> BackupManifest:
@@ -432,7 +447,12 @@ def _apply_remove_empty_directory(operation: Operation, entry: BackupEntry, cont
     st = _safe_lstat(target)
     if not stat.S_ISDIR(st.st_mode):
         raise ValueError("operation_not_directory")
-    os.rmdir(target)
+    try:
+        os.rmdir(target)
+    except OSError as exc:
+        if exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+            raise ValueError("operation_directory_not_empty") from exc
+        raise
     _fsync_directory(target.parent)
 
 
