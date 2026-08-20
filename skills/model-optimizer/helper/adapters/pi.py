@@ -119,8 +119,26 @@ def _auth_type_or_none(value: Any) -> str | None:
     return value
 
 
-def _agent_dir(home: Path) -> Path:
+def pi_global_agent_dir(home: Path, environ: Mapping[str, str] | None = None) -> Path:
+    configured = (environ or {}).get("PI_CODING_AGENT_DIR")
+    if configured:
+        return Path(configured).expanduser()
     return home / ".pi" / "agent"
+
+
+def pi_project_config_dir(cwd: Path) -> Path:
+    return cwd / ".pi"
+
+
+def pi_project_subagents_path(cwd: Path) -> Path:
+    primary = pi_project_config_dir(cwd) / "subagents.json"
+    if primary.exists():
+        return primary
+    return cwd / ".pi" / "agent" / "subagents.json"
+
+
+def _agent_dir(home: Path, environ: Mapping[str, str] | None = None) -> Path:
+    return pi_global_agent_dir(home, environ)
 
 
 def _project_agent_dir(cwd: Path) -> Path:
@@ -428,8 +446,8 @@ class PiAdapter:
             options = {"thinking": env_thinking} if env_thinking else {}
             assignments.append(CurrentAssignment("current", env_exact, options, "env"))
 
-        global_dir = _agent_dir(context.home)
-        project_dir = _project_agent_dir(context.cwd)
+        global_dir = _agent_dir(context.home, context.env)
+        project_subagents_path = pi_project_subagents_path(context.cwd)
 
         settings_path = global_dir / "settings.json"
         settings, warning = _load_json(settings_path)
@@ -447,8 +465,7 @@ class PiAdapter:
 
         merged_profiles: dict[str, Mapping[str, Any]] = {}
         source_by_agent: dict[str, str] = {}
-        for scope, directory in (("global", global_dir), ("project", project_dir)):
-            subagents_path = directory / "subagents.json"
+        for scope, subagents_path in (("global", global_dir / "subagents.json"), ("project", project_subagents_path)):
             data, warning = _load_json(subagents_path)
             sources.append(_source_label(scope, "subagents.json", subagents_path.exists()))
             if warning:
@@ -489,7 +506,7 @@ class PiAdapter:
         if not records:
             self._warn("inventory_list_models_empty")
         for filename in _METADATA_FILENAMES:
-            self._merge_metadata_file(records, _agent_dir(context.home) / filename, filename)
+            self._merge_metadata_file(records, _agent_dir(context.home, context.env) / filename, filename)
         return tuple(records[exact_id] for exact_id in records)
 
     def check_readiness(self, providers: Sequence[str], context: RuntimeContext) -> tuple[ProviderReadiness, ...]:

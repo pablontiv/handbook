@@ -342,6 +342,29 @@ ok-provider     ok-model    1K       2K       yes       no
         self.assertIn("global:settings.json", snapshot.sources)
         self.assertIn("project:subagents.json", snapshot.sources)
 
+    def test_snapshot_uses_configured_global_root_and_project_pi_subagents_json(self):
+        global_root = self.root / "custom-pi-agent"
+        global_root.mkdir()
+        (global_root / "settings.json").write_text(json.dumps({
+            "defaultProvider": "openai-codex",
+            "defaultModel": "gpt-5.6-terra",
+        }), encoding="utf-8")
+        project_pi = self.context.cwd / ".pi"
+        project_pi.mkdir()
+        (project_pi / "subagents.json").write_text(json.dumps({
+            "model_profiles": {"worker": {"model": "nan-builders/qwen3.6", "effort": "medium"}}
+        }), encoding="utf-8")
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"PI_CODING_AGENT_DIR": str(global_root)})
+
+        snapshot = PiAdapter(FakeRunner.stdout("0.84.2\n")).snapshot(context)
+
+        by_agent = {assignment.agent: assignment for assignment in snapshot.current_assignments}
+        self.assertEqual(by_agent["default"].model, "openai-codex/gpt-5.6-terra")
+        self.assertEqual(by_agent["worker"].model, "nan-builders/qwen3.6")
+        self.assertEqual(by_agent["worker"].source, "project:subagents.json")
+        self.assertIn("global:settings.json", snapshot.sources)
+        self.assertIn("project:subagents.json", snapshot.sources)
+
     def test_list_models_malformed_metadata_warns_and_preserves_listing(self):
         copy_pi_fixtures_to_home(self.root)
         store = self.root / ".pi" / "agent" / "models-store.json"

@@ -337,6 +337,24 @@ openai/gpt-second
         self.assertEqual(by_agent["reviewer"].options, {"temperature": 0.1})
         self.assertIn("project:opencode.json", snapshot.sources)
 
+    def test_snapshot_honors_xdg_config_home_for_global_opencode_json(self):
+        xdg = self.root / "xdg"
+        global_config = xdg / "opencode" / "opencode.json"
+        assert_test_path(global_config, self.root)
+        global_config.parent.mkdir(parents=True)
+        global_config.write_text(json.dumps({
+            "agent": {"scout": {"model": "openai/gpt-5.6-terra", "variant": "high"}}
+        }), encoding="utf-8")
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"XDG_CONFIG_HOME": str(xdg)})
+
+        snapshot = OpenCodeAdapter(FakeRunner.stdout("1.18.18\n")).snapshot(context)
+
+        scout = next(item for item in snapshot.current_assignments if item.agent == "scout")
+        self.assertEqual(scout.model, "openai/gpt-5.6-terra")
+        self.assertEqual(scout.options, {"variant": "high"})
+        self.assertEqual(scout.source, "global:opencode.json")
+        self.assertIn("global:opencode.json", snapshot.sources)
+
     def test_project_config_does_not_inherit_absent_global_options(self):
         global_config = self.root / ".config" / "opencode" / "opencode.json"
         assert_test_path(global_config, self.root)

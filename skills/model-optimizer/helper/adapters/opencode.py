@@ -489,10 +489,21 @@ def _load_json(path: Path) -> tuple[Any | None, str | None]:
         return None, f"inventory_unreadable_source:{path.name}"
 
 
+def opencode_global_config_dir(home: Path, environ: Mapping[str, str] | None = None) -> Path:
+    xdg_config_home = (environ or {}).get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home).expanduser() / "opencode"
+    return home / ".config" / "opencode"
+
+
+def opencode_project_config_path(cwd: Path) -> Path:
+    return cwd / "opencode.json"
+
+
 def _config_paths(context: RuntimeContext) -> tuple[tuple[str, Path], ...]:
     return (
-        ("global", context.home / ".config" / "opencode" / "opencode.json"),
-        ("project", context.cwd / "opencode.json"),
+        ("global", opencode_global_config_dir(context.home, context.env) / "opencode.json"),
+        ("project", opencode_project_config_path(context.cwd)),
     )
 
 
