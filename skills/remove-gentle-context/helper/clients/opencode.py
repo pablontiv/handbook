@@ -131,7 +131,7 @@ class OpenCodeAdapter:
             kind = OperationKind(str(outcome.kind))
             if kind == OperationKind.DELETE_FILE and (target.exists() or target.is_symlink()):
                 raise ValueError("verify_delete_file_still_present")
-            if kind == OperationKind.WRITE_FILE:
+            if kind == OperationKind.WRITE_FILE and target in {config_path, tui_path}:
                 _load_json_object(target)
         return tuple(receipt.checks)
 

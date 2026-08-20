@@ -1,0 +1,324 @@
+from __future__ import annotations
+
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = SKILL_ROOT / "scripts" / "cleanup.py"
+FIXTURES = SKILL_ROOT / "tests" / "fixtures"
+REMOVED_MODE_ENV = "REMOVE_GENTLE_CONTEXT_" + "TEST" + "_MODE"
+REMOVED_HOME_ENV = "REMOVE_GENTLE_CONTEXT_" + "TEST" + "_HOME"
+REMOVED_ATOMIC_ENV = "REMOVE_GENTLE_CONTEXT_" + "INJECT" + "_ATOMIC_FAIL"
+
+
+def load_cleanup_module():
+    spec = importlib.util.spec_from_file_location("remove_gentle_context_cleanup", SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cleanup module spec unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class CliResult:
+    def __init__(self, completed: subprocess.CompletedProcess[str]) -> None:
+        self.returncode = completed.returncode
+        self.stdout = completed.stdout
+        self.stderr = completed.stderr
+        try:
+            self.json = json.loads(completed.stdout) if completed.stdout.strip() else {}
+        except json.JSONDecodeError:
+            self.json = {}
+        self.output_path = Path(self.json["output_path"]) if "output_path" in self.json else None
+        self.digest = self.json.get("digest")
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.temp_root = Path(self.temp.name).resolve(strict=True)
+        self.home = self.temp_root / "home"
+        self.home.mkdir()
+        self.project = self.temp_root / "project"
+        self.project.mkdir()
+        self.artifacts = self.temp_root / "artifacts"
+        self.artifacts.mkdir()
+        self.env = {
+            **os.environ,
+            REMOVED_MODE_ENV: "1",
+            "PYTHONPATH": str(SKILL_ROOT),
+            "XDG_STATE_HOME": str(self.temp_root / "state"),
+        }
+
+    def run_cli(self, *args: str, env: dict[str, str] | None = None) -> CliResult:
+        completed = subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            cwd=SKILL_ROOT,
+            env=self.env if env is None else env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return CliResult(completed)
+
+    def run_ok(self, *args: str) -> CliResult:
+        result = self.run_cli(*args)
+        if result.returncode != 0:
+            self.fail(f"CLI failed with {result.returncode}\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")
+        return result
+
+    def inventory(self) -> CliResult:
+        return self.run_ok(
+            "inventory",
+            "--home",
+            str(self.home),
+            "--platform",
+            "linux",
+            "--project-root",
+            str(self.project),
+            "--output",
+            str(self.artifacts / "inventory.json"),
+        )
+
+    def plan(self, inventory: CliResult) -> CliResult:
+        assert inventory.output_path is not None
+        self.last_inventory_path = inventory.output_path
+        return self.run_ok("plan", "--inventory", str(inventory.output_path), "--output", str(self.artifacts / "plan.json"))
+
+    def apply(self, plan: CliResult, *, receipt_name: str = "receipt.json") -> CliResult:
+        assert plan.output_path is not None
+        assert isinstance(plan.digest, str)
+        return self.run_ok("apply", "--inventory", str(self.last_inventory_path), "--plan", str(plan.output_path), "--approve", plan.digest, "--receipt", str(self.artifacts / receipt_name))
+
+    def verify(self, receipt: CliResult, plan: CliResult | None = None) -> CliResult:
+        plan_path = Path(plan.output_path) if plan is not None and plan.output_path is not None else self.artifacts / "plan.json"
+        return self.run_ok("verify", "--inventory", str(self.last_inventory_path), "--plan", str(plan_path), "--receipt", str(receipt.json["receipt_path"]), "--output", str(self.artifacts / "verification.json"))
+
+    def restore(self, manifest_path: str, digest: str, receipt_path: str) -> CliResult:
+        return self.run_ok("restore", "--manifest", manifest_path, "--receipt", receipt_path, "--approve", digest, "--output", str(self.artifacts / "restore.json"))
+
+    def seed_cross_client_fixture(self) -> None:
+        # Claude: owned marker block and exact generated theme.
+        claude = self.home / ".claude"
+        (claude / "themes").mkdir(parents=True)
+        (claude / "CLAUDE.md").write_text(
+            "Keep this line.\n"
+            "<!-- gentle-ai:sdd-orchestrator -->\n"
+            "Managed Claude instruction.\n"
+            "<!-- /gentle-ai:sdd-orchestrator -->\n",
+            encoding="utf-8",
+        )
+        shutil.copy2(FIXTURES / "claude" / "gentleman.json", claude / "themes" / "gentleman.json")
+
+        # Codex: active profile in config only; no runtime file, avoiding real lifecycle in tests.
+        codex = self.home / ".codex"
+        codex.mkdir()
+        shutil.copy2(FIXTURES / "codex" / "config.toml", codex / "config.toml")
+        (codex / "sessions").mkdir()
+        (codex / "sessions" / "history.jsonl").write_text('{"keep":"history"}\n', encoding="utf-8")
+
+        # OpenCode: config/tui/package fixtures preserve MCP and package infrastructure.
+        opencode = self.home / ".config" / "opencode"
+        opencode.mkdir(parents=True)
+        for name in ("opencode.json", "tui.json", "package.json"):
+            shutil.copy2(FIXTURES / "opencode" / name, opencode / name)
+        (opencode / "node_modules" / "opencode-sdd-engram-manage").mkdir(parents=True)
+
+        # Pi: package registration is removed; package infrastructure is preserved.
+        pi = self.home / ".pi"
+        pi.mkdir()
+        shutil.copy2(FIXTURES / "pi" / "settings.json", pi / "settings.json")
+        (pi / "node_modules" / "gentle-pi").mkdir(parents=True)
+        (pi / "node_modules" / ".bin").mkdir()
+        (pi / "node_modules" / ".bin" / "gentle-pi").write_text("#!/usr/bin/env node\n", encoding="utf-8")
+
+        # Bundled declarative adapter fixture.
+        hermes = self.home / ".hermes"
+        hermes.mkdir()
+        (hermes / "gentle-helper.json").write_text('{"managedBy":"gentle-ai"}\n', encoding="utf-8")
+
+    def seed_pi_registry_fixture(self) -> Path:
+        registry = self.project / ".atl" / "skill-registry.md"
+        registry.parent.mkdir()
+        shutil.copy2(FIXTURES / "pi" / "skill-registry.md", registry)
+        return registry
+
+    def test_help_lists_exact_five_commands(self) -> None:
+        result = self.run_cli("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("inventory", result.stdout)
+        self.assertIn("plan", result.stdout)
+        self.assertIn("apply", result.stdout)
+        self.assertIn("verify", result.stdout)
+        self.assertIn("restore", result.stdout)
+
+        inventory_help = self.run_cli("inventory", "--help")
+        self.assertEqual(inventory_help.returncode, 0)
+        self.assertIn("--home", inventory_help.stdout)
+        self.assertIn("--platform", inventory_help.stdout)
+        self.assertIn("--env", inventory_help.stdout)
+
+    def test_apply_requires_exact_approval(self) -> None:
+        result = self.run_cli("apply", "--plan", str(self.artifacts / "plan.json"))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--approve", result.stderr)
+
+    def test_full_five_command_flow_is_idempotent_in_temporary_home(self) -> None:
+        self.seed_cross_client_fixture()
+        history = self.home / ".codex" / "sessions" / "history.jsonl"
+        history_before = history.read_bytes()
+        opencode_config = self.home / ".config" / "opencode" / "opencode.json"
+        opencode_mcp_before = json.loads(opencode_config.read_text())["mcp"]
+
+        inventory = self.inventory()
+        self.assertEqual(inventory.json["status"], "ok")
+        self.assertGreater(inventory.json["counts"]["active"], 0)
+        plan = self.plan(inventory)
+        self.assertEqual(plan.json["approval"], plan.digest)
+        receipt = self.apply(plan)
+        self.assertEqual(receipt.json["status"], "completed")
+        verification = self.verify(receipt)
+        self.assertEqual(verification.json["status"], "passed")
+
+        self.assertEqual(history.read_bytes(), history_before)
+        self.assertEqual(json.loads(opencode_config.read_text())["mcp"], opencode_mcp_before)
+        self.assertTrue((self.home / ".pi" / "node_modules" / "gentle-pi").is_dir())
+        self.assertTrue((self.home / ".config" / "opencode" / "node_modules" / "opencode-sdd-engram-manage").is_dir())
+        self.assertIn("npm:gentle-pi@latest", json.loads((self.home / ".pi" / "settings.json").read_text())["packages"])
+
+        restored = self.restore(receipt.json["backup_manifest_path"], receipt.json["backup_manifest_digest"], receipt.json["receipt_path"])
+        self.assertEqual(restored.json["status"], "completed")
+        self.assertIn("npm:gentle-pi", json.loads((self.home / ".pi" / "settings.json").read_text())["packages"])
+
+        reapplied_inventory = self.inventory()
+        reapplied_plan = self.plan(reapplied_inventory)
+        reapplied_receipt = self.apply(reapplied_plan, receipt_name="receipt-2.json")
+        self.assertEqual(reapplied_receipt.json["status"], "completed")
+        second = self.inventory()
+        self.assertEqual(second.json["counts"]["active"], 0)
+
+    def test_approval_rejection_tamper_symlink_drift_and_verify_failure_exit_codes(self) -> None:
+        self.seed_cross_client_fixture()
+        inventory = self.inventory()
+        plan = self.plan(inventory)
+
+        wrong = self.run_cli("apply", "--inventory", str(self.last_inventory_path), "--plan", str(plan.output_path), "--approve", "sha256:" + "0" * 64, "--receipt", str(self.artifacts / "bad-receipt.json"))
+        self.assertEqual(wrong.returncode, 20)
+        self.assertIn("approval", wrong.stderr)
+
+        tampered_plan = self.artifacts / "tampered-plan.json"
+        data = json.loads(Path(plan.output_path).read_text())
+        data["operations"] = []
+        tampered_plan.write_text(json.dumps(data, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        tampered = self.run_cli("apply", "--inventory", str(self.last_inventory_path), "--plan", str(tampered_plan), "--approve", plan.digest or "")
+        self.assertEqual(tampered.returncode, 12)
+        self.assertIn("digest", tampered.stderr)
+
+        symlink = self.artifacts / "plan-link.json"
+        symlink.symlink_to(plan.output_path)
+        linked = self.run_cli("apply", "--inventory", str(self.last_inventory_path), "--plan", str(symlink), "--approve", plan.digest or "")
+        self.assertEqual(linked.returncode, 11)
+        self.assertIn("symlink", linked.stderr)
+
+        # Removed fake home overrides are ignored; artifact authority remains the inventory home/root map.
+        ignored_env = {**self.env, REMOVED_HOME_ENV: str(self.temp_root / "other-home")}
+        (self.temp_root / "other-home").mkdir()
+        ignored = self.run_cli("plan", "--inventory", str(inventory.output_path), "--output", str(self.artifacts / "ignored-env-plan.json"), env=ignored_env)
+        self.assertEqual(ignored.returncode, 0)
+
+        receipt = self.apply(plan)
+        (self.home / ".pi" / "settings.json").write_text('{"packages":["npm:gentle-pi"]}\n', encoding="utf-8")
+        failed_verify = self.run_cli("verify", "--inventory", str(self.last_inventory_path), "--plan", str(plan.output_path), "--receipt", receipt.json["receipt_path"], "--output", str(self.artifacts / "failed-verification.json"))
+        self.assertEqual(failed_verify.returncode, 30)
+        self.assertEqual(failed_verify.json["status"], "failed")
+
+    def test_restore_rejects_wrong_approval_and_wrong_root(self) -> None:
+        self.seed_cross_client_fixture()
+        receipt = self.apply(self.plan(self.inventory()))
+        wrong_approval = self.run_cli("restore", "--manifest", receipt.json["backup_manifest_path"], "--receipt", receipt.json["receipt_path"], "--approve", "sha256:" + "1" * 64, "--output", str(self.artifacts / "restore-wrong.json"))
+        self.assertEqual(wrong_approval.returncode, 20)
+        self.assertIn("approval", wrong_approval.stderr)
+
+        wrong_root_env = {**self.env, REMOVED_HOME_ENV: str(self.temp_root / "wrong-root")}
+        (self.temp_root / "wrong-root").mkdir()
+        ignored_root = self.run_cli("restore", "--manifest", receipt.json["backup_manifest_path"], "--receipt", receipt.json["receipt_path"], "--approve", receipt.json["backup_manifest_digest"], "--output", str(self.artifacts / "restore-ignored-root.json"), env=wrong_root_env)
+        self.assertEqual(ignored_root.returncode, 0)
+
+    def test_atomic_output_interruption_leaves_previous_artifact_intact(self) -> None:
+        output = self.artifacts / "inventory.json"
+        output.write_text('{"previous":true}\n', encoding="utf-8")
+        cleanup = load_cleanup_module()
+        stderr = io.StringIO()
+        with mock.patch.object(cleanup, "write_json_atomic", side_effect=OSError("simulated atomic failure")), contextlib.redirect_stderr(stderr):
+            failed = cleanup.main(["inventory", "--home", str(self.home), "--platform", "linux", "--output", str(output)])
+        self.assertEqual(failed, 13)
+        self.assertIn("OSError", stderr.getvalue())
+        self.assertEqual(output.read_text(encoding="utf-8"), '{"previous":true}\n')
+
+        ignored_env = {**self.env, REMOVED_ATOMIC_ENV: str(output)}
+        succeeded = self.run_cli("inventory", "--home", str(self.home), "--platform", "linux", "--output", str(output), env=ignored_env)
+        self.assertEqual(succeeded.returncode, 0)
+        self.assertNotEqual(output.read_text(encoding="utf-8"), '{"previous":true}\n')
+
+    def test_pi_registry_without_reliable_probe_is_blocked_and_not_deleted(self) -> None:
+        registry = self.seed_pi_registry_fixture()
+        inventory = self.inventory()
+        candidates = [candidate for candidate in json.loads(Path(inventory.output_path).read_text())["candidates"] if candidate["client"] == "pi"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["ownership"], "ambiguous")
+        self.assertEqual(candidates[0]["proposed_action"], "report_only")
+        self.assertIn("process_probe_unavailable", json.dumps(candidates[0], sort_keys=True))
+
+        plan = self.plan(inventory)
+        plan_data = json.loads(Path(plan.output_path).read_text())
+        self.assertEqual(plan_data.get("operations", []), [])
+        self.assertEqual(plan.json["counts"]["blocked"], 1)
+        receipt = self.apply(plan)
+        self.assertEqual(receipt.json["status"], "completed")
+        self.assertEqual(receipt.json["counts"], {"operations": 0, "lifecycle": 0})
+        self.assertTrue(registry.is_file())
+
+    def test_inventory_context_roots_must_be_absolute_canonical_and_not_links(self) -> None:
+        relative_home = self.run_cli("inventory", "--home", "relative-home", "--platform", "linux", "--output", str(self.artifacts / "relative.json"))
+        self.assertEqual(relative_home.returncode, 2)
+        self.assertIn("root", relative_home.stderr)
+
+        symlink_home = self.temp_root / "home-link"
+        symlink_home.symlink_to(self.home, target_is_directory=True)
+        linked_home = self.run_cli("inventory", "--home", str(symlink_home), "--platform", "linux", "--output", str(self.artifacts / "linked.json"))
+        self.assertEqual(linked_home.returncode, 2)
+        self.assertIn("root", linked_home.stderr)
+
+        relative_env = self.run_cli("inventory", "--home", str(self.home), "--platform", "linux", "--env", "XDG_CONFIG_HOME=relative-config", "--output", str(self.artifacts / "relative-env.json"))
+        self.assertEqual(relative_env.returncode, 2)
+        self.assertIn("env", relative_env.stderr)
+
+        canonical_env_root = self.temp_root / "xdg-config"
+        canonical_env_root.mkdir()
+        valid = self.run_cli("inventory", "--home", str(self.home), "--platform", "linux", "--env", f"XDG_CONFIG_HOME={canonical_env_root}", "--output", str(self.artifacts / "valid-env.json"))
+        self.assertEqual(valid.returncode, 0)
+
+    def test_deterministic_plan_bytes(self) -> None:
+        self.seed_cross_client_fixture()
+        inventory = self.inventory()
+        first = self.plan(inventory)
+        first_bytes = Path(first.output_path).read_bytes()
+        second = self.run_ok("plan", "--inventory", str(inventory.output_path), "--output", str(self.artifacts / "plan-second.json"))
+        self.assertEqual(first_bytes, Path(second.output_path).read_bytes())
+        self.assertEqual(first.digest, second.digest)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -612,11 +612,17 @@ def _write_file_atomic(path: Path, content: bytes, *, mode: int) -> None:
             raise
 
 
-def _write_json_atomic(path: Path, data: dict[str, object], *, mode: int) -> None:
+def write_json_atomic(path: Path, data: dict[str, object], *, mode: int = 0o600) -> None:
+    """Write a JSON artifact with same-directory temp, fsync, and atomic replace."""
+
     content = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     # Validate the declared JSON before replacement.
     json.loads(content.decode("utf-8"))
     _write_file_atomic(path, content, mode=mode)
+
+
+def _write_json_atomic(path: Path, data: dict[str, object], *, mode: int) -> None:
+    write_json_atomic(path, data, mode=mode)
 
 
 def _append_journal(manifest: BackupManifest, transition: str, operation_index: int, operation: Operation | None, *, status: str | None = None, error: str | None = None) -> None:
