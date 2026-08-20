@@ -115,16 +115,21 @@ def classify_exact_file_ownership(
 
 def gentle_corroboration(rule_data: Mapping[str, Any], text: str, digest: str, catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
+    # Declared content signatures are the exclusive corroboration path: drift
+    # must not fall back to a generic marker or generated-file signature.
+    signatures = tuple(rule_data.get("content_signatures", ()))
+    if signatures:
+        for signature in signatures:
+            signature_value = signature.get("value")
+            if isinstance(signature_value, str) and normalize_digest(signature_value) == digest:
+                evidence.append({"kind": "content_signature", "label": signature.get("label", "sha256"), "value": digest})
+        return evidence
     marker_prefix = catalog.get("marker_prefix")
     if isinstance(marker_prefix, str) and marker_prefix:
         evidence.extend(recognized_managed_marker_evidence(text, marker_prefix))
     registry_signature = catalog.get("generated_registry_signature")
     if isinstance(registry_signature, str) and registry_signature in text:
         evidence.append({"kind": "generated_registry_signature", "value": registry_signature})
-    for signature in rule_data.get("content_signatures", ()):
-        signature_value = signature.get("value")
-        if isinstance(signature_value, str) and normalize_digest(signature_value) == digest:
-            evidence.append({"kind": "content_signature", "label": signature.get("label", "sha256"), "value": digest})
     return evidence
 
 

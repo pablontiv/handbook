@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "engram": {
+      "args": [
+        "mcp",
+        "--tools=agent"
+      ],
+      "command": "/opt/homebrew/bin/engram"
+    }
+  },
+  "theme": "gentleman"
+}

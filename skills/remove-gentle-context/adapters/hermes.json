@@ -196,6 +196,383 @@
       "catalog_name": "sdd-verify",
       "artifact_class": "historical",
       "proposed_action": "report_only"
+    },
+    {
+      "id": "current-hermes-soul-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "SOUL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:3beb591cbd7b693c872bc1732f12cc3064580d5b0e5aec2f94a3bfb5e620697d",
+          "label": "current-installer/hermes/.hermes/SOUL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-config-yaml",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "config.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:d5c2c840a01357126cc0a746a3ebec48b1dfc4de662dbc624996bb37163758a7",
+          "label": "current-installer/hermes/.hermes/config.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-shared-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/_shared/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:f28af4e2d94fac13f82a0d2be61af30fa6ae8739b99385ddd4cd3e85abaef648",
+          "label": "current-installer/hermes/.hermes/skills/_shared/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-shared-engram-convention-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/_shared/engram-convention.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:03309724fbf6c54241f8df8baf24fd06a1fb5ea569b1aff8883ce460dc51607a",
+          "label": "current-installer/hermes/.hermes/skills/_shared/engram-convention.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-shared-openspec-convention-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/_shared/openspec-convention.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:d8243687abe4d27323839936147633e3cde48356d922aa74fc6008e85689ee65",
+          "label": "current-installer/hermes/.hermes/skills/_shared/openspec-convention.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-shared-persistence-contract-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/_shared/persistence-contract.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:d74a38af1b37da298a51e9d2de2fffa4dd4e9ff584851d748dcec69bf67423c3",
+          "label": "current-installer/hermes/.hermes/skills/_shared/persistence-contract.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-shared-review-ledger-contract-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/_shared/review-ledger-contract.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:ddeb6349d4de96203d8beee640fcb688a652b0e514a9f176264e59fd2f8e1c97",
+          "label": "current-installer/hermes/.hermes/skills/_shared/review-ledger-contract.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-shared-sdd-phase-common-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/_shared/sdd-phase-common.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:2c9585ef7e2406ce80203d5511442f7a9c61ff508801ac013d01b64077ec1850",
+          "label": "current-installer/hermes/.hermes/skills/_shared/sdd-phase-common.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-shared-sdd-status-contract-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/_shared/sdd-status-contract.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:7d775fc75183f92eef212afb134b8f17935f40cc7b5be8ea21eb52458d280a39",
+          "label": "current-installer/hermes/.hermes/skills/_shared/sdd-status-contract.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-shared-skill-resolver-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/_shared/skill-resolver.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:f2a421dfd7f6d3b4f8673213c5d5d11af6b6eed057dac7a13efa8342a502fc08",
+          "label": "current-installer/hermes/.hermes/skills/_shared/skill-resolver.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-comment-writer-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/comment-writer/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:cb980612f7237b31a4afea87899275ba20f1f621ba237ecd4a3b440f0cf2e6da",
+          "label": "current-installer/hermes/.hermes/skills/comment-writer/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-judgment-day-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/judgment-day/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:b3c19a7306be579451d7e395c96b5585f349a31e2b3b4eacbcb7f1eafd734b66",
+          "label": "current-installer/hermes/.hermes/skills/judgment-day/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-judgment-day-references-prompts-and-formats-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/judgment-day/references/prompts-and-formats.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:583f50d14a7d6229056c2df49868f12cb2d44c8da0c4bf331e61973d79620de5",
+          "label": "current-installer/hermes/.hermes/skills/judgment-day/references/prompts-and-formats.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-apply-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-apply/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:77c46b7028f964593294b966b81ac5c7aee14a5dabe1abfce01aef9d64f559e0",
+          "label": "current-installer/hermes/.hermes/skills/sdd-apply/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-apply-strict-tdd-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-apply/strict-tdd.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:2b0340bfa1160db7f609a4e1b6a24bbd3a1b1a8347b2b65d400865c104fdd237",
+          "label": "current-installer/hermes/.hermes/skills/sdd-apply/strict-tdd.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-archive-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-archive/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:339670ec2851dbec7680b987e58f471ac37c925997940046fea97aba1c867c0e",
+          "label": "current-installer/hermes/.hermes/skills/sdd-archive/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-design-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-design/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:63548bfbbfd98783001d8073714ff3cd2bf37a269d0f2aeff8476364c8a52830",
+          "label": "current-installer/hermes/.hermes/skills/sdd-design/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-design-references-threat-matrix-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-design/references/threat-matrix.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:77cffeb7f4c2146d77694b0b5a8baae3d57c9f048bccc9670951f4235531a5fc",
+          "label": "current-installer/hermes/.hermes/skills/sdd-design/references/threat-matrix.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-explore-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-explore/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:6bc9385cbdbaf0da7515fb25967ad5835e85ec57534781e614b773c4fce23b0a",
+          "label": "current-installer/hermes/.hermes/skills/sdd-explore/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-init-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-init/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:f38e88d79dc1e42e3dcf04596e61921060098025ba49aeb64f6bde24a22e5406",
+          "label": "current-installer/hermes/.hermes/skills/sdd-init/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-init-references-init-details-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-init/references/init-details.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:496875386f1ddaf1e44db4a484a396a22e28f92c0a4e0c6d9055541a59d87a34",
+          "label": "current-installer/hermes/.hermes/skills/sdd-init/references/init-details.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-onboard-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-onboard/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:5fa7ed85bf8890a02bdb462e2bc11153f4b8382fe862bbf9464ff47182887072",
+          "label": "current-installer/hermes/.hermes/skills/sdd-onboard/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-propose-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-propose/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:c0fbe5b70204c964a626eb4c129a33e13a49bf7e3eea0773adeed287ab79ffe5",
+          "label": "current-installer/hermes/.hermes/skills/sdd-propose/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-spec-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-spec/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:cdb91ee1876a0dc92e96b7239fb3f36bc6bf784807dfc1ed4a1d3b207778618f",
+          "label": "current-installer/hermes/.hermes/skills/sdd-spec/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-tasks-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-tasks/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:71bb611eae38382864d04f11ea037737989eb7b88d459f2e4322f77545098561",
+          "label": "current-installer/hermes/.hermes/skills/sdd-tasks/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-verify-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-verify/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:e561be39cf87c58e15521b72c9ec9647c8715812bf012f5db1cc7924ac0d1c45",
+          "label": "current-installer/hermes/.hermes/skills/sdd-verify/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-verify-references-report-format-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-verify/references/report-format.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:3d95596c7f04144107caf2dfda5f9735ffddec505cadec60306711b3e8a24053",
+          "label": "current-installer/hermes/.hermes/skills/sdd-verify/references/report-format.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-sdd-verify-strict-tdd-verify-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/sdd-verify/strict-tdd-verify.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:becb50da4841aae5f6b157462efbfcd4f20332c0c054c82a55970450be8e649c",
+          "label": "current-installer/hermes/.hermes/skills/sdd-verify/strict-tdd-verify.md"
+        }
+      ]
+    },
+    {
+      "id": "current-hermes-skills-work-unit-commits-skill-md",
+      "kind": "exact_file",
+      "root": "state",
+      "path": "skills/work-unit-commits/SKILL.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:9b4e9914d612ea11c86747d3fcd4e42bc7ef5cc5e6ab9179c3de7148b015c4ac",
+          "label": "current-installer/hermes/.hermes/skills/work-unit-commits/SKILL.md"
+        }
+      ]
     }
   ]
 }

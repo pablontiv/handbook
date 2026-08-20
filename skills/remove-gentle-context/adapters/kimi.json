@@ -155,7 +155,307 @@
       "root": "config",
       "path": "KIMI.md",
       "open_marker": "<!-- gentle-ai:begin -->",
-      "close_marker": "<!-- gentle-ai:end -->"
+      "close_marker": "<!-- gentle-ai:end -->",
+      "reason": "legacy marker-block KIMI.md format"
+    },
+    {
+      "id": "current-kimi-agents-gentleman-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/gentleman.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:b4487dd0a97dc5accc148a09fbffd2eff55582d7566e822ca7ead97f74e1b0c4",
+          "label": "current-installer/kimi/.kimi/agents/gentleman.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-review-readability-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/review-readability.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:0d897d3fb2b461845c8975fcd1421026504f7e627f5d7f6199961365c6f0fe4e",
+          "label": "current-installer/kimi/.kimi/agents/review-readability.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-review-refuter-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/review-refuter.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:3ca91e06cbe79e7133f3a471680a20eed43f0b17df215dddb3fa84869ac7f347",
+          "label": "current-installer/kimi/.kimi/agents/review-refuter.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-review-reliability-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/review-reliability.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:05d920268d3097e707ac88df3e722e2c631f4b4f28de03930ba65caef8b566b4",
+          "label": "current-installer/kimi/.kimi/agents/review-reliability.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-review-resilience-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/review-resilience.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:f87c44f532d85fcca7f0cc28938c4ddd10271d2fa38e87c6e456788ac9835850",
+          "label": "current-installer/kimi/.kimi/agents/review-resilience.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-review-risk-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/review-risk.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:974ef76d2484bb8f6f87ab3edaeef15e82f9808a588251ac0b301e0cbf3cb620",
+          "label": "current-installer/kimi/.kimi/agents/review-risk.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-apply-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-apply.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:984ca1afc67e45561aaf91395c79f9c9f5b7bdb3ccb554b30f301745d2c3bafd",
+          "label": "current-installer/kimi/.kimi/agents/sdd-apply.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-archive-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-archive.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:173098384e5c463d29ecf94897fc61cd3439abe47a01344cac24c892a8b30104",
+          "label": "current-installer/kimi/.kimi/agents/sdd-archive.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-design-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-design.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:7c6b5a8856718b2420521446f80e9a2b3707309ff35a24783a15069e9be47a92",
+          "label": "current-installer/kimi/.kimi/agents/sdd-design.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-explore-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-explore.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:eeff1a641b651902691bfe6d9b5629b998892c15ede4f95b871b28a8a87ffe87",
+          "label": "current-installer/kimi/.kimi/agents/sdd-explore.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-init-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-init.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:aabc3960810ed191fdad6037d30fc896056dafa37dc4beb9330e3549b0d7dbf0",
+          "label": "current-installer/kimi/.kimi/agents/sdd-init.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-onboard-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-onboard.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:92f08c7779777e99666941d1b27fcaf82fe897829ef4b59bc7ba2d8d366ddc2d",
+          "label": "current-installer/kimi/.kimi/agents/sdd-onboard.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-propose-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-propose.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:84d65cebe3be9492f1709188dffcbc31ce71606a556fabc992f28d3b2abc6311",
+          "label": "current-installer/kimi/.kimi/agents/sdd-propose.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-spec-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-spec.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:a064a6c0b9e2e071de00d80097dff05407ca38062e4bb757c9f25d25eb770b01",
+          "label": "current-installer/kimi/.kimi/agents/sdd-spec.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-tasks-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-tasks.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:9fe0aa68212e66a2e627b3693d81f8ae15688fc8f1f4481e0f4eef988a9920a9",
+          "label": "current-installer/kimi/.kimi/agents/sdd-tasks.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agents-sdd-verify-yaml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agents/sdd-verify.yaml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:a88eaed2dc9fbe7d24b31174da0955f6f5e05c1308a2981901d188b5a8fb0a0d",
+          "label": "current-installer/kimi/.kimi/agents/sdd-verify.yaml"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-kimi-md",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "KIMI.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:de935f2e85aa30cb22d81dc1599ad5eb144b25c7417971922a90816fddf0cfe8",
+          "label": "current-installer/kimi/.kimi/KIMI.md"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-agent-routing-md",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "agent-routing.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:80d2ea817ccc2371915152109dcdbf17b2d3e35a5b95d0b616fb13c893161269",
+          "label": "current-installer/kimi/.kimi/agent-routing.md"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-engram-protocol-md",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "engram-protocol.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:af286e01042d9abaa19535e707104fa0fabd678f3c7373347392285e21e8fe52",
+          "label": "current-installer/kimi/.kimi/engram-protocol.md"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-output-style-md",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "output-style.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:cb7c68777762f8a95920587b2596e02384aaba5cfb5139bb4a81dec2d8608be1",
+          "label": "current-installer/kimi/.kimi/output-style.md"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-persona-md",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "persona.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:d837be6fc7008186653035480bf4b0ce7cff8354e9d74a4b6d84aa27ffab8937",
+          "label": "current-installer/kimi/.kimi/persona.md"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-sdd-orchestrator-md",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "sdd-orchestrator.md",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:ee610c84ccf23bea2a469cb2fd513f85fdb0602867ba12c9628967c289f80918",
+          "label": "current-installer/kimi/.kimi/sdd-orchestrator.md"
+        }
+      ]
+    },
+    {
+      "id": "current-kimi-config-toml",
+      "kind": "exact_file",
+      "root": "config",
+      "path": "config.toml",
+      "content_signatures": [
+        {
+          "algorithm": "sha256",
+          "value": "sha256:d5c2c840a01357126cc0a746a3ebec48b1dfc4de662dbc624996bb37163758a7",
+          "label": "current-installer/kimi/.kimi/config.toml"
+        }
+      ]
     }
   ]
 }

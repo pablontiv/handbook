@@ -29,6 +29,77 @@ UPSTREAM = {
 }
 
 
+CURRENT_GEMINI_SKILL_PATHS = (
+    "skills/_shared/SKILL.md",
+    "skills/_shared/engram-convention.md",
+    "skills/_shared/openspec-convention.md",
+    "skills/_shared/persistence-contract.md",
+    "skills/_shared/review-ledger-contract.md",
+    "skills/_shared/sdd-phase-common.md",
+    "skills/_shared/sdd-status-contract.md",
+    "skills/_shared/skill-resolver.md",
+    "skills/comment-writer/SKILL.md",
+    "skills/judgment-day/SKILL.md",
+    "skills/judgment-day/references/prompts-and-formats.md",
+    "skills/sdd-apply/SKILL.md",
+    "skills/sdd-apply/strict-tdd.md",
+    "skills/sdd-archive/SKILL.md",
+    "skills/sdd-design/SKILL.md",
+    "skills/sdd-design/references/threat-matrix.md",
+    "skills/sdd-explore/SKILL.md",
+    "skills/sdd-init/SKILL.md",
+    "skills/sdd-init/references/init-details.md",
+    "skills/sdd-onboard/SKILL.md",
+    "skills/sdd-propose/SKILL.md",
+    "skills/sdd-spec/SKILL.md",
+    "skills/sdd-tasks/SKILL.md",
+    "skills/sdd-verify/SKILL.md",
+    "skills/sdd-verify/references/report-format.md",
+    "skills/sdd-verify/strict-tdd-verify.md",
+    "skills/work-unit-commits/SKILL.md",
+)
+CURRENT_GEMINI_EXACT_PATHS = ("GEMINI.md", "system.md", *CURRENT_GEMINI_SKILL_PATHS)
+
+CURRENT_KIMI_YAML_AGENT_PATHS = (
+    "agents/gentleman.yaml",
+    "agents/review-readability.yaml",
+    "agents/review-refuter.yaml",
+    "agents/review-reliability.yaml",
+    "agents/review-resilience.yaml",
+    "agents/review-risk.yaml",
+    "agents/sdd-apply.yaml",
+    "agents/sdd-archive.yaml",
+    "agents/sdd-design.yaml",
+    "agents/sdd-explore.yaml",
+    "agents/sdd-init.yaml",
+    "agents/sdd-onboard.yaml",
+    "agents/sdd-propose.yaml",
+    "agents/sdd-spec.yaml",
+    "agents/sdd-tasks.yaml",
+    "agents/sdd-verify.yaml",
+)
+CURRENT_KIMI_ROOT_CONTEXT_PATHS = (
+    "KIMI.md",
+    "agent-routing.md",
+    "engram-protocol.md",
+    "output-style.md",
+    "persona.md",
+    "sdd-orchestrator.md",
+)
+CURRENT_KIMI_EXACT_PATHS = (*CURRENT_KIMI_YAML_AGENT_PATHS, *CURRENT_KIMI_ROOT_CONTEXT_PATHS, "config.toml")
+
+CURRENT_HERMES_SKILL_PATHS = tuple(path.replace("skills/", "", 1) for path in CURRENT_GEMINI_SKILL_PATHS)
+CURRENT_HERMES_EXACT_PATHS = ("SOUL.md", "config.yaml", *(f"skills/{path}" for path in CURRENT_HERMES_SKILL_PATHS))
+CURRENT_SHARED_EXACT_PATHS = CURRENT_GEMINI_SKILL_PATHS
+
+CURRENT_EXPECTED_EXACT_PATHS = {
+    "gemini": CURRENT_GEMINI_EXACT_PATHS,
+    "kimi": CURRENT_KIMI_EXACT_PATHS,
+    "hermes": CURRENT_HERMES_EXACT_PATHS,
+    "shared-agents": CURRENT_SHARED_EXACT_PATHS,
+}
+
+
 class DeclarativeAdapterTests(unittest.TestCase):
     def test_adapter_registry_rejects_duplicate_and_unknown_clients(self):
         class StubAdapter:
@@ -203,7 +274,40 @@ metadata:
                 seen_clients.add(adapter.client)
                 rule_ids = [rule.id for rule in adapter.rules]
                 self.assertEqual(len(rule_ids), len(set(rule_ids)))
-        self.assertEqual(seen_clients, {"gemini", "kimi", "hermes", "vscode-copilot"})
+        self.assertEqual(seen_clients, {"gemini", "kimi", "hermes", "shared-agents", "vscode-copilot"})
+
+    def test_current_installer_adapter_rules_are_explicit_signed_and_path_clean(self):
+        forbidden_path_tokens = ("/private/tmp/", "/Users/", "gentle-real-e2e-canonical")
+        for path in sorted((SKILL_ROOT / "adapters").glob("*.json")):
+            serialized = path.read_text()
+            for token in forbidden_path_tokens:
+                self.assertNotIn(token, serialized)
+
+        for client, expected_paths in CURRENT_EXPECTED_EXACT_PATHS.items():
+            adapter = load_declarative_adapter(SKILL_ROOT / "adapters" / f"{client}.json")
+            exact_by_path = {rule.path: rule for rule in adapter.rules if rule.kind == "exact_file"}
+            with self.subTest(client=client):
+                self.assertEqual(set(expected_paths) - set(exact_by_path), set())
+                for rule_path in expected_paths:
+                    rule = exact_by_path[rule_path]
+                    signatures = rule.data.get("content_signatures")
+                    self.assertIsInstance(signatures, list, rule.id)
+                    self.assertGreater(len(signatures), 0, rule.id)
+                    for signature in signatures:
+                        self.assertEqual(signature["algorithm"], "sha256")
+                        self.assertRegex(signature["value"], r"^sha256:[0-9a-f]{64}$")
+                        label = signature.get("label", "")
+                        self.assertTrue(label.startswith("current-installer/"), label)
+                        for token in forbidden_path_tokens:
+                            self.assertNotIn(token, label)
+
+        gemini = load_declarative_adapter(SKILL_ROOT / "adapters" / "gemini.json")
+        self.assertTrue(any(rule.kind == "json_key" and rule.path == "settings.json" and rule.data["pointer"] == "" and rule.data["key"] == "theme" for rule in gemini.rules))
+        kimi = load_declarative_adapter(SKILL_ROOT / "adapters" / "kimi.json")
+        self.assertFalse(any(rule.kind == "exact_file" and rule.path == "mcp.json" for rule in kimi.rules))
+        hermes = load_declarative_adapter(SKILL_ROOT / "adapters" / "hermes.json")
+        historical = {rule.path: rule for rule in hermes.rules if rule.data.get("artifact_class") == "historical"}
+        self.assertEqual(historical["state.db"].data.get("proposed_action"), "report_only")
 
     def test_gentle_prefix_substrings_are_report_only_without_structural_corroboration(self):
         cases = {
@@ -576,6 +680,106 @@ class DeclarativeCompilerTests(unittest.TestCase):
             self.assertEqual(updated["mcp"], {"servers": {"personal": {"command": "keep"}}})
             self._assert_second_plan_is_empty(adapter, context)
 
+    def test_current_gemini_settings_theme_removal_preserves_mcp_servers(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            config = home / ".gemini"
+            (config / "skills" / "sdd-init").mkdir(parents=True)
+            (config / "settings.json").write_bytes((SKILL_ROOT / "tests" / "fixtures" / "current-installer" / "gemini" / "settings.json").read_bytes())
+            (config / "GEMINI.md").write_bytes((SKILL_ROOT / "tests" / "fixtures" / "current-installer" / "gemini" / "GEMINI.md").read_bytes())
+            (config / "system.md").write_bytes((SKILL_ROOT / "tests" / "fixtures" / "current-installer" / "gemini" / "system.md").read_bytes())
+            (config / "skills" / "sdd-init" / "SKILL.md").write_bytes((SKILL_ROOT / "tests" / "fixtures" / "current-installer" / "gemini" / "skills" / "sdd-init" / "SKILL.md").read_bytes())
+
+            adapter, context, inventory, plan, _receipt = self._execute(SKILL_ROOT / "adapters" / "gemini.json", home)
+
+            self.assertEqual(inventory.findings, ())
+            self.assertEqual({candidate.ownership for candidate in inventory.candidates}, {Ownership.PROVEN})
+            self.assertEqual({operation.kind for operation in plan.operations}, {OperationKind.WRITE_FILE, OperationKind.DELETE_FILE})
+            settings_after = json.loads((config / "settings.json").read_text())
+            self.assertNotIn("theme", settings_after)
+            self.assertEqual(settings_after["mcpServers"], {"engram": {"args": ["mcp", "--tools=agent"], "command": "/opt/homebrew/bin/engram"}})
+            self.assertFalse((config / "GEMINI.md").exists())
+            self.assertFalse((config / "system.md").exists())
+            self.assertFalse((config / "skills" / "sdd-init" / "SKILL.md").exists())
+            self._assert_second_plan_is_empty(adapter, context)
+
+    def test_current_kimi_representative_signed_assets_delete_but_mcp_json_is_preserved(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            config = home / ".kimi"
+            (config / "agents").mkdir(parents=True)
+            fixture = SKILL_ROOT / "tests" / "fixtures" / "current-installer" / "kimi"
+            for rel in ("KIMI.md", "config.toml", "agents/sdd-init.yaml"):
+                target = config / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((fixture / rel).read_bytes())
+            (config / "mcp.json").write_text('{"mcpServers":{"personal":{"command":"keep"}}}\n')
+
+            adapter, context, inventory, _plan, _receipt = self._execute(SKILL_ROOT / "adapters" / "kimi.json", home)
+
+            self.assertEqual(inventory.findings, ())
+            self.assertEqual(len(inventory.candidates), 3)
+            self.assertEqual({candidate.ownership for candidate in inventory.candidates}, {Ownership.PROVEN})
+            self.assertFalse((config / "KIMI.md").exists())
+            self.assertFalse((config / "config.toml").exists())
+            self.assertFalse((config / "agents" / "sdd-init.yaml").exists())
+            self.assertEqual((config / "mcp.json").read_text(), '{"mcpServers":{"personal":{"command":"keep"}}}\n')
+            self._assert_second_plan_is_empty(adapter, context)
+
+    def test_current_hermes_and_shared_representative_signed_assets_delete_without_state_mutation(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            hermes = home / ".hermes"
+            shared = home / ".config" / "agents"
+            (hermes / "skills" / "sdd-init").mkdir(parents=True)
+            (shared / "skills" / "sdd-init").mkdir(parents=True)
+            hermes_fixture = SKILL_ROOT / "tests" / "fixtures" / "current-installer" / "hermes"
+            shared_fixture = SKILL_ROOT / "tests" / "fixtures" / "current-installer" / "shared"
+            for rel in ("SOUL.md", "config.yaml", "skills/sdd-init/SKILL.md"):
+                target = hermes / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((hermes_fixture / rel).read_bytes())
+            (hermes / "state.db").write_text("historical state must remain\n")
+            (shared / "skills" / "sdd-init" / "SKILL.md").write_bytes((shared_fixture / "skills" / "sdd-init" / "SKILL.md").read_bytes())
+
+            hermes_adapter, hermes_context, hermes_inventory, _hermes_plan, _hermes_receipt = self._execute(SKILL_ROOT / "adapters" / "hermes.json", home)
+            shared_adapter, shared_context, shared_inventory, _shared_plan, _shared_receipt = self._execute(SKILL_ROOT / "adapters" / "shared-agents.json", home)
+
+            self.assertEqual(hermes_inventory.findings, ())
+            self.assertTrue(all(candidate.ownership in {Ownership.PROVEN, Ownership.AMBIGUOUS} for candidate in hermes_inventory.candidates))
+            self.assertFalse((hermes / "SOUL.md").exists())
+            self.assertFalse((hermes / "config.yaml").exists())
+            self.assertFalse((hermes / "skills" / "sdd-init" / "SKILL.md").exists())
+            self.assertEqual((hermes / "state.db").read_text(), "historical state must remain\n")
+            self.assertEqual(shared_inventory.findings, ())
+            self.assertEqual({candidate.ownership for candidate in shared_inventory.candidates}, {Ownership.PROVEN})
+            self.assertFalse((shared / "skills" / "sdd-init" / "SKILL.md").exists())
+            self._assert_second_plan_is_empty(hermes_adapter, hermes_context)
+            self._assert_second_plan_is_empty(shared_adapter, shared_context)
+
+    def test_current_signed_exact_file_byte_drift_and_personal_author_veto_report_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            config = home / ".gemini"
+            skill = config / "skills" / "sdd-init" / "SKILL.md"
+            skill.parent.mkdir(parents=True)
+            original = (SKILL_ROOT / "tests" / "fixtures" / "current-installer" / "gemini" / "skills" / "sdd-init" / "SKILL.md").read_bytes()
+            skill.write_bytes(original + b"\nlocal edit\n")
+            adapter = load_declarative_adapter(SKILL_ROOT / "adapters" / "gemini.json")
+            context = self._context(home)
+            inventory = build_inventory(context, (adapter,))
+            plan = build_plan(inventory, context, (adapter,))
+            self.assertEqual(len(inventory.candidates), 1)
+            self.assertEqual(inventory.candidates[0].ownership, Ownership.AMBIGUOUS)
+            self.assertEqual(inventory.candidates[0].proposed_action, "report_only")
+            self.assertEqual(plan.operations, ())
+
+            skill.write_text("---\nname: sdd-init\nmetadata:\n  author: pablontiv\n---\n# Personal skill\n")
+            inventory = build_inventory(context, (adapter,))
+            self.assertEqual(len(inventory.candidates), 1)
+            self.assertEqual(inventory.candidates[0].ownership, Ownership.AMBIGUOUS)
+            self.assertEqual(inventory.candidates[0].proposed_action, "report_only")
+
     def test_vscode_copilot_selective_rules_plan_apply_preserves_unrelated_text_json_and_mcp(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
@@ -607,7 +811,7 @@ class DeclarativeCompilerTests(unittest.TestCase):
             self.assertEqual(updated["mcp"], {"servers": {"personal": {"command": "keep"}}})
             self._assert_second_plan_is_empty(adapter, context)
 
-    def test_shipped_marker_rule_treats_existing_file_without_markers_as_absent(self):
+    def test_shipped_signed_rule_reports_drifted_file_without_markers_as_ambiguous(self):
         with tempfile.TemporaryDirectory() as td:
             home = Path(td) / "home"
             config = home / ".gemini"
@@ -620,7 +824,9 @@ class DeclarativeCompilerTests(unittest.TestCase):
             inventory = build_inventory(context, (adapter,))
             plan = build_plan(inventory, context, (adapter,))
 
-            self.assertEqual(inventory.candidates, ())
+            self.assertEqual(len(inventory.candidates), 1)
+            self.assertEqual(inventory.candidates[0].ownership, Ownership.AMBIGUOUS)
+            self.assertEqual(inventory.candidates[0].proposed_action, "report_only")
             self.assertEqual(inventory.findings, ())
             self.assertEqual(plan.operations, ())
 
@@ -811,9 +1017,6 @@ class DeclarativeCompilerTests(unittest.TestCase):
             "undecodable": (b'\xff\xfe', [
                 {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
             ], "declarative_json_malformed"),
-            "missing_pointer_parent": (json.dumps({"other": []}).encode("utf-8"), [
-                {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
-            ], "declarative_json_invalid_layout"),
             "wrong_pointer_target_type": (json.dumps({"hooks": {"0": "gentle-ai:sdd-init"}}).encode("utf-8"), [
                 {"id": "hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
             ], "declarative_json_invalid_layout"),
@@ -880,6 +1083,27 @@ class DeclarativeCompilerTests(unittest.TestCase):
             self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
                 {"id": "missing-agent", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/agents", "key": "sdd-init"},
                 {"id": "missing-hook", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+            ])
+            adapter = load_declarative_adapter(adapter_path)
+            context = self._context(home)
+
+            inventory = build_inventory(context, (adapter,))
+            plan = build_plan(inventory, context, (adapter,))
+
+            self.assertEqual(inventory.candidates, ())
+            self.assertEqual(inventory.findings, ())
+            self.assertEqual(plan.operations, ())
+
+    def test_json_inventory_treats_missing_pointer_target_as_absent_not_invalid(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            target = home / ".custom" / "settings.json"
+            target.parent.mkdir(parents=True)
+            target.write_text(json.dumps({"mcpServers": {"personal": {"command": "keep"}}, "theme": "gentleman"}))
+            adapter_path = Path(td) / "adapter.json"
+            self._write_adapter(adapter_path, client="custom", root_path=".custom", rules=[
+                {"id": "missing-array", "kind": "json_array_value", "root": "config", "path": "settings.json", "pointer": "/hooks", "value": "gentle-ai:sdd-init"},
+                {"id": "missing-object", "kind": "json_key", "root": "config", "path": "settings.json", "pointer": "/agents", "key": "sdd-init"},
             ])
             adapter = load_declarative_adapter(adapter_path)
             context = self._context(home)

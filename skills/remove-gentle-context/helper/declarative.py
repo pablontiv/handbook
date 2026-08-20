@@ -354,7 +354,7 @@ def _grouped_json_postimage(target: Path, rules: tuple[DeclarativeRule, ...]) ->
         root = _parse_json_syntax(content)
         text = content.decode("utf-8")
         edits = _json_surgery_edits(root, rules)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, IndexError, ValueError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, _JsonPointerMissing, TypeError, IndexError, ValueError) as exc:
         raise ValueError("declarative_evidence_drift") from exc
     postimage = text
     for start, end in reversed(edits):
@@ -536,7 +536,10 @@ def _json_surgery_edits(root: _JsonNode, rules: tuple[DeclarativeRule, ...]) -> 
     array_removals: dict[int, tuple[_JsonNode, set[int]]] = {}
     for rule in rules:
         if rule.kind == "json_key":
-            target = _json_pointer_get_node(root, str(rule.data["pointer"]))
+            try:
+                target = _json_pointer_get_node(root, str(rule.data["pointer"]))
+            except _JsonPointerMissing:
+                continue
             if target.kind != "object":
                 raise ValueError("json_pointer_target_not_object")
             key = rule.data["key"]
@@ -546,7 +549,10 @@ def _json_surgery_edits(root: _JsonNode, rules: tuple[DeclarativeRule, ...]) -> 
             entry = object_removals.setdefault(id(target), (target, set()))
             entry[1].add(matches[0])
         elif rule.kind == "json_array_value":
-            target = _json_pointer_get_node(root, str(rule.data["pointer"]))
+            try:
+                target = _json_pointer_get_node(root, str(rule.data["pointer"]))
+            except _JsonPointerMissing:
+                continue
             if target.kind != "array":
                 raise ValueError("json_pointer_target_not_array")
             value = rule.data["value"]
@@ -607,6 +613,10 @@ def _validate_json_edit_spans(edits: list[tuple[int, int]]) -> tuple[tuple[int, 
     return tuple(ordered)
 
 
+class _JsonPointerMissing(KeyError):
+    pass
+
+
 def _json_pointer_get_node(root: _JsonNode, pointer: str) -> _JsonNode:
     if pointer == "":
         return root
@@ -619,11 +629,13 @@ def _json_pointer_get_node(root: _JsonNode, pointer: str) -> _JsonNode:
                     current = member.value
                     break
             else:
-                raise KeyError(token)
+                raise _JsonPointerMissing(token)
         elif current.kind == "array":
             if not token.isdigit():
-                raise IndexError("invalid array index")
+                raise TypeError("invalid array index")
             index = int(token)
+            if index >= len(current.items):
+                raise _JsonPointerMissing(token)
             current = current.items[index]
         else:
             raise TypeError("not traversable")
@@ -839,7 +851,9 @@ def _json_key_present(path: Path, rule: DeclarativeRule, *, block_invalid: bool 
         if block_invalid:
             raise ValueError("declarative_json_malformed") from exc
         return False
-    except (KeyError, TypeError, IndexError) as exc:
+    except _JsonPointerMissing:
+        return False
+    except (TypeError, IndexError) as exc:
         if block_invalid:
             raise ValueError("declarative_json_invalid_layout") from exc
         return False
@@ -866,7 +880,9 @@ def _json_array_value_present(path: Path, rule: DeclarativeRule, *, block_invali
         if block_invalid:
             raise ValueError("declarative_json_malformed") from exc
         return False
-    except (KeyError, TypeError, IndexError) as exc:
+    except _JsonPointerMissing:
+        return False
+    except (TypeError, IndexError) as exc:
         if block_invalid:
             raise ValueError("declarative_json_invalid_layout") from exc
         return False
