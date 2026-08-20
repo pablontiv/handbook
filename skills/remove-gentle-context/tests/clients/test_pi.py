@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 
 from helper.clients.pi import PiAdapter
-from helper.engine import build_inventory, build_plan
-from helper.models import LifecycleOutcome, OperationKind, Ownership, PlatformProfile, ProcessSnapshot, ReceiptStatus, RuntimeContext
+from helper.engine import build_inventory, build_plan, verify_receipt
+from helper.models import LifecycleOutcome, OperationKind, OperationOutcome, Ownership, PlatformProfile, ProcessSnapshot, Receipt, ReceiptStatus, RuntimeContext
 from helper.ownership import load_ownership_catalog
 from helper.transaction import apply_operations, create_backup, execute_plan, restore, rollback
 from tests.support import assert_test_home
@@ -336,6 +336,31 @@ class PiAdapterTests(unittest.TestCase):
         self.assertIn(str(self.settings), {operation.path for operation in plan.operations})
         self.assertNotIn(str(self.registry), {operation.path for operation in plan.operations})
 
+    def test_blocked_signed_registry_remaining_does_not_fail_receipt_bounded_verify(self) -> None:
+        adapters = (
+            PiAdapter(self.catalog),
+            PiAdapter(
+                self.catalog,
+                process_probe=FakePiProbe({"running": True, "loaded_gentle_pi": True, "restartable": False, "process_name": "Pi"}),
+            ),
+        )
+        for adapter in adapters:
+            with self.subTest(adapter=type(adapter.process_probe).__name__ if adapter.process_probe is not None else "none"):
+                self.settings.write_text(FIXTURE_ROOT.joinpath("settings.json").read_text())
+                self.registry.write_text(FIXTURE_ROOT.joinpath("skill-registry.md").read_text())
+                inventory = build_inventory(self.context, (adapter,))
+                plan = build_plan(inventory, self.context, (adapter,))
+                registry_candidate = one(candidate for candidate in inventory.candidates if candidate.path == str(self.registry))
+                manifest = create_backup(plan, self.context)
+                outcomes = apply_operations(plan, manifest, self.context)
+                receipt = Receipt(status=ReceiptStatus.COMPLETED, operation_outcomes=outcomes, plan=plan, inventory=inventory)
+
+                self.assertEqual(registry_candidate.ownership, Ownership.AMBIGUOUS)
+                self.assertIn(registry_candidate.candidate_id, plan.blocked_candidate_ids)
+                self.assertNotIn(str(self.registry), {operation.path for operation in plan.operations})
+                self.assertTrue(self.registry.is_file())
+                adapter.verify(receipt, self.context)
+
     def test_stale_or_unaffected_pi_session_does_not_create_lifecycle_authority(self) -> None:
         adapter = PiAdapter(
             self.catalog,
@@ -349,10 +374,12 @@ class PiAdapterTests(unittest.TestCase):
         self.assertEqual(plan.lifecycle_actions, ())
         self.assertIn(str(self.registry), {operation.path for operation in plan.operations})
 
-    def test_quiet_period_verification_fails_if_registry_regrows(self) -> None:
+    def test_quiet_period_verification_fails_if_deleted_registry_regrows(self) -> None:
         data = json.loads(self.settings.read_text())
         data["packages"] = ["npm:gentle-engram"]
         self.settings.write_text(json.dumps(data, indent=2) + "\n")
+        plan = plan_for(self.context, PiAdapter(self.catalog, process_probe=FakePiProbe()))
+        registry_operation_index = one(index for index, operation in enumerate(plan.operations) if operation.path == str(self.registry))
         self.registry.unlink()
         clock = FakeClock()
 
@@ -362,9 +389,38 @@ class PiAdapterTests(unittest.TestCase):
                 self.registry.write_text(FIXTURE_ROOT.joinpath("skill-registry.md").read_text())
 
         adapter = PiAdapter(self.catalog, clock=clock, sleeper=FakeSleeper(clock, on_sleep=regrow), quiet_interval=2.0, poll_interval=0.5)
+        receipt = Receipt(
+            operation_outcomes=(OperationOutcome(registry_operation_index, str(OperationKind.DELETE_FILE), str(self.registry), "completed"),),
+            plan=plan,
+        )
 
         with self.assertRaisesRegex(ValueError, "verify_pi_registry_regrew"):
-            adapter.verify(type("ReceiptLike", (), {"operation_outcomes": (), "checks": ()})(), self.context)
+            adapter.verify(receipt, self.context)
+
+    def test_unrelated_node_modules_without_initial_gentle_pi_does_not_fail_verify(self) -> None:
+        shutil.rmtree(self.pi_dir / "node_modules")
+        (self.pi_dir / "node_modules" / "gentle-engram").mkdir(parents=True)
+        self.settings.write_text(json.dumps({"packages": ["npm:gentle-engram"]}, indent=2) + "\n")
+        self.registry.unlink()
+        adapter = PiAdapter(self.catalog, process_probe=FakePiProbe())
+        inventory = build_inventory(self.context, (adapter,))
+        plan = build_plan(inventory, self.context, (adapter,))
+
+        self.assertFalse(any(assertion.client == "pi" and assertion.details.get("kind") in {"installed_package", "installed_binary"} for assertion in plan.preservation_assertions))
+        adapter.verify(Receipt(status=ReceiptStatus.COMPLETED, plan=plan, inventory=inventory), self.context)
+
+    def test_initially_preserved_pi_package_disappearance_is_caught_by_global_preservation(self) -> None:
+        adapter = PiAdapter(self.catalog, process_probe=FakePiProbe())
+        inventory = build_inventory(self.context, (adapter,))
+        plan = build_plan(inventory, self.context, (adapter,))
+        manifest = create_backup(plan, self.context)
+        outcomes = apply_operations(plan, manifest, self.context)
+        shutil.rmtree(self.node_modules_package)
+
+        result = verify_receipt(Receipt(status=ReceiptStatus.COMPLETED, operation_outcomes=outcomes, plan=plan, inventory=inventory), self.context, (adapter,))
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("verify_package_presence", {check.code for check in result.checks if check.status == "failed"})
 
     def test_project_root_registry_delete_can_apply_and_restore(self) -> None:
         plan = plan_for(self.context, PiAdapter(self.catalog, process_probe=FakePiProbe()))

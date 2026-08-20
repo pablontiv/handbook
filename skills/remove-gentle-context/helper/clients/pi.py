@@ -109,8 +109,8 @@ class PiAdapter:
             remaining = [package for package in _settings_packages(settings) if _is_active_pi_package(package)]
             if remaining:
                 raise ValueError("verify_pi_package_registration_present")
-            self._verify_preserved_package_sentinel(settings_path)
 
+        deleted_registry_targets = _completed_registry_delete_targets(receipt, context)
         for outcome in getattr(receipt, "operation_outcomes", ()):  # independent live checks, bounded by receipt targets when present
             if getattr(outcome, "status", "") != "completed":
                 continue
@@ -119,13 +119,10 @@ class PiAdapter:
                 kind = OperationKind(str(getattr(outcome, "kind", "")))
             except ValueError:
                 continue
-            if kind == OperationKind.DELETE_FILE and target.exists() and _is_authorized_registry_path(target, context):
-                if _registry_is_proven(target):
-                    raise ValueError("verify_pi_registry_regrew")
             if kind == OperationKind.WRITE_FILE and target.exists() and target in _settings_paths(context):
                 _load_settings(target)
 
-        self._verify_registries_quiet(context)
+        self._verify_registries_quiet(deleted_registry_targets)
         return tuple(getattr(receipt, "checks", ()))
 
     def _compile_settings(self, candidate: Candidate) -> tuple[Operation, ...]:
@@ -195,10 +192,12 @@ class PiAdapter:
             return _ProcessState(block_registry=True, block_reason="missing_safe_restart_metadata", evidence=evidence + ({"kind": "pi_process_state", "state": "missing_safe_restart_metadata"},))
         return _ProcessState(lifecycle_action=action, evidence=evidence)
 
-    def _verify_registries_quiet(self, context: RuntimeContext) -> None:
+    def _verify_registries_quiet(self, targets: Sequence[Path]) -> None:
+        if not targets:
+            return
         deadline = self.clock.time() + self.quiet_interval  # type: ignore[attr-defined]
         while True:
-            if _any_proven_registry(context):
+            if any(_registry_is_proven(target) for target in targets):
                 raise ValueError("verify_pi_registry_regrew")
             now = self.clock.time()  # type: ignore[attr-defined]
             if now >= deadline:
@@ -211,17 +210,6 @@ class PiAdapter:
         restarted = {getattr(outcome, "pid", None) for outcome in outcomes if getattr(outcome, "client", "") == CLIENT and getattr(outcome, "action", "") == "restart" and getattr(outcome, "status", "") == "restarted"}
         if stopped - restarted:
             raise ValueError("verify_pi_restart_missing")
-
-    def _verify_preserved_package_sentinel(self, settings_path: Path) -> None:
-        node_modules = settings_path.parent / "node_modules"
-        if not node_modules.exists():
-            return
-        if not (node_modules / "gentle-pi").is_dir():
-            raise ValueError("verify_pi_package_missing")
-        bin_dir = node_modules / ".bin"
-        if bin_dir.exists() and not (bin_dir / "gentle-pi").exists():
-            raise ValueError("verify_pi_binary_missing")
-
 
 def _settings_paths(context: RuntimeContext) -> tuple[Path, ...]:
     home = context.profile.home
@@ -440,12 +428,40 @@ def _registry_is_proven(path: Path) -> bool:
     return _registry_text_is_proven(path.read_text(errors="replace"))
 
 
-def _any_proven_registry(context: RuntimeContext) -> bool:
-    for root in context.project_roots:
-        target = root / ".atl" / "skill-registry.md"
-        if _registry_is_proven(target):
-            return True
-    return False
+def _completed_registry_delete_targets(receipt: Receipt, context: RuntimeContext) -> tuple[Path, ...]:
+    targets: set[Path] = set()
+    planned_operations = tuple(getattr(getattr(receipt, "plan", None), "operations", ()))
+    for outcome in getattr(receipt, "operation_outcomes", ()):  # receipt-bounded regrowth authority
+        if getattr(outcome, "status", "") != "completed":
+            continue
+        if planned_operations:
+            source = _planned_operation_for_outcome(outcome, planned_operations)
+            if source is None:
+                continue
+        else:
+            source = outcome
+        try:
+            kind = OperationKind(str(getattr(source, "kind", "")))
+        except ValueError:
+            continue
+        if kind != OperationKind.DELETE_FILE:
+            continue
+        target = Path(str(getattr(source, "path", ""))).resolve(strict=False)
+        if _is_authorized_registry_path(target, context):
+            targets.add(target)
+    return tuple(sorted(targets, key=str))
+
+
+def _planned_operation_for_outcome(outcome: object, planned_operations: Sequence[object]) -> object | None:
+    if not planned_operations:
+        return None
+    try:
+        index = int(getattr(outcome, "operation_index"))
+    except (TypeError, ValueError):
+        return None
+    if index < 0 or index >= len(planned_operations):
+        return None
+    return planned_operations[index]
 
 
 def _is_authorized_registry_path(path: Path, context: RuntimeContext) -> bool:
