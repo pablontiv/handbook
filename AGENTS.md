@@ -21,7 +21,10 @@ This repository publishes independent, portable Agent Skills. Keep every skill s
 
 ## Delivery
 
+- Before implementation, identify and review the accepted ADR that governs the change. If a significant decision is not covered, add or update an ADR under `docs/adr/` and obtain acceptance before modifying code.
+- Validate every new or modified ADR with `rootline validate --strict`.
 - Use conventional commits.
 - Keep documentation synchronized with executable behavior.
 - Run the complete test suite before committing.
-- Pull requests are disabled; repository maintainers deliver changes directly.
+- Integrate changes through pull requests. Direct delivery to `main` requires an explicit human exception recorded with its rationale and accepted risk.
+- In each pull request, list the ADRs reviewed, created, or modified and disclose unresolved governance conflicts.
