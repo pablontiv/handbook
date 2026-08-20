@@ -430,11 +430,12 @@ def _registry_is_proven(path: Path) -> bool:
 
 def _completed_registry_delete_targets(receipt: Receipt, context: RuntimeContext) -> tuple[Path, ...]:
     targets: set[Path] = set()
-    planned_operations = tuple(getattr(getattr(receipt, "plan", None), "operations", ()))
+    has_plan = hasattr(receipt, "plan")
+    planned_operations = tuple(getattr(getattr(receipt, "plan", None), "operations", ())) if has_plan else ()
     for outcome in getattr(receipt, "operation_outcomes", ()):  # receipt-bounded regrowth authority
         if getattr(outcome, "status", "") != "completed":
             continue
-        if planned_operations:
+        if has_plan:
             source = _planned_operation_for_outcome(outcome, planned_operations)
             if source is None:
                 continue

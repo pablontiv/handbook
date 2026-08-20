@@ -8,7 +8,7 @@ from pathlib import Path
 
 from helper.clients.pi import PiAdapter
 from helper.engine import build_inventory, build_plan, verify_receipt
-from helper.models import LifecycleOutcome, OperationKind, OperationOutcome, Ownership, PlatformProfile, ProcessSnapshot, Receipt, ReceiptStatus, RuntimeContext
+from helper.models import LifecycleOutcome, OperationKind, OperationOutcome, Ownership, Plan, PlatformProfile, ProcessSnapshot, Receipt, ReceiptStatus, RuntimeContext
 from helper.ownership import load_ownership_catalog
 from helper.transaction import apply_operations, create_backup, execute_plan, restore, rollback
 from tests.support import assert_test_home
@@ -396,6 +396,23 @@ class PiAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "verify_pi_registry_regrew"):
             adapter.verify(receipt, self.context)
+
+    def test_empty_plan_does_not_authorize_forged_completed_registry_delete_outcome(self) -> None:
+        data = json.loads(self.settings.read_text())
+        data["packages"] = ["npm:gentle-engram"]
+        self.settings.write_text(json.dumps(data, indent=2) + "\n")
+        plan = Plan(operations=())
+        clock = FakeClock()
+        sleeper = FakeSleeper(clock)
+        adapter = PiAdapter(self.catalog, clock=clock, sleeper=sleeper, quiet_interval=2.0, poll_interval=0.5)
+        receipt = Receipt(
+            operation_outcomes=(OperationOutcome(0, str(OperationKind.DELETE_FILE), str(self.registry), "completed"),),
+            plan=plan,
+        )
+
+        adapter.verify(receipt, self.context)
+
+        self.assertEqual(sleeper.calls, [])
 
     def test_unrelated_node_modules_without_initial_gentle_pi_does_not_fail_verify(self) -> None:
         shutil.rmtree(self.pi_dir / "node_modules")
