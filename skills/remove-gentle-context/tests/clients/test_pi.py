@@ -250,13 +250,14 @@ class PiAdapterTests(unittest.TestCase):
                 }
             ),
         )
-        plan = plan_for(self.context, adapter)
+        inventory = build_inventory(self.context, (adapter,))
+        plan = build_plan(inventory, self.context, (adapter,))
 
         self.assertEqual(len(plan.lifecycle_actions), 1)
         self.assertEqual(plan.lifecycle_actions[0].client, "pi")
         self.assertIn(str(self.registry), {operation.path for operation in plan.operations if operation.kind is OperationKind.DELETE_FILE})
         lifecycle = FakeLifecycle()
-        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle=lifecycle)
+        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle=lifecycle, inventory=inventory)
 
         self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
         self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])

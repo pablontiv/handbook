@@ -210,7 +210,7 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(first_plan.lifecycle_actions[0].details["process_name"], "Codex")
         self.assertEqual(first_plan.lifecycle_actions[0].details["bundle_id"], "com.openai.codex")
 
-        receipt = execute_plan(first_plan, first_plan.digest or "", context, lifecycle=ShutdownWritesRecoveryLifecycle(home / ".codex" / "never-created", ""))
+        receipt = execute_plan(first_plan, first_plan.digest or "", context, lifecycle=ShutdownWritesRecoveryLifecycle(home / ".codex" / "never-created", ""), inventory=first_inventory)
         self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
         adapter.verify(receipt, context)
         self.assertFalse(any_active_profile_id(json.loads((home / ".codex" / "global-state.json").read_text()), "gentle-dev"))
@@ -276,7 +276,7 @@ class CodexAdapterTests(unittest.TestCase):
         before = current.read_text()
         late = home / ".codex" / ".global-state.json.shutdown.tmp"
 
-        receipt = execute_plan(plan, plan.digest or "", context, ShutdownWritesRecoveryLifecycle(late, fixture("codex/global-state.json")))
+        receipt = execute_plan(plan, plan.digest or "", context, ShutdownWritesRecoveryLifecycle(late, fixture("codex/global-state.json")), inventory=inventory)
 
         self.assertEqual(receipt.status, ReceiptStatus.FAILED)
         self.assertIsNone(receipt.backup_manifest_path)

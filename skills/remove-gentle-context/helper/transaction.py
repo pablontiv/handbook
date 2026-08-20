@@ -15,7 +15,7 @@ from typing import Iterable
 
 from .canonical import digest_json
 from .engine import validate_approval
-from .models import BackupEntry, BackupManifest, LifecycleOutcome, Operation, OperationKind, OperationOutcome, Plan, ProcessSnapshot, Receipt, ReceiptStatus, RuntimeContext
+from .models import BackupEntry, BackupManifest, Inventory, LifecycleOutcome, Operation, OperationKind, OperationOutcome, Plan, ProcessSnapshot, Receipt, ReceiptStatus, RuntimeContext
 from .paths import _is_windows_reparse_point, path_from_root_relative, resolve_state_root, root_map, root_relative_path
 
 
@@ -91,11 +91,11 @@ def rollback(manifest: BackupManifest, outcomes: Iterable[OperationOutcome], con
     return tuple(rollback_outcomes)
 
 
-def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: object) -> Receipt:
+def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: object, *, inventory: Inventory) -> Receipt:
+    _validate_execution_artifacts(plan, inventory, context)
     validate_approval(plan, approval)
-    _assert_plan_root_map_matches_context(plan, context, "execute_plan_roots_mismatch")
     if not plan.operations:
-        return Receipt(status=ReceiptStatus.COMPLETED, plan=plan)
+        return Receipt(status=ReceiptStatus.COMPLETED, plan=plan, inventory=inventory)
 
     lifecycle_outcomes: list[LifecycleOutcome] = []
     stopped: list[ProcessSnapshot] = []
@@ -115,7 +115,7 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
         restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
         lifecycle_outcomes.extend(restart_outcomes)
         status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.FAILED
-        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan)
+        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan, inventory=inventory)
 
     try:
         _validate_plan_preimages(plan, context, drift_code="preflight_preimage_drift_after_shutdown")
@@ -124,7 +124,7 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
         restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
         lifecycle_outcomes.extend(restart_outcomes)
         status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.FAILED
-        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan)
+        return Receipt(operation_outcomes=_failed_preflight_outcomes(plan, code), lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan, inventory=inventory)
 
     manifest = create_backup(plan, context)
     try:
@@ -136,12 +136,50 @@ def execute_plan(plan: Plan, approval: str, context: RuntimeContext, lifecycle: 
         status = ReceiptStatus.ROLLED_BACK
         if any(outcome.status == "failed" for outcome in rollback_outcomes) or _has_restart_failure(restart_outcomes):
             status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED
-        return Receipt(operation_outcomes=tuple(exc.outcomes + rollback_outcomes), backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan)
+        return Receipt(operation_outcomes=tuple(exc.outcomes + rollback_outcomes), backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan, inventory=inventory)
 
     restart_outcomes = _restart_stopped(lifecycle, tuple(stopped))
     lifecycle_outcomes.extend(restart_outcomes)
     status = ReceiptStatus.MANUAL_RECOVERY_REQUIRED if _has_restart_failure(restart_outcomes) else ReceiptStatus.COMPLETED
-    return Receipt(operation_outcomes=outcomes, backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan)
+    return Receipt(operation_outcomes=outcomes, backup_manifest_path=manifest.path, lifecycle_outcomes=tuple(lifecycle_outcomes), status=status, plan=plan, inventory=inventory)
+
+
+def _validate_execution_artifacts(plan: Plan, inventory: Inventory, context: RuntimeContext) -> None:
+    if not isinstance(inventory, Inventory):
+        raise ValueError("execute_inventory_required")
+    expected_inventory_digest = digest_json(inventory.to_unsigned_dict())
+    if inventory.digest != expected_inventory_digest:
+        raise ValueError("execute_inventory_digest_mismatch")
+    expected_plan_digest = digest_json(plan.to_unsigned_dict())
+    if plan.digest != expected_plan_digest:
+        raise ValueError("execute_plan_digest_mismatch")
+    if plan.inventory_digest != inventory.digest:
+        raise ValueError("execute_plan_inventory_digest_mismatch")
+
+    context_home = str(context.profile.home.resolve(strict=False))
+    if inventory.home != context_home:
+        raise ValueError("execute_inventory_home_mismatch")
+    if plan.home != context_home:
+        raise ValueError("execute_plan_home_mismatch")
+    if inventory.home != plan.home:
+        raise ValueError("execute_plan_inventory_home_mismatch")
+
+    if inventory.os_name != context.profile.os_name:
+        raise ValueError("execute_inventory_os_mismatch")
+    if plan.os_name != context.profile.os_name:
+        raise ValueError("execute_plan_os_mismatch")
+    if inventory.os_name != plan.os_name:
+        raise ValueError("execute_plan_inventory_os_mismatch")
+
+    context_roots = dict(sorted(root_map(context).items()))
+    inventory_roots = dict(sorted(inventory.root_map.items()))
+    plan_roots = dict(sorted(plan.root_map.items()))
+    if inventory_roots != context_roots:
+        raise ValueError("execute_inventory_roots_mismatch")
+    if plan_roots != context_roots:
+        raise ValueError("execute_plan_roots_mismatch")
+    if plan_roots != inventory_roots:
+        raise ValueError("execute_plan_inventory_roots_mismatch")
 
 
 def _assert_plan_root_map_matches_context(plan: Plan, context: RuntimeContext, code: str) -> None:

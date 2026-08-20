@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from helper.canonical import digest_json
-from helper.models import LifecycleAction, LifecycleOutcome, Operation, OperationKind, Plan, PlatformProfile, ProcessSnapshot, ReceiptStatus, RuntimeContext
+from helper.models import Inventory, LifecycleAction, LifecycleOutcome, Operation, OperationKind, Plan, PlatformProfile, ProcessSnapshot, ReceiptStatus, RuntimeContext
 from helper.paths import resolve_state_root, root_map
 from helper.transaction import _same_file_identity, apply_operations, create_backup, execute_plan, restore
 
@@ -77,12 +77,19 @@ def image(content: bytes) -> tuple[str, str]:
     return base64.b64encode(content).decode("ascii"), sha256_bytes(content)
 
 
+def plan_home_for(path: Path) -> str:
+    for parent in (path.parent, *path.parents):
+        if parent.name == "home":
+            return str(parent.resolve(strict=False))
+    return str(path.parent.resolve(strict=False))
+
+
 def write_plan(path: Path, before: bytes | None, after: bytes, *, details: dict[str, object] | None = None) -> Plan:
     pre_b64, pre_digest = (None, None) if before is None else image(before)
     post_b64, post_digest = image(after)
     return Plan(
         os_name="linux",
-        home=str(path.parents[0]),
+        home=plan_home_for(path),
         operations=(
             Operation(
                 kind=OperationKind.WRITE_FILE,
@@ -111,7 +118,7 @@ def delete_plan(path: Path, before: bytes) -> Plan:
     pre_b64, pre_digest = image(before)
     return Plan(
         os_name="linux",
-        home=str(path.parents[0]),
+        home=plan_home_for(path),
         operations=(Operation(kind=OperationKind.DELETE_FILE, path=str(path), preimage_base64=pre_b64, preimage_sha256=pre_digest),),
     ).with_digest()
 
@@ -125,7 +132,7 @@ def delete_plan_for_many(paths_and_preimages: tuple[tuple[Path, bytes], ...], ho
 
 
 def remove_empty_dir_plan(path: Path) -> Plan:
-    return Plan(os_name="linux", home=str(path.parents[0]), operations=(Operation(kind=OperationKind.REMOVE_EMPTY_DIRECTORY, path=str(path)),)).with_digest()
+    return Plan(os_name="linux", home=plan_home_for(path), operations=(Operation(kind=OperationKind.REMOVE_EMPTY_DIRECTORY, path=str(path)),)).with_digest()
 
 
 @contextmanager
@@ -197,6 +204,36 @@ class TransactionTests(unittest.TestCase):
         path.chmod(mode)
         return path
 
+    def canonical_inventory(self, *, adapter_versions: dict[str, str] | None = None) -> Inventory:
+        return Inventory(
+            os_name=self.context.profile.os_name,
+            home=str(self.home.resolve(strict=False)),
+            root_map=dict(sorted(root_map(self.context).items())),
+            adapter_versions={} if adapter_versions is None else dict(sorted(adapter_versions.items())),
+        ).with_digest()
+
+    def bind_plan(self, plan: Plan, inventory: Inventory | None = None) -> tuple[Inventory, Plan]:
+        bound_inventory = self.canonical_inventory() if inventory is None else inventory
+        bound_plan = Plan(
+            inventory_digest=bound_inventory.digest,
+            os_name=bound_inventory.os_name,
+            home=bound_inventory.home,
+            root_map=dict(sorted(bound_inventory.root_map.items())),
+            adapter_versions=dict(sorted(bound_inventory.adapter_versions.items())),
+            operations=plan.operations,
+            blocked_candidate_ids=plan.blocked_candidate_ids,
+            dependencies=plan.dependencies,
+            lifecycle_actions=plan.lifecycle_actions,
+            preservation_assertions=plan.preservation_assertions,
+        ).with_digest()
+        return bound_inventory, bound_plan
+
+    def execute_bound(self, plan: Plan, lifecycle: object | None = None):
+        inventory, bound_plan = self.bind_plan(plan)
+        receipt = execute_plan(bound_plan, bound_plan.digest or "", self.context, NoopLifecycle() if lifecycle is None else lifecycle, inventory=inventory)
+        self.assertEqual(receipt.inventory, inventory)
+        return inventory, bound_plan, receipt
+
     def test_preimage_drift_aborts_before_backup_or_mutation(self):
         target = self.make_file(".codex/config.toml", "before")
         plan = write_plan(target, b"before", b"after")
@@ -230,6 +267,32 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "before")
         self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
 
+    def test_execute_plan_missing_inventory_is_rejected_before_lifecycle_backup_or_mutation(self):
+        target = self.make_file("missing-inventory.txt", "before")
+        _inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after"))
+        lifecycle = FakeTransactionLifecycle()
+
+        with self.assertRaises(TypeError):
+            execute_plan(plan, plan.digest or "", self.context, lifecycle)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, [])
+        self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
+
+    def test_execute_plan_mismatched_inventory_is_rejected_before_lifecycle_backup_or_mutation(self):
+        target = self.make_file("mismatched-inventory.txt", "before")
+        correct_inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after"))
+        wrong_inventory = self.canonical_inventory(adapter_versions={"other": "1"})
+        lifecycle = FakeTransactionLifecycle()
+
+        with self.assertRaisesRegex(ValueError, "execute_plan_inventory_digest_mismatch"):
+            execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=wrong_inventory)
+
+        self.assertNotEqual(correct_inventory.digest, wrong_inventory.digest)
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, [])
+        self.assertFalse((resolve_state_root(self.context.profile) / "backups").exists())
+
     def test_second_write_failure_rolls_back_first_write(self):
         first = self.make_file("one", "before-one")
         second = self.make_file("two", "before-two")
@@ -247,7 +310,7 @@ class TransactionTests(unittest.TestCase):
         ).with_digest()
 
         with injected_replace_failure(second):
-            receipt = execute_plan(plan, plan.digest or "", self.context, NoopLifecycle())
+            _inventory, plan, receipt = self.execute_bound(plan)
 
         self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
         self.assertEqual(first.read_text(), "before-one")
@@ -286,7 +349,7 @@ class TransactionTests(unittest.TestCase):
             operations=(Operation(kind=OperationKind.WRITE_FILE, path=str(target), preimage_base64=pre_b64, preimage_sha256=pre_digest, postimage_base64=bad_post_b64, postimage_sha256=sha256_bytes(b"different")),),
         ).with_digest()
 
-        receipt = execute_plan(plan, plan.digest or "", self.context, NoopLifecycle())
+        _inventory, plan, receipt = self.execute_bound(plan)
 
         self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
         self.assertEqual(target.read_text(), "before")
@@ -295,7 +358,7 @@ class TransactionTests(unittest.TestCase):
         target = self.make_file("settings.json", '{"before": true}\n')
         plan = write_plan(target, b'{"before": true}\n', b'{"after": ', details={"parse": "json"})
 
-        receipt = execute_plan(plan, plan.digest or "", self.context, NoopLifecycle())
+        _inventory, plan, receipt = self.execute_bound(plan)
 
         self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
         self.assertEqual(target.read_text(), '{"before": true}\n')
@@ -315,7 +378,7 @@ class TransactionTests(unittest.TestCase):
             return original_replace(src, dst)
 
         with injected_unlink_failure(second), patch("helper.transaction.os.replace", side_effect=replace_fails_during_rollback):
-            receipt = execute_plan(plan, plan.digest or "", self.context, NoopLifecycle())
+            _inventory, plan, receipt = self.execute_bound(plan)
 
         self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
         self.assertEqual(first.read_text(), "after-first")
@@ -325,7 +388,7 @@ class TransactionTests(unittest.TestCase):
         target = self.make_file("noop.txt", "same")
         plan = write_plan(target, b"same", b"same")
 
-        receipt = execute_plan(plan, plan.digest or "", self.context, NoopLifecycle())
+        _inventory, plan, receipt = self.execute_bound(plan)
 
         self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
         self.assertEqual(target.read_text(), "same")
@@ -538,13 +601,13 @@ class TransactionTests(unittest.TestCase):
         (directory / "child").write_text("x")
         plan = remove_empty_dir_plan(directory)
 
-        receipt = execute_plan(plan, plan.digest or "", self.context, NoopLifecycle())
+        _inventory, plan, receipt = self.execute_bound(plan)
 
         self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
         self.assertTrue(directory.exists())
 
         (directory / "child").unlink()
-        receipt = execute_plan(plan, plan.digest or "", self.context, NoopLifecycle())
+        _inventory, plan, receipt = self.execute_bound(plan)
         self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
         self.assertFalse(directory.exists())
 
@@ -553,7 +616,7 @@ class TransactionTests(unittest.TestCase):
         plan = lifecycle_write_plan(target, b"before", b"after")
         lifecycle = FakeTransactionLifecycle(target=target, shutdown_content="shutdown-drift")
 
-        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle)
+        _inventory, plan, receipt = self.execute_bound(plan, lifecycle)
 
         self.assertEqual(receipt.status, ReceiptStatus.FAILED)
         self.assertEqual(target.read_text(), "shutdown-drift")
@@ -566,12 +629,12 @@ class TransactionTests(unittest.TestCase):
         target = self.make_file(".codex/config.toml", "before")
         drift_plan = lifecycle_write_plan(target, b"before", b"after")
         drift_lifecycle = FakeTransactionLifecycle(target=target, shutdown_content="shutdown-drift")
-        drift_receipt = execute_plan(drift_plan, drift_plan.digest or "", self.context, drift_lifecycle)
+        _inventory, drift_plan, drift_receipt = self.execute_bound(drift_plan, drift_lifecycle)
         self.assertEqual(drift_receipt.status, ReceiptStatus.FAILED)
 
         closed_plan = lifecycle_write_plan(target, b"shutdown-drift", b"after")
         closed_lifecycle = FakeTransactionLifecycle(running=False)
-        receipt = execute_plan(closed_plan, closed_plan.digest or "", self.context, closed_lifecycle)
+        _inventory, closed_plan, receipt = self.execute_bound(closed_plan, closed_lifecycle)
 
         self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
         self.assertEqual(target.read_text(), "after")
@@ -582,7 +645,7 @@ class TransactionTests(unittest.TestCase):
         plan = lifecycle_write_plan(target, b"before", b"after")
         lifecycle = FakeTransactionLifecycle(target=target, shutdown_content="shutdown-drift", restart_succeeds=False)
 
-        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle)
+        _inventory, plan, receipt = self.execute_bound(plan, lifecycle)
 
         self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
         self.assertEqual(receipt.operation_outcomes[0].error, "preflight_preimage_drift_after_shutdown")
@@ -595,7 +658,7 @@ class TransactionTests(unittest.TestCase):
         plan = lifecycle_write_plan(target, b"before", b"after")
         lifecycle = FakeTransactionLifecycle(restart_succeeds=False)
 
-        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle)
+        _inventory, plan, receipt = self.execute_bound(plan, lifecycle)
 
         self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
         self.assertEqual(target.read_text(), "after")
@@ -607,7 +670,7 @@ class TransactionTests(unittest.TestCase):
         lifecycle = NoopLifecycle()
         plan = Plan(os_name="linux", home=str(self.home), operations=()).with_digest()
 
-        receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle)
+        _inventory, plan, receipt = self.execute_bound(plan, lifecycle)
 
         self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
         self.assertEqual(lifecycle.calls, [])

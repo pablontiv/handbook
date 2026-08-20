@@ -9,9 +9,11 @@ from pathlib import Path
 
 from helper.canonical import canonical_bytes
 from helper.engine import build_inventory, build_plan, validate_approval, verify_receipt
+from helper.transaction import execute_plan
 from helper.models import (
     ArtifactClass,
     Candidate,
+    Check,
     Inventory,
     LifecycleOutcome,
     Operation,
@@ -63,6 +65,27 @@ class FakeAdapter:
         self.verify_calls += 1
         if self._verify_error is not None:
             raise self._verify_error
+        return ()
+
+
+class FileBackedAdapter(FakeAdapter):
+    def __init__(self, client: str, target: Path) -> None:
+        super().__init__(client)
+        self.target = target
+
+    def inventory(self, context: RuntimeContext) -> tuple[Candidate, ...]:
+        self.inventory_calls += 1
+        if not self.target.exists():
+            return ()
+        return (candidate(self.client, f"{self.client}-file", str(self.target)),)
+
+
+class NoopLifecycle:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def preflight(self, actions, context):
+        self.calls.append("preflight")
         return ()
 
 
@@ -147,7 +170,9 @@ class EngineTests(unittest.TestCase):
         )
         proven_report_only = candidate("client", "proven-report", str(self.home / "proven-report"), Ownership.PROVEN, "report_only")
         ambiguous = candidate("client", "ambiguous", str(self.home / "ambiguous"), Ownership.AMBIGUOUS, "report_only")
-        preserved = candidate("client", "preserved", str(self.home / "preserved"), Ownership.PRESERVED, "report_only")
+        preserved_path = self.home / "preserved"
+        preserved_path.write_text("baseline")
+        preserved = candidate("client", "preserved", str(preserved_path), Ownership.PRESERVED, "report_only")
         inventory = build_inventory(self.context, (FakeAdapter("client", candidates=(proven, proven_report_only, ambiguous, preserved)),))
         adapter = FakeAdapter("client")
 
@@ -240,6 +265,26 @@ class EngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "plan_approval_mismatch"):
             validate_approval(plan, str(plan.digest) + "\n")
 
+    def test_preserved_candidate_missing_baseline_fails_closed_during_plan_build(self):
+        missing = self.home / ".codex" / "config.toml"
+        inventory = build_inventory(
+            self.context,
+            (FakeAdapter("codex", candidates=(candidate("codex", "missing-mcp", str(missing), Ownership.PRESERVED, "report_only", details={"kind": "mcp"}),)),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "plan_preservation_baseline_unavailable"):
+            build_plan(inventory, self.context, (FakeAdapter("codex"),))
+
+    def test_duplicate_adapter_clients_are_rejected_before_inventory_calls(self):
+        first = FakeAdapter("client")
+        second = FakeAdapter("client")
+
+        with self.assertRaisesRegex(ValueError, "adapter_duplicate_client"):
+            build_inventory(self.context, (first, second))
+
+        self.assertEqual(first.inventory_calls, 0)
+        self.assertEqual(second.inventory_calls, 0)
+
 
 class VerificationTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -262,6 +307,59 @@ class VerificationTests(unittest.TestCase):
 
     def check_codes(self, result) -> list[str]:
         return [check.code for check in result.checks if check.status == "failed"]
+
+    def test_execute_plan_receipt_verifies_end_to_end_with_bound_inventory(self):
+        target = self.home / ".client" / "owned.txt"
+        target.parent.mkdir(parents=True)
+        target.write_text("remove me")
+        adapter = FileBackedAdapter("client", target)
+        inventory = build_inventory(self.context, (adapter,))
+        plan = build_plan(inventory, self.context, (adapter,))
+
+        receipt = execute_plan(plan, plan.digest or "", self.context, NoopLifecycle(), inventory=inventory)
+        result = verify_receipt(receipt, self.context, (adapter,))
+
+        self.assertEqual(receipt.status, ReceiptStatus.COMPLETED)
+        self.assertEqual(receipt.inventory, inventory)
+        self.assertFalse(target.exists())
+        self.assertEqual(result.status, "passed")
+
+    def test_verify_receipt_fails_stably_when_inventory_is_absent(self):
+        inventory = build_inventory(self.context, (FakeAdapter("client"),))
+        plan = build_plan(inventory, self.context, (FakeAdapter("client"),))
+        receipt = Receipt(status=ReceiptStatus.COMPLETED, plan=plan)
+
+        result = verify_receipt(receipt, self.context, (FakeAdapter("client"),))
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("verify_artifact_digest", self.check_codes(result))
+        self.assertTrue(any(check.evidence.get("error") == "missing_inventory" for check in result.checks))
+
+    def test_verifier_duplicate_adapter_clients_fail_before_verify_calls(self):
+        inventory, _plan, receipt = self.plan_receipt_for((FakeAdapter("client"),))
+        first = FakeAdapter("client")
+        second = FakeAdapter("client")
+
+        result = verify_receipt(receipt, self.context, (first, second))
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("verify_adapter_live", self.check_codes(result))
+        self.assertEqual(first.verify_calls, 0)
+        self.assertEqual(second.verify_calls, 0)
+        self.assertEqual(inventory.candidates, ())
+
+    def test_failed_adapter_check_does_not_also_emit_adapter_pass(self):
+        class FailingCheckAdapter(FakeAdapter):
+            def verify(self, receipt, context):
+                self.verify_calls += 1
+                return (Check(code="verify_adapter_live", status="failed", severity="error", evidence={"client": self.client}),)
+
+        _inventory, _plan, receipt = self.plan_receipt_for((FakeAdapter("client"),))
+
+        result = verify_receipt(receipt, self.context, (FailingCheckAdapter("client"),))
+
+        adapter_checks = [check for check in result.checks if check.code == "verify_adapter_live" and check.evidence.get("client") == "client"]
+        self.assertEqual([(check.status, check.severity) for check in adapter_checks], [("failed", "error")])
 
     def test_verification_reads_live_state_not_apply_outcomes(self):
         inventory, plan, receipt = self.plan_receipt_for((FakeAdapter("codex"),))

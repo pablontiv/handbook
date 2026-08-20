@@ -61,11 +61,12 @@ def verify_receipt(receipt: Receipt, context: RuntimeContext, adapters: object) 
     else:
         checks.extend(_verify_plan_artifact(plan, context))
 
-    if inventory is not None:
-        if isinstance(inventory, Inventory):
-            checks.extend(_verify_inventory_artifact(inventory, context, plan))
-        else:
-            checks.append(_failed("verify_artifact_digest", {"artifact": "inventory", "error": "invalid_inventory"}))
+    if inventory is None:
+        checks.append(_failed("verify_artifact_digest", {"artifact": "inventory", "error": "missing_inventory"}))
+    elif isinstance(inventory, Inventory):
+        checks.extend(_verify_inventory_artifact(inventory, context, plan))
+    else:
+        checks.append(_failed("verify_artifact_digest", {"artifact": "inventory", "error": "invalid_inventory"}))
 
     checks.extend(_verify_receipt_status_and_lifecycle(receipt))
 
@@ -285,17 +286,24 @@ def _verify_one_preservation(assertion: PreservationAssertion, preservation: Map
 
 def _run_adapter_live_verification(receipt: Receipt, context: RuntimeContext, adapters: object) -> tuple[Check, ...]:
     checks: list[Check] = []
-    for adapter in _ordered_adapters(adapters):
+    try:
+        ordered = _ordered_adapters(adapters)
+    except BaseException as exc:
+        return (_failed("verify_adapter_live", {"error": _stable_error(exc)}),)
+    for adapter in ordered:
         client = str(getattr(adapter, "client", ""))
+        adapter_failed = False
         try:
             returned = tuple(adapter.verify(receipt, context))  # type: ignore[attr-defined]
             for check in returned:
                 if isinstance(check, Check) and check.status == "failed":
+                    adapter_failed = True
                     checks.append(check)
         except BaseException as exc:
             checks.append(_failed(_adapter_error_code(exc), {"client": client, "error": _stable_error(exc)}))
             continue
-        checks.append(_passed("verify_adapter_live", {"client": client}))
+        if not adapter_failed:
+            checks.append(_passed("verify_adapter_live", {"client": client}))
     return tuple(checks)
 
 
@@ -399,6 +407,14 @@ def _ordered_adapters(adapters: object) -> tuple[object, ...]:
         values = list(adapters.values())
     else:
         values = list(adapters)  # type: ignore[arg-type]
+    seen: set[str] = set()
+    for adapter in values:
+        client = getattr(adapter, "client", None)
+        if not isinstance(client, str) or not client:
+            raise ValueError("adapter_invalid_client")
+        if client in seen:
+            raise ValueError("adapter_duplicate_client")
+        seen.add(client)
     return tuple(sorted(values, key=lambda adapter: str(getattr(adapter, "client", ""))))
 
 

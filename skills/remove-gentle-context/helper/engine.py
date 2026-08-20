@@ -188,9 +188,15 @@ def _operation_kind(operation: Operation) -> OperationKind:
 
 def _preservation_assertion(candidate: Candidate) -> PreservationAssertion:
     details = dict(candidate.details)
-    preservation = _normalized_preservation(candidate)
-    if preservation is not None:
-        details["preservation"] = preservation
+    try:
+        preservation = _normalized_preservation(candidate)
+    except OSError as exc:
+        raise ValueError("plan_preservation_baseline_unavailable") from exc
+    except (json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("plan_preservation_baseline_malformed") from exc
+    if preservation is None:
+        raise ValueError("plan_preservation_baseline_missing")
+    details["preservation"] = preservation
     return PreservationAssertion(
         candidate_id=candidate.candidate_id,
         client=candidate.client,
