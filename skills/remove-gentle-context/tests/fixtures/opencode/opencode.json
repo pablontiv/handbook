@@ -1,0 +1,39 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "gentle-orchestrator",
+  "agent": {
+    "general": {
+      "description": "Built-in compatible general agent override"
+    },
+    "gentle-orchestrator": {
+      "description": "Gentle OpenCode orchestrator"
+    },
+    "sdd-apply": {
+      "description": "Gentle SDD apply agent"
+    },
+    "unrelated-agent": {
+      "description": "Keep this agent"
+    }
+  },
+  "command": {
+    "sdd-apply": "Run Gentle apply flow",
+    "keep-command": "Keep this command"
+  },
+  "skill": {
+    "systemic-issue-triage": {
+      "description": "Personal skill registration remains until provenance is proven elsewhere"
+    },
+    "keep-skill": {
+      "description": "Keep this skill"
+    }
+  },
+  "mcp": {
+    "engram": {
+      "type": "stdio",
+      "command": "engram",
+      "args": [
+        "serve"
+      ]
+    }
+  }
+}

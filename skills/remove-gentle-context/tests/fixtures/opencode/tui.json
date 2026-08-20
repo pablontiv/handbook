@@ -1,0 +1,11 @@
+{
+  "plugin": [
+    "opencode-subagent-statusline",
+    "gentle-logo.tsx",
+    "opencode-sdd-engram-manage",
+    "opencode-sdd-engram-manage",
+    "./relative-gentle-logo.tsx",
+    "third-party-missing-plugin"
+  ],
+  "theme": "catppuccin"
+}

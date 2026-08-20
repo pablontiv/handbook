@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "opencode-sdd-engram-manage": "1.2.3",
+    "opencode-subagent-statusline": "4.5.6"
+  },
+  "devDependencies": {
+    "typescript": "latest"
+  }
+}
