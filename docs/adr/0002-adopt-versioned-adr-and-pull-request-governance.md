@@ -2,23 +2,23 @@
 tipo: adr
 estado: accepted
 fecha: "2026-08-20"
-contexto: "El repositorio implementó cambios significativos mientras las decisiones quedaban repartidas entre conversaciones, specs, AGENTS.md y ramas no integradas; main no tenía un registro ADR y una regla no justificada en AGENTS.md prohibía pull requests pese a la preferencia explícita de integración mediante PR."
+contexto: "El repositorio implementó cambios significativos mientras las decisiones quedaban repartidas entre conversaciones, specs, AGENTS.md y ramas no integradas; el PR #4 añadió el primer ADR después de la implementación y una regla no justificada en AGENTS.md seguía prohibiendo pull requests pese a la preferencia explícita de integración mediante PR."
 decision: "Adoptar docs/adr como registro versionado de decisiones, exigir que cada implementación identifique y revise su ADR gobernante antes de modificar código, registrar y aceptar toda decisión significativa antes de implementarla, y usar pull requests como vía normal de integración salvo una excepción humana explícita también registrada."
 consecuencias: "AGENTS.md deja de prohibir pull requests; specs y planes no sustituyen ADRs; los ADRs retrospectivos documentan una brecha pero no prueban gobernanza previa; las ramas con ADRs divergentes deben reconciliar estado, numeración y alcance antes de integrarse."
 ---
 
-# ADR 0001: Adoptar gobernanza versionada mediante ADR y pull requests
+# ADR 0002: Adoptar gobernanza versionada mediante ADR y pull requests
 
 ## Contexto
 
-Este repositorio publica skills portátiles y ya contiene implementaciones con decisiones relevantes sobre ownership, seguridad, portabilidad, selección de modelos y límites de workflow. Sin embargo, `main` no tenía `docs/adr/` ni `.adr/`. Las decisiones quedaron distribuidas entre documentos de diseño, planes, conversaciones persistidas y ramas de trabajo.
+Este repositorio publica skills portátiles y ya contiene implementaciones con decisiones relevantes sobre ownership, seguridad, portabilidad, selección de modelos y límites de workflow. Hasta el merge del PR #4, `main` no tenía `docs/adr/` ni `.adr/`; las decisiones estaban distribuidas entre documentos de diseño, planes, conversaciones persistidas y ramas de trabajo. El PR #4 integró el primer ADR junto con `systemic-issue-triage`, pero ese record fue creado después de los commits de implementación.
 
-La ausencia de un registro autoritativo produjo dos fallos verificables:
+La falta de una política ADR previa produjo dos fallos verificables:
 
 1. `AGENTS.md` declaró que los pull requests estaban deshabilitados sin un ADR que explicara la decisión, sus alternativas o sus consecuencias. Esa instrucción bloqueó delivery aunque existía una preferencia humana persistida que exige integración mediante PR.
-2. La implementación de `systemic-issue-triage` creó su ADR específico después de los commits de código. El documento describe correctamente el alcance final, pero al ser retrospectivo no gobernó la implementación que pretende justificar.
+2. La implementación de `systemic-issue-triage` creó su ADR específico después de los commits de código. El documento describe correctamente el alcance final y ahora está integrado como ADR 0001, pero al ser retrospectivo no gobernó la implementación que pretende justificar.
 
-También existen ADRs en ramas distintas con el mismo número `0001` y alcances incompatibles. Uno exige metadata, receipts e integración con cleanup; otro excluye explícitamente instalación, receipts e integración. Copiarlos ambos como `accepted` ocultaría el conflicto en lugar de resolverlo.
+También existe en una rama no integrada otro ADR numerado `0001` con un alcance incompatible: exige metadata, receipts e integración con cleanup, mientras el ADR 0001 integrado los excluye. Importarlo como `accepted` ocultaría el conflicto en lugar de resolverlo.
 
 ## Decisión
 
@@ -33,7 +33,7 @@ Se adopta `docs/adr/` como registro versionado y gobernado por el schema canóni
 7. Un ADR branch-local puede gobernar el trabajo de esa rama después de ser revisado, pero solo se convierte en autoridad compartida del repositorio al integrarse.
 8. Los ADRs conflictivos no se copian ni fusionan como aceptados. Deben marcarse `superseded`, dividirse por alcance o resolverse mediante un ADR posterior.
 9. Los cambios se integran mediante pull request. Una entrega directa a `main` requiere una excepción humana explícita para ese cambio y el registro de la razón y el riesgo aceptado.
-10. Antes de commit o PR, todo ADR nuevo o modificado debe pasar `rootline validate --strict` contra su `.stem` efectivo.
+10. Antes de commit o PR, cada ADR nuevo o modificado debe pasar `rootline validate docs/adr/<record>.md --strict` contra su `.stem` efectivo. La validación estricta se aplica al record concreto para no convertir warnings globales de salud del schema canónico en falsos bloqueos del documento.
 11. La descripción del PR debe enumerar los ADRs revisados, los ADRs creados o modificados y cualquier conflicto de gobernanza pendiente.
 
 ## Alternativas descartadas
@@ -48,8 +48,8 @@ Se adopta `docs/adr/` como registro versionado y gobernado por el schema canóni
 ## Consecuencias
 
 - `AGENTS.md` debe exigir preflight ADR y PR-based delivery en lugar de prohibir pull requests.
-- La primera integración de este ADR establece la numeración base. Los ADRs de features existentes deberán actualizarse contra ella antes de sus PRs.
-- El ADR de `systemic-issue-triage` que coincide con su implementación puede conservarse, renumerarse y viajar con esa feature.
+- El ADR 0001 integrado por el PR #4 establece la numeración base; este record ocupa el número 0002. Los ADRs de ramas futuras deberán actualizarse contra esa secuencia antes de sus PRs.
+- El ADR 0001 de `systemic-issue-triage` se conserva como decisión vigente de alcance, pero su carácter retrospectivo permanece explícito y no prueba gobernanza previa.
 - El ADR de intake sobre ownership, receipts e integración con cleanup queda pendiente de adjudicación porque contradice el alcance posterior; no se importa como aceptado en este bootstrap.
 - Las implementaciones ya presentes sin ADR no quedan retroactivamente legitimadas. Requieren una auditoría separada que identifique decisiones vigentes y registre únicamente las que todavía gobiernan comportamiento actual.
 - Cada PR tendrá una sección de gobernanza verificable, reduciendo la posibilidad de que una instrucción aislada bloquee o cambie delivery sin revisión humana.

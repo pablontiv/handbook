@@ -22,7 +22,7 @@ This repository publishes independent, portable Agent Skills. Keep every skill s
 ## Delivery
 
 - Before implementation, identify and review the accepted ADR that governs the change. If a significant decision is not covered, add or update an ADR under `docs/adr/` and obtain acceptance before modifying code.
-- Validate every new or modified ADR with `rootline validate --strict`.
+- Validate each new or modified ADR with `rootline validate docs/adr/<record>.md --strict`.
 - Use conventional commits.
 - Keep documentation synchronized with executable behavior.
 - Run the complete test suite before committing.
