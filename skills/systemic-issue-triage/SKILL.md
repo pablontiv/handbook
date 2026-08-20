@@ -22,7 +22,7 @@ Triage verified issues by root class. Shrink the system by grouping shared cause
 ## Input Contract
 
 - Verify source issues or tickets before classifying them. Preserve their identifiers and evidence references.
-- Treat an issue's stated mechanism is a hypothesis; the observed symptom is evidence.
+- Treat an issue's stated mechanism as a hypothesis; the observed symptom is evidence.
 - If evidence is missing or the report cannot be classified, use Bucket E and ask the reporter. Do not guess.
 - Reproduce claims when repository or runtime access exists. If access does not exist, mark the evidence pending and name the exact verification needed.
 

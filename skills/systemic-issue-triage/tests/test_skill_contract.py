@@ -49,7 +49,7 @@ class SkillContractTests(unittest.TestCase):
             "Bucket E",
             "root-cause cluster",
             "named test evidence",
-            "mechanism is a hypothesis",
+            "mechanism as a hypothesis",
             "One root cause produces one cluster",
         ):
             self.assertIn(phrase, text)
