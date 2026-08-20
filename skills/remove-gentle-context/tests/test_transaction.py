@@ -781,6 +781,10 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "before")
         self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
         self.assertEqual(receipt.status, ReceiptStatus.NOT_STARTED)
+        self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
+        manifest_data = json.loads(receipt.backup_manifest_path.read_text())
+        self.assertEqual(manifest_data["plan_digest"], plan.digest)
+        self.assertEqual(manifest_data["digest"], digest_json({key: value for key, value in manifest_data.items() if key != "digest"}))
         self.assertEqual(receipt.operation_outcomes[0].status, "failed")
         self.assertEqual(receipt.operation_outcomes[0].error, "journal_append_failed")
 
@@ -867,6 +871,103 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual([(outcome.operation_index, outcome.status, outcome.error) for outcome in raised.exception.outcomes], [(0, "completed", None), (1, "failed", "journal_append_failed")])
         self.assertEqual(first.read_text(), "after-one")
         self.assertEqual(second.read_text(), "before-two")
+
+    def test_manifest_missing_second_entry_rolls_back_completed_first_and_restarts(self):
+        first = self.make_file("manifest-missing-one.txt", "before-one")
+        second = self.make_file("manifest-missing-two.txt", "before-two")
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        second_plan = write_plan(second, b"before-two", b"after-two", home=self.home)
+        base_plan = Plan(
+            os_name="linux",
+            home=str(self.home),
+            operations=(first_plan.operations[0], second_plan.operations[0]),
+            lifecycle_actions=(
+                LifecycleAction(
+                    candidate_id="codex-config",
+                    client="codex",
+                    action="stop",
+                    target="codex",
+                    reason="quiesce before edit",
+                    details={"process_name": "codex", "restart_argv": ["/usr/bin/codex", "--foreground"]},
+                ),
+            ),
+        ).with_digest()
+        inventory, plan = self.bind_plan(base_plan)
+        lifecycle = FakeTransactionLifecycle()
+
+        manifest = create_backup(plan, self.context)
+        tampered_manifest = replace(manifest, entries=(manifest.entries[0],)).with_digest()
+        manifest.path.write_text(json.dumps(tampered_manifest.to_dict(), sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+        with patch("helper.transaction.create_backup", return_value=tampered_manifest):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(first.read_text(), "before-one")
+        self.assertEqual(second.read_text(), "before-two")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.status, ReceiptStatus.ROLLED_BACK)
+        self.assertEqual(receipt.backup_manifest_path, tampered_manifest.path)
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "completed", None), (1, "failed", "apply_manifest_missing_entry"), (0, "rolled_back", None)],
+        )
+
+    def test_manifest_missing_second_entry_restart_failure_requires_manual_recovery(self):
+        first = self.make_file("manifest-missing-restart-one.txt", "before-one")
+        second = self.make_file("manifest-missing-restart-two.txt", "before-two")
+        first_plan = write_plan(first, b"before-one", b"after-one", home=self.home)
+        second_plan = write_plan(second, b"before-two", b"after-two", home=self.home)
+        base_plan = Plan(
+            os_name="linux",
+            home=str(self.home),
+            operations=(first_plan.operations[0], second_plan.operations[0]),
+            lifecycle_actions=(
+                LifecycleAction(
+                    candidate_id="codex-config",
+                    client="codex",
+                    action="stop",
+                    target="codex",
+                    reason="quiesce before edit",
+                    details={"process_name": "codex", "restart_argv": ["/usr/bin/codex", "--foreground"]},
+                ),
+            ),
+        ).with_digest()
+        inventory, plan = self.bind_plan(base_plan)
+        lifecycle = FakeTransactionLifecycle(restart_succeeds=False)
+
+        manifest = create_backup(plan, self.context)
+        tampered_manifest = replace(manifest, entries=(manifest.entries[0],)).with_digest()
+        manifest.path.write_text(json.dumps(tampered_manifest.to_dict(), sort_keys=True, separators=(",", ":")), encoding="utf-8")
+
+        with patch("helper.transaction.create_backup", return_value=tampered_manifest):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(first.read_text(), "before-one")
+        self.assertEqual(second.read_text(), "before-two")
+        self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
+        self.assertEqual(receipt.lifecycle_outcomes[-1].status, "failed")
+        self.assertEqual(receipt.lifecycle_outcomes[-1].code, "lifecycle_restart_failed")
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "completed", None), (1, "failed", "apply_manifest_missing_entry"), (0, "rolled_back", None)],
+        )
+
+    def test_unexpected_apply_exception_before_mutation_uses_manual_fallback_and_restarts(self):
+        target = self.make_file("unexpected-apply-fallback.txt", "before")
+        inventory, plan = self.bind_plan(lifecycle_write_plan(target, b"before", b"after", home=self.home))
+        lifecycle = FakeTransactionLifecycle()
+
+        with patch("helper.transaction.apply_operations", side_effect=RuntimeError("injected unexpected apply failure")):
+            receipt = execute_plan(plan, plan.digest or "", self.context, lifecycle, inventory=inventory)
+
+        self.assertEqual(target.read_text(), "before")
+        self.assertEqual(lifecycle.calls, ["preflight", "stop", "restart"])
+        self.assertEqual(receipt.status, ReceiptStatus.MANUAL_RECOVERY_REQUIRED)
+        self.assertTrue(receipt.backup_manifest_path and receipt.backup_manifest_path.exists())
+        self.assertEqual(
+            [(outcome.operation_index, outcome.status, outcome.error) for outcome in receipt.operation_outcomes],
+            [(0, "failed", "transaction_failed")],
+        )
 
     def test_restart_failure_after_successful_apply_requires_manual_recovery(self):
         target = self.make_file(".codex/config.toml", "before")

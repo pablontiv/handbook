@@ -89,7 +89,7 @@ The atomic publication contract is mandatory. Artifact and backup publication mu
 
 ## recovery states
 
-- `not_started`: no mutation attempted; rerun inventory or plan.
+- `not_started`: no target mutation attempted. Two valid forms exist: backup failed before manifest publication (no manifest path), or mutation was blocked before the first target write after a verified backup (receipt retains backup manifest path/digest authority).
 - `blocked`: ambiguous ownership, missing authority, unsupported structure, or Pi process probe unavailable; report only and replan after evidence changes.
 - `backed_up`: verified backup exists, but mutation has not completed; restore authority is the manifest digest.
 - `rolled_back`: apply failed and atomic rollback restored all preimages; run verify and report receipt.

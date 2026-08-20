@@ -57,7 +57,8 @@ def apply_operations(plan: Plan, manifest: BackupManifest, context: RuntimeConte
     for index, operation in enumerate(plan.operations):
         entry = entries_by_index.get(index)
         if entry is None:
-            raise ValueError("apply_manifest_missing_entry")
+            failed = OperationOutcome(index, str(operation.kind), operation.path, "failed", "apply_manifest_missing_entry")
+            raise OperationApplyError("apply_manifest_missing_entry", tuple(outcomes + [failed]))
         try:
             _append_journal(manifest, "before", index, operation)
         except BaseException as exc:
