@@ -189,22 +189,65 @@ class PiAdapterTests(unittest.TestCase):
     def test_windows_appdata_pi_settings_external_root_apply_restore_and_drift_rejection(self) -> None:
         self.exercise_external_platform_config_settings(os_name="windows", env_key="APPDATA", settings_relative=Path("Pi") / "settings.json")
 
-    def test_disables_registration_but_preserves_installed_package(self) -> None:
+    def test_disables_all_exact_gentle_pi_registration_selectors_but_preserves_installed_package(self) -> None:
+        remove_selectors = [
+            "npm:gentle-pi",
+            "npm:gentle-pi@1.2.3",
+            "npm:gentle-pi@1",
+            "npm:gentle-pi@1.2.3-beta.1+build.7",
+            "npm:gentle-pi@latest",
+            "npm:gentle-pi@next",
+            "npm:gentle-pi@beta",
+            "npm:gentle-pi@^1.2.3",
+            "npm:gentle-pi@~1.2",
+            "npm:gentle-pi@>=1.2.3",
+            "npm:gentle-pi@github:pablontiv/gentle-pi",
+        ]
+        preserve_selectors = [
+            "npm:gentle-pi-extra",
+            "npm:@scope/gentle-pi",
+            "npm:gentle-engram",
+            "",
+            " ",
+            "npm:gentle-pi@",
+            "npm:gentle-pi@latest tag",
+            "npm:gentle-pi @latest",
+            " npm:gentle-pi",
+            "npm:other-package",
+        ]
+        self.settings.write_text(json.dumps({"packages": remove_selectors + preserve_selectors}, indent=2) + "\n")
         adapter = PiAdapter(self.catalog, process_probe=FakePiProbe())
         candidates = adapter.inventory(self.context)
-        registration = one(c for c in candidates if c.details.get("package") == "npm:gentle-pi")
+        registration = one(c for c in candidates if c.path == str(self.settings))
         self.assertEqual(registration.ownership, Ownership.PROVEN)
+        self.assertEqual(tuple(remove_selectors), registration.details["active_packages"])
+
         plan = plan_for(self.context, adapter)
         apply_to_fixture(plan, self.context)
         adapter.verify(type("ReceiptLike", (), {"operation_outcomes": (), "checks": ()})(), self.context)
 
         settings = json.loads(self.settings.read_text())
-        self.assertNotIn("npm:gentle-pi", settings["packages"])
-        self.assertNotIn("npm:gentle-pi@1.2.3", settings["packages"])
-        self.assertIn("npm:gentle-pi@latest", settings["packages"])
-        self.assertIn("npm:gentle-engram", settings["packages"])
+        for selector in remove_selectors:
+            with self.subTest(selector=selector):
+                self.assertNotIn(selector, settings["packages"])
+        for selector in preserve_selectors:
+            with self.subTest(selector=selector):
+                self.assertIn(selector, settings["packages"])
         self.assertTrue(self.node_modules_package.is_dir())
         self.assertTrue((self.node_modules_bin / "gentle-pi").is_file())
+
+        second_inventory = build_inventory(self.context, (PiAdapter(self.catalog),))
+        second_plan = build_plan(second_inventory, self.context, (PiAdapter(self.catalog),))
+        self.assertFalse(any(candidate.path == str(self.settings) and candidate.ownership is Ownership.PROVEN for candidate in second_inventory.candidates))
+        self.assertNotIn(str(self.settings), {operation.path for operation in second_plan.operations})
+
+    def test_verify_uses_same_selector_predicate_as_apply(self) -> None:
+        self.registry.unlink()
+        self.settings.write_text('{"packages":["npm:gentle-pi@latest"]}\n')
+        adapter = PiAdapter(self.catalog, process_probe=FakePiProbe())
+
+        with self.assertRaisesRegex(ValueError, "verify_pi_package_registration_present"):
+            adapter.verify(type("ReceiptLike", (), {"operation_outcomes": (), "checks": ()})(), self.context)
 
     def test_registry_requires_full_generator_signature_and_schema(self) -> None:
         adapter = PiAdapter(self.catalog, process_probe=FakePiProbe())

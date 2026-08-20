@@ -9,7 +9,7 @@ from typing import Any, Mapping, Sequence
 
 from helper.canonical import digest_json
 from helper.models import ArtifactClass, Candidate, Check, Operation, OperationKind, Ownership, Preimage, Receipt, RuntimeContext
-from helper.ownership import classify_exact_file_ownership, load_ownership_catalog
+from helper.ownership import classify_exact_file_ownership, load_ownership_catalog, recognized_managed_marker_evidence
 
 CLIENT = "opencode"
 VERSION = "1"
@@ -85,8 +85,8 @@ class OpenCodeAdapter:
         if kind == "config_json_cleanup":
             path = Path(candidate.path)
             data = _load_json_object(path)
-            after, _actions, ambiguous_default = _sanitize_config(data, self._gentle_config_names(), self.general_builtin_fallback)
-            if ambiguous_default or after == data:
+            after, _actions, _ambiguous_default, _ambiguous_entries = _sanitize_config(data, self._gentle_config_names(), self.general_builtin_fallback, self.catalog)
+            if after == data:
                 return ()
             return (_write_json_operation(candidate, after, operation="sanitize_opencode_config"),)
         if kind == "tui_json_cleanup":
@@ -110,13 +110,9 @@ class OpenCodeAdapter:
 
         if config_path.is_file():
             data = _load_json_object(config_path)
-            if data.get("default_agent") == _DEFAULT_GENTLE_AGENT:
-                raise ValueError("verify_opencode_default_agent_present")
-            gentle_names = self._gentle_config_names()
-            for family in _CONFIG_FAMILIES:
-                raw = data.get(family)
-                if isinstance(raw, Mapping) and any(name in raw for name in gentle_names):
-                    raise ValueError("verify_opencode_gentle_config_entry_present")
+            after, _actions, _ambiguous_default, _ambiguous_entries = _sanitize_config(data, self._gentle_config_names(), self.general_builtin_fallback, self.catalog)
+            if after != data:
+                raise ValueError("verify_opencode_gentle_config_entry_present")
 
         if tui_path.is_file():
             data = _load_json_object(tui_path)
@@ -136,7 +132,7 @@ class OpenCodeAdapter:
         return tuple(receipt.checks)
 
     def _config_candidates(self, path: Path, data: Mapping[str, Any]) -> list[Candidate]:
-        after, actions, ambiguous_default = _sanitize_config(data, self._gentle_config_names(), self.general_builtin_fallback)
+        after, actions, ambiguous_default, ambiguous_entries = _sanitize_config(data, self._gentle_config_names(), self.general_builtin_fallback, self.catalog)
         candidates: list[Candidate] = []
         if ambiguous_default:
             candidates.append(_candidate(
@@ -145,9 +141,22 @@ class OpenCodeAdapter:
                 artifact_class=ArtifactClass.AMBIGUOUS,
                 ownership=Ownership.AMBIGUOUS,
                 proposed_action="report_only",
-                evidence=({"kind": "default_agent", "value": _DEFAULT_GENTLE_AGENT},),
-                reason="OpenCode default_agent references gentle-orchestrator, but general is neither configured nor allowed as a documented built-in fallback",
-                details={"kind": "default_agent", "default_agent": _DEFAULT_GENTLE_AGENT, "fallback": _DEFAULT_FALLBACK_AGENT},
+                evidence=({"kind": "default_agent", "value": data.get("default_agent")},),
+                reason="OpenCode default_agent references a catalog Gentle registration, but the active default does not have proven removable registration evidence and a safe fallback",
+                details={"kind": "default_agent", "default_agent": data.get("default_agent"), "fallback": _DEFAULT_FALLBACK_AGENT},
+            ))
+        for entry in ambiguous_entries:
+            family = str(entry.get("family", ""))
+            name = str(entry.get("name", ""))
+            candidates.append(_candidate(
+                rule_id=f"config-entry:ambiguous:{family}:{name}",
+                target=path,
+                artifact_class=ArtifactClass.AMBIGUOUS,
+                ownership=Ownership.AMBIGUOUS,
+                proposed_action="report_only",
+                evidence=({"kind": "config_entry", "family": family, "name": name, "catalog_identity": True},),
+                reason="OpenCode config entry matches a catalog name, but catalog key/name alone does not prove removal ownership",
+                details={"kind": "config_entry", "family": family, "name": name},
             ))
         if after != data:
             candidates.append(_candidate(
@@ -306,12 +315,6 @@ class OpenCodeAdapter:
         details = dict(decision.details)
         details.update({"kind": kind})
 
-        if ownership == Ownership.AMBIGUOUS and _has_gentle_text_marker(target):
-            ownership = Ownership.PROVEN
-            proposed_action = "delete_file"
-            reason = "Gentle-managed local OpenCode file corroborated by textual gentle-ai marker evidence"
-            evidence.append({"kind": "marker", "value": "gentle-ai:"})
-
         return _candidate(
             rule_id=rule_id,
             target=target,
@@ -336,31 +339,87 @@ class OpenCodeAdapter:
         return tuple(name for name in raw if isinstance(name, str))
 
 
-def _sanitize_config(data: Mapping[str, Any], gentle_names: Sequence[str], general_builtin_fallback: bool) -> tuple[dict[str, Any], list[dict[str, object]], bool]:
+def _sanitize_config(data: Mapping[str, Any], gentle_names: Sequence[str], general_builtin_fallback: bool, catalog: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, object]], bool, list[dict[str, object]]]:
     after = copy.deepcopy(dict(data))
     actions: list[dict[str, object]] = []
+    ambiguous_entries: list[dict[str, object]] = []
     ambiguous_default = False
-    if after.get("default_agent") == _DEFAULT_GENTLE_AGENT:
-        agent_map = after.get("agent")
+    gentle_set = set(gentle_names)
+    marker_prefix = _marker_prefix(catalog)
+    proven_by_family: dict[str, dict[str, tuple[dict[str, object], ...]]] = {}
+
+    for family in _CONFIG_FAMILIES:
+        raw = data.get(family)
+        if not isinstance(raw, Mapping):
+            continue
+        for name, value in raw.items():
+            if not isinstance(name, str) or name not in gentle_set:
+                continue
+            proof = _config_entry_managed_proof(family, name, value, marker_prefix)
+            if proof:
+                proven_by_family.setdefault(family, {})[name] = proof
+            else:
+                ambiguous_entries.append({"family": family, "name": name})
+
+    default_agent = data.get("default_agent")
+    default_change_allowed = False
+    if isinstance(default_agent, str) and default_agent in gentle_set:
+        agent_map = data.get("agent")
         general_configured = isinstance(agent_map, Mapping) and _DEFAULT_FALLBACK_AGENT in agent_map
-        if general_configured or general_builtin_fallback:
+        default_proven = default_agent in proven_by_family.get("agent", {})
+        default_change_allowed = default_proven and (general_configured or general_builtin_fallback)
+        if default_change_allowed:
             after["default_agent"] = _DEFAULT_FALLBACK_AGENT
-            actions.append({"kind": "default_agent", "from": _DEFAULT_GENTLE_AGENT, "to": _DEFAULT_FALLBACK_AGENT, "fallback": "configured" if general_configured else "documented_builtin"})
+            actions.append({"kind": "default_agent", "from": default_agent, "to": _DEFAULT_FALLBACK_AGENT, "fallback": "configured" if general_configured else "documented_builtin"})
         else:
             ambiguous_default = True
 
-    gentle_set = set(gentle_names)
     for family in _CONFIG_FAMILIES:
         raw = after.get(family)
         if not isinstance(raw, dict):
             continue
-        removed = [name for name in list(raw.keys()) if name in gentle_set]
-        if not removed:
-            continue
-        for name in removed:
-            raw.pop(name, None)
-        actions.append({"kind": "config_entries", "family": family, "removed": tuple(removed)})
-    return after, actions, ambiguous_default
+        removed: list[str] = []
+        proof_evidence: list[dict[str, object]] = []
+        for name, proof in proven_by_family.get(family, {}).items():
+            if family == "agent" and name == default_agent and not default_change_allowed:
+                continue
+            if name in raw:
+                raw.pop(name, None)
+                removed.append(name)
+                proof_evidence.extend(proof)
+        if removed:
+            actions.append({"kind": "config_entries", "family": family, "removed": tuple(removed), "evidence": tuple(proof_evidence)})
+    return after, actions, ambiguous_default, ambiguous_entries
+
+
+def _marker_prefix(catalog: Mapping[str, Any]) -> str:
+    value = catalog.get("marker_prefix")
+    return value if isinstance(value, str) and value else "gentle-ai:"
+
+
+def _config_entry_managed_proof(family: str, name: str, value: object, marker_prefix: str) -> tuple[dict[str, object], ...]:
+    for text in _string_values(value):
+        for marker in recognized_managed_marker_evidence(text, marker_prefix):
+            if marker.get("identifier") == name:
+                return (
+                    {"kind": "config_entry", "family": family, "name": name, "catalog_identity": True},
+                    {"kind": "marker", "value": marker["value"], "identifier": name},
+                )
+    return ()
+
+
+def _string_values(value: object) -> tuple[str, ...]:
+    values: list[str] = []
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            values.append(current)
+        elif isinstance(current, Mapping):
+            stack.extend(current.values())
+        elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
+            stack.extend(current)
+    return tuple(values)
 
 
 def _remove_plugin_values(data: Mapping[str, Any], remove_values: Sequence[str]) -> dict[str, Any]:
@@ -532,14 +591,6 @@ def _is_absolute_path(value: str) -> bool:
         return Path(value).expanduser().is_absolute()
     except (OSError, ValueError):
         return False
-
-
-def _has_gentle_text_marker(target: Path) -> bool:
-    try:
-        text = target.read_text(errors="replace")
-    except OSError:
-        return False
-    return "gentle-ai:" in text or "Auto-generated by gentle-pi extensions/skill-registry.ts" in text
 
 
 def _sha256(content: bytes) -> str:

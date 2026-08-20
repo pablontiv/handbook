@@ -67,6 +67,11 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertIn(("opencode-sdd-engram-manage", ArtifactClass.ACTIVE_SOURCE), kinds)
 
     def test_compile_preserves_package_mcp_unrelated_plugins_and_order(self) -> None:
+        data = json.loads(self.config.read_text())
+        data["agent"]["gentle-orchestrator"]["managed_marker"] = "<!-- gentle-ai:gentle-orchestrator -->"
+        data["agent"]["sdd-apply"]["managed_marker"] = "<!-- gentle-ai:sdd-apply -->"
+        self.config.write_text(json.dumps(data, indent=2) + "\n")
+
         plan = plan_for(self.context, OpenCodeAdapter(self.catalog))
         apply_to_fixture(plan, self.context)
         OpenCodeAdapter(self.catalog).verify(type("ReceiptLike", (), {"operation_outcomes": (), "checks": ()})(), self.context)
@@ -126,23 +131,97 @@ class OpenCodeAdapterTests(unittest.TestCase):
         decoded = json.loads(base64.b64decode(postimages[0].postimage_base64 or ""))
         self.assertIn("third-party-missing-plugin", decoded["plugin"])
 
-    def test_local_plugin_file_deletes_only_with_marker_evidence(self) -> None:
+    def test_local_plugin_file_deletes_only_with_standalone_managed_marker_evidence(self) -> None:
         owned = self.config_dir / "managed-gentle-plugin.tsx"
-        owned.write_text("// <!-- gentle-ai:opencode-plugin -->\nexport default {}\n")
+        owned.write_text("<!-- gentle-ai:opencode-plugin -->\nexport default {}\n")
+        commented_marker = self.config_dir / "commented-marker-plugin.tsx"
+        commented_marker.write_text("// <!-- gentle-ai:opencode-plugin -->\nexport default {}\n")
+        prose_marker = self.config_dir / "prose-marker-plugin.tsx"
+        prose_marker.write_text("A prose note mentions gentle-ai:opencode-plugin but is not managed metadata.\n")
         unowned = self.config_dir / "unowned-gentle-plugin.tsx"
         unowned.write_text("export default {}\n")
         data = json.loads(self.tui.read_text())
-        data["plugin"].extend([str(owned), str(unowned)])
+        data["plugin"].extend([str(owned), str(commented_marker), str(prose_marker), str(unowned)])
         self.tui.write_text(json.dumps(data, indent=2) + "\n")
 
         inventory = build_inventory(self.context, (OpenCodeAdapter(self.catalog),))
         plan = build_plan(inventory, self.context, (OpenCodeAdapter(self.catalog),))
 
-        self.assertIn(str(owned), {operation.path for operation in plan.operations if operation.kind is OperationKind.DELETE_FILE})
+        delete_paths = {operation.path for operation in plan.operations if operation.kind is OperationKind.DELETE_FILE}
+        self.assertIn(str(owned), delete_paths)
+        self.assertNotIn(str(commented_marker), delete_paths)
+        self.assertNotIn(str(prose_marker), delete_paths)
         self.assertNotIn(str(unowned), {operation.path for operation in plan.operations})
-        ambiguous = [candidate for candidate in inventory.candidates if candidate.path == str(unowned)]
+        for target in (commented_marker, prose_marker, unowned):
+            ambiguous = [candidate for candidate in inventory.candidates if candidate.path == str(target)]
+            self.assertEqual(len(ambiguous), 1)
+            self.assertEqual(ambiguous[0].ownership, Ownership.AMBIGUOUS)
+
+    def test_structured_config_entries_require_managed_proof_not_catalog_key_alone(self) -> None:
+        data = json.loads(self.config.read_text())
+        data["default_agent"] = "general"
+        data["agent"]["sdd-apply"] = {"description": "User-authored same-name agent must remain"}
+        data["command"]["sdd-apply"] = {
+            "description": "Managed command can be removed",
+            "managed_marker": "<!-- gentle-ai:sdd-apply -->",
+        }
+        self.config.write_text(json.dumps(data, indent=2) + "\n")
+
+        inventory = build_inventory(self.context, (OpenCodeAdapter(self.catalog),))
+        plan = build_plan(inventory, self.context, (OpenCodeAdapter(self.catalog),))
+        postimages = [operation for operation in plan.operations if operation.path == str(self.config)]
+        self.assertEqual(len(postimages), 1)
+        decoded = json.loads(base64.b64decode(postimages[0].postimage_base64 or ""))
+
+        self.assertIn("sdd-apply", decoded["agent"])
+        self.assertNotIn("sdd-apply", decoded["command"])
+        ambiguous = [
+            candidate
+            for candidate in inventory.candidates
+            if candidate.details.get("kind") == "config_entry"
+            and candidate.details.get("family") == "agent"
+            and candidate.details.get("name") == "sdd-apply"
+        ]
         self.assertEqual(len(ambiguous), 1)
         self.assertEqual(ambiguous[0].ownership, Ownership.AMBIGUOUS)
+
+    def test_default_agent_change_requires_proven_removable_registration(self) -> None:
+        data = json.loads(self.config.read_text())
+        data["agent"]["general"] = {"description": "fallback"}
+        data["agent"]["gentle-orchestrator"] = {"description": "User-authored same-name default"}
+        self.config.write_text(json.dumps(data, indent=2) + "\n")
+
+        inventory = build_inventory(self.context, (OpenCodeAdapter(self.catalog),))
+        plan = build_plan(inventory, self.context, (OpenCodeAdapter(self.catalog),))
+        config_operations = [operation for operation in plan.operations if operation.path == str(self.config)]
+        self.assertEqual(config_operations, [])
+        defaults = [candidate for candidate in inventory.candidates if candidate.details.get("kind") == "default_agent"]
+        self.assertEqual(len(defaults), 1)
+        self.assertEqual(defaults[0].ownership, Ownership.AMBIGUOUS)
+        self.assertIn(defaults[0].candidate_id, plan.blocked_candidate_ids)
+
+    def test_personal_author_marker_vetoes_open_code_skill_file_delete_without_full_chain(self) -> None:
+        skill = self.config_dir / "skill" / "systemic-issue-triage" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text(
+            "---\n"
+            "name: systemic-issue-triage\n"
+            "metadata:\n"
+            "  author: pablontiv\n"
+            "  version: 1.0.0\n"
+            "---\n"
+            "<!-- gentle-ai:systemic-issue-triage -->\n"
+            "Personal adaptation with an adversarial marker.\n"
+        )
+
+        inventory = build_inventory(self.context, (OpenCodeAdapter(self.catalog),))
+        candidates = [candidate for candidate in inventory.candidates if candidate.path == str(skill)]
+        plan = build_plan(inventory, self.context, (OpenCodeAdapter(self.catalog),))
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].ownership, Ownership.AMBIGUOUS)
+        self.assertEqual(candidates[0].proposed_action, "report_only")
+        self.assertNotIn(str(skill), {operation.path for operation in plan.operations})
 
     def test_personal_skill_ownership_vetoes_open_code_skill_file_delete(self) -> None:
         skill = self.config_dir / "skill" / "systemic-issue-triage" / "SKILL.md"
@@ -160,6 +239,7 @@ class OpenCodeAdapterTests(unittest.TestCase):
             "  upstream-commit: d1e1777faafc91a34656ba94bd712972dbe427a1\n"
             "  ownership: personal\n"
             "---\n"
+            "<!-- gentle-ai:systemic-issue-triage -->\n"
             "Personal adaptation.\n"
         )
         release_catalog = dict(self.catalog)

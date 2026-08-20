@@ -587,7 +587,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(opencode_config.read_text())["mcp"], opencode_mcp_before)
         self.assertTrue((self.home / ".pi" / "node_modules" / "gentle-pi").is_dir())
         self.assertTrue((self.home / ".config" / "opencode" / "node_modules" / "opencode-sdd-engram-manage").is_dir())
-        self.assertIn("npm:gentle-pi@latest", json.loads((self.home / ".pi" / "settings.json").read_text())["packages"])
+        self.assertNotIn("npm:gentle-pi@latest", json.loads((self.home / ".pi" / "settings.json").read_text())["packages"])
 
         restored = self.restore(receipt.json["backup_manifest_path"], receipt.json["backup_manifest_digest"], receipt.json["receipt_path"])
         self.assertEqual(restored.json["status"], "completed")
