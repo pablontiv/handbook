@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from helper.runner import CommandRunner, redact_text
+from helper.runner import CommandRunner, MAX_STDOUT_LIMIT_CHARS, MAX_STREAM_CHARS, redact_text
 
 
 class RunnerTests(unittest.TestCase):
@@ -119,12 +119,49 @@ class RunnerTests(unittest.TestCase):
             timeout=5,
             cwd=Path.cwd(),
         )
-        self.assertLessEqual(len(result.stdout), 8192)
-        self.assertLessEqual(len(result.stderr), 8192)
+        self.assertLessEqual(len(result.stdout), MAX_STREAM_CHARS)
+        self.assertLessEqual(len(result.stderr), MAX_STREAM_CHARS)
         self.assertNotIn("OUT_HEAD", result.stdout)
         self.assertNotIn("ERR_HEAD", result.stderr)
         self.assertTrue(result.stdout.endswith("OUT_TAIL"))
         self.assertTrue(result.stderr.endswith("ERR_TAIL"))
+        self.assertTrue(result.stdout_truncated)
+        self.assertTrue(result.stderr_truncated)
+
+    def test_stdout_limit_above_default_preserves_complete_stdout_without_truncation(self):
+        payload = "OUT_HEAD" + ("o" * 9000) + "OUT_TAIL"
+        result = CommandRunner().run(
+            (sys.executable, "-c", "import sys; sys.stdout.write('OUT_HEAD' + 'o' * 9000 + 'OUT_TAIL')"),
+            timeout=5,
+            cwd=Path.cwd(),
+            stdout_limit=16384,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, payload)
+        self.assertFalse(result.stdout_truncated)
+
+    def test_stdout_exactly_at_limit_is_not_marked_truncated(self):
+        payload = "x" * MAX_STREAM_CHARS
+        result = CommandRunner().run(
+            (sys.executable, "-c", f"import sys; sys.stdout.write('x' * {MAX_STREAM_CHARS})"),
+            timeout=5,
+            cwd=Path.cwd(),
+        )
+        self.assertEqual(result.stdout, payload)
+        self.assertFalse(result.stdout_truncated)
+
+    def test_stdout_limit_validation_rejects_invalid_values(self):
+        runner = CommandRunner()
+        invalid_values = (True, False, 0, -1, 1.5, "1024", None, MAX_STDOUT_LIMIT_CHARS + 1)
+        for value in invalid_values:
+            with self.subTest(stdout_limit=value):
+                with self.assertRaisesRegex(ValueError, "runner_invalid_stdout_limit"):
+                    runner.run(
+                        (sys.executable, "-c", "print('ok')"),
+                        timeout=1,
+                        cwd=Path.cwd(),
+                        stdout_limit=value,
+                    )
 
     def test_sensitive_inherited_and_overlay_env_are_redacted_from_both_streams(self):
         inherited_key = "RUNNER_TEST_TOKEN"
@@ -167,7 +204,16 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("[REDACTED]", stream)
         self.assertEqual(
             set(result.__dict__),
-            {"argv", "returncode", "stdout", "stderr", "elapsed_ms", "timed_out"},
+            {
+                "argv",
+                "returncode",
+                "stdout",
+                "stderr",
+                "elapsed_ms",
+                "timed_out",
+                "stdout_truncated",
+                "stderr_truncated",
+            },
         )
 
     @unittest.skipIf(os.name == "nt", "POSIX process-group cleanup is validated on POSIX hosts only")
@@ -275,8 +321,8 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(fake_process.killed)
         kwargs = popen.call_args.kwargs
         self.assertFalse(kwargs["shell"])
-        self.assertEqual(kwargs["encoding"], "utf-8")
-        self.assertEqual(kwargs["errors"], "replace")
+        self.assertNotIn("encoding", kwargs)
+        self.assertNotIn("errors", kwargs)
         self.assertNotIn("start_new_session", kwargs)
         self.assertEqual(kwargs["creationflags"], getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
 

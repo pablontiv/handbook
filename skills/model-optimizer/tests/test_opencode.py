@@ -12,6 +12,7 @@ from helper.adapters.opencode import (
     parse_opencode_models_verbose,
 )
 from helper.models import HealthStatus, ModelRecord, ReadinessStatus
+from helper.runner import MAX_STDOUT_LIMIT_CHARS, CompletedCommand
 from tests.support import FakeRunner, _command, assert_test_path, fixture_text
 
 
@@ -35,6 +36,46 @@ class OpenCodeAdapterTests(unittest.TestCase):
         ready = parse_opencode_auth(fixture_text("opencode/auth-list.txt"))
         self.assertEqual({r.provider for r in ready}, {"openai", "minimax-coding-plan", "nan"})
         self.assertTrue(all(r.status is ReadinessStatus.READY for r in ready))
+
+    def test_auth_parser_ignores_opencode_framing_lines(self):
+        text = "\n".join((
+            "┌  Credentials \x1b[90m~/.local/share/opencode/auth.json",
+            "│",
+            "●  OpenAI \x1b[90moauth",
+            "│",
+            "●  MiniMax Token Plan (minimax.io) \x1b[90mapi",
+            "│",
+            "●  Z.AI Coding Plan \x1b[90mapi",
+            "│",
+            "●  nan \x1b[90mapi",
+            "│",
+            "└  4 credentials",
+        ))
+        ready = parse_opencode_auth(text)
+        self.assertEqual(len(ready), 4)
+        self.assertTrue(all(item.status is ReadinessStatus.READY for item in ready))
+        self.assertEqual({item.provider for item in ready}, {"openai", "minimax-coding-plan", "zai-coding-plan", "nan"})
+        self.assertEqual({item.auth_type for item in ready}, {"oauth", "api"})
+        self.assertFalse(any(item.provider == "UNKNOWN" for item in ready))
+
+    def test_auth_parser_unknown_bullet_label_is_still_unknown(self):
+        ready = parse_opencode_auth("●  Mystery Provider \x1b[90mapi\n")
+        self.assertEqual(len(ready), 1)
+        self.assertEqual(ready[0].provider, "UNKNOWN")
+        self.assertEqual(ready[0].status, ReadinessStatus.UNKNOWN)
+        self.assertEqual(ready[0].reason_code, "auth_unknown_provider_label")
+        self.assertIsNone(ready[0].auth_type)
+
+    def test_auth_parser_legacy_fixture_behavior_is_unchanged(self):
+        ready = parse_opencode_auth(fixture_text("opencode/auth-list.txt"))
+        self.assertEqual(
+            [(item.provider, item.auth_type, item.status, item.reason_code) for item in ready],
+            [
+                ("openai", "oauth", ReadinessStatus.READY, "auth_ready"),
+                ("minimax-coding-plan", "api", ReadinessStatus.READY, "auth_ready"),
+                ("nan", "api", ReadinessStatus.READY, "auth_ready"),
+            ],
+        )
 
     def test_every_shipped_auth_display_label_has_explicit_mapping(self):
         cases = {
@@ -203,6 +244,45 @@ openai/gpt-5.6-terra
         models = adapter.list_models(self.context)
         self.assertEqual([m.exact_id for m in models], ["nan/qwen3.6", "openai/gpt-5.6-terra"])
         self.assertIn("inventory_malformed_model_block:bad/provider", adapter.warnings)
+
+    def test_list_models_uses_structured_stdout_limit_and_keeps_large_catalog_complete(self):
+        ids = tuple(f"openai/gpt-{index:03d}" for index in range(72))
+        blocks: list[str] = []
+        for exact_id in ids:
+            provider, model = exact_id.split("/", 1)
+            metadata = {
+                "id": model,
+                "providerID": provider,
+                "family": "gpt",
+                "description": "x" * 180,
+            }
+            blocks.append(f"{exact_id}\n{json.dumps(metadata)}\n")
+        verbose = "".join(blocks)
+        self.assertGreater(len(verbose), 8192)
+
+        runner = FakeRunner((_command(verbose),))
+        adapter = OpenCodeAdapter(runner)
+        models = adapter.list_models(self.context)
+
+        self.assertEqual(runner.stdout_limits, [MAX_STDOUT_LIMIT_CHARS])
+        parsed_ids = [model.exact_id for model in models]
+        self.assertEqual(parsed_ids[0], ids[0])
+        self.assertEqual(parsed_ids[-1], ids[-1])
+
+    def test_list_models_warns_when_structured_stdout_is_still_truncated(self):
+        text = """\
+openai/gpt-first
+{"id":"gpt-first","providerID":"openai"}
+openai/gpt-second
+{"id":"gpt-second","providerID":"openai"}
+"""
+        runner = FakeRunner((CompletedCommand((), 0, text, "", 1, False, True, False),))
+        adapter = OpenCodeAdapter(runner)
+
+        models = adapter.list_models(self.context)
+
+        self.assertEqual([item.exact_id for item in models], ["openai/gpt-first", "openai/gpt-second"])
+        self.assertIn("inventory_list_models_truncated", adapter.warnings)
 
     def test_snapshot_reads_project_agents_and_preserves_only_present_options(self):
         self._write_project_config()

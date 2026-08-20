@@ -22,6 +22,7 @@ class FakeRunner:
     def __init__(self, responses: tuple[CompletedCommand, ...]):
         self.responses = deque(responses)
         self.argv: list[tuple[str, ...]] = []
+        self.stdout_limits: list[int | None] = []
 
     @classmethod
     def stdout(cls, text: str, returncode: int = 0) -> "FakeRunner":
@@ -30,8 +31,9 @@ class FakeRunner:
             elapsed_ms=1, timed_out=False,
         ),))
 
-    def run(self, argv, timeout, cwd, env_overlay=None):
+    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None):
         self.argv.append(tuple(argv))
+        self.stdout_limits.append(stdout_limit)
         if not self.responses:
             raise AssertionError(f"unexpected command: {tuple(argv)!r}")
         result = self.responses.popleft()
@@ -39,6 +41,8 @@ class FakeRunner:
             argv=tuple(argv), returncode=result.returncode,
             stdout=result.stdout, stderr=result.stderr,
             elapsed_ms=result.elapsed_ms, timed_out=result.timed_out,
+            stdout_truncated=result.stdout_truncated,
+            stderr_truncated=result.stderr_truncated,
         )
 
 

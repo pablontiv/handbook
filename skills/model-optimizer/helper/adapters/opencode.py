@@ -22,7 +22,7 @@ from helper.models import (
     RuntimeInfo,
     RuntimeKind,
 )
-from helper.runner import redact_text
+from helper.runner import MAX_STDOUT_LIMIT_CHARS, redact_text
 
 from . import RuntimeContext
 
@@ -34,6 +34,7 @@ DISPLAY_TO_PROVIDER = {
 }
 
 _ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_OPENCODE_AUTH_FRAME_PREFIXES = frozenset({"┌", "│", "●", "└"})
 _SAFE_AUTH_TYPES = frozenset({"api", "oauth"})
 _EXACT_ID_RE = re.compile(r"^[^\s/{]+/[^\s/{]+$")
 _SECRET_KEY_RE = re.compile(r"token|key|secret|password|cookie|authorization|credential", re.IGNORECASE)
@@ -84,10 +85,19 @@ def _auth_type_or_none(value: Any) -> str | None:
     return normalized
 
 
+def _normalize_opencode_auth_line(raw_line: str) -> str:
+    line = (raw_line or "").strip()
+    if not line:
+        return ""
+    if line[0] in _OPENCODE_AUTH_FRAME_PREFIXES:
+        return line[1:].strip()
+    return line
+
+
 def parse_opencode_auth(text: str) -> tuple[ProviderReadiness, ...]:
     readiness: list[ProviderReadiness] = []
     for raw_line in _strip_ansi(text).splitlines():
-        line = raw_line.strip()
+        line = _normalize_opencode_auth_line(raw_line)
         if not line:
             continue
         if line.startswith("Credentials "):
@@ -467,7 +477,13 @@ class OpenCodeAdapter:
         )
 
     def list_models(self, context: RuntimeContext) -> tuple[ModelRecord, ...]:
-        result = self.runner.run(("opencode", "models", "--verbose"), timeout=_DEFAULT_TIMEOUT_SECONDS, cwd=context.cwd, env_overlay=context.env)
+        result = self.runner.run(
+            ("opencode", "models", "--verbose"),
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            cwd=context.cwd,
+            env_overlay=context.env,
+            stdout_limit=MAX_STDOUT_LIMIT_CHARS,
+        )
         if result.timed_out:
             self._warn("inventory_list_models_timeout")
             return ()
@@ -475,6 +491,8 @@ class OpenCodeAdapter:
             self._warn("inventory_list_models_failed")
             return ()
         records, warnings = _parse_opencode_models_verbose_with_warnings(result.stdout)
+        if result.stdout_truncated:
+            self._warn("inventory_list_models_truncated")
         for warning in warnings:
             self._warn(warning)
         if not records:
