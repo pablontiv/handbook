@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Mapping, Sequence
 
 from .canonical import digest_json
@@ -518,7 +518,7 @@ class Receipt:
     def to_dict(self) -> dict[str, object]:
         return {
             "operation_outcomes": [_to_dict(o) for o in self.operation_outcomes],
-            "backup_manifest_path": None if self.backup_manifest_path is None else str(self.backup_manifest_path),
+            "backup_manifest_path": None if self.backup_manifest_path is None else _path_artifact_text(self.backup_manifest_path),
             "lifecycle_outcomes": [_to_dict(o) for o in self.lifecycle_outcomes],
             "checks": [c.to_dict() if hasattr(c, "to_dict") else _json_safe(getattr(c, "__dict__", {})) for c in self.checks],
             "status": None if self.status is None else str(self.status),
@@ -541,11 +541,15 @@ def _to_dict(value: object) -> dict[str, object]:
     return _json_safe(raw) if isinstance(raw, dict) else {"value": _json_safe(raw)}
 
 
+def _path_artifact_text(value: PurePath) -> str:
+    return value.as_posix()
+
+
 def _json_safe(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
-    if isinstance(value, Path):
-        return str(value)
+    if isinstance(value, PurePath):
+        return _path_artifact_text(value)
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):

@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest import mock
 
 
@@ -180,6 +180,54 @@ class CliTests(unittest.TestCase):
         shutil.copy2(FIXTURES / "pi" / "skill-registry.md", registry)
         return registry
 
+    def git_blob_bytes(self, path: Path) -> bytes:
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        completed = subprocess.run(
+            ["git", "cat-file", "blob", f"HEAD:{relative}"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            self.fail(completed.stderr.decode("utf-8", errors="replace"))
+        return completed.stdout
+
+    def test_repository_eol_policy_preserves_byte_sensitive_fixtures(self) -> None:
+        attributes_path = REPO_ROOT / ".gitattributes"
+        attributes_lines = attributes_path.read_text(encoding="utf-8").splitlines()
+        crlf_fixture = FIXTURES / "declarative" / "json-surgery-crlf.json"
+        lf_fixture = FIXTURES / "declarative" / "json-surgery-formatting.json"
+        crlf_fixture_attr = crlf_fixture.relative_to(REPO_ROOT).as_posix() + " -text"
+
+        self.assertIn("* text=auto eol=lf", attributes_lines)
+        self.assertIn(crlf_fixture_attr, attributes_lines)
+
+        crlf_blob = self.git_blob_bytes(crlf_fixture)
+        lf_blob = self.git_blob_bytes(lf_fixture)
+        self.assertIn(b"\r\n", crlf_blob, "intentional CRLF fixture must stay byte-for-byte CRLF in Git")
+        self.assertNotIn(b"\r\n", lf_blob, "ordinary JSON fixture blobs must stay LF in Git")
+
+    def test_receipt_artifact_serializes_backup_manifest_path_with_forward_slashes(self) -> None:
+        cleanup = load_cleanup_module()
+        windows_manifest = PureWindowsPath("C:/gentle-example/state/remove-gentle-context/backups/example/manifest.json")
+        receipt = cleanup.Receipt(backup_manifest_path=windows_manifest, status=cleanup.ReceiptStatus.COMPLETED)
+
+        artifact = cleanup.receipt_artifact(receipt)
+
+        self.assertIs(receipt.backup_manifest_path, windows_manifest)
+        self.assertEqual(artifact["backup_manifest_path"], "C:/gentle-example/state/remove-gentle-context/backups/example/manifest.json")
+        self.assertNotIn("\\", artifact["backup_manifest_path"])
+
+        native_manifest = self.artifacts / "manifest.json"
+        native_manifest.write_text('{"schema":"remove-gentle-context.backup/v1"}\n', encoding="utf-8")
+        native_receipt = cleanup.Receipt(backup_manifest_path=native_manifest, status=cleanup.ReceiptStatus.COMPLETED)
+        native_artifact = cleanup.receipt_artifact(native_receipt)
+        native_receipt_path = self.write_contract_json_example("native-receipt.json", native_artifact)
+        loaded_native_receipt = cleanup.load_receipt(native_receipt_path)
+
+        self.assertIsInstance(loaded_native_receipt.backup_manifest_path, Path)
+        self.assertEqual(loaded_native_receipt.backup_manifest_path.read_text(encoding="utf-8"), native_manifest.read_text(encoding="utf-8"))
+
     def test_cli_file_has_portable_shebang_and_posix_executable_mode(self) -> None:
         first_line = SCRIPT.read_text(encoding="utf-8").splitlines()[0]
         self.assertEqual(first_line, "#!/usr/bin/env python3")
@@ -315,7 +363,7 @@ class CliTests(unittest.TestCase):
         receipt = cleanup.load_receipt(receipt_path)
         self.assertEqual(cleanup.receipt_artifact(receipt), examples["Receipt JSON"])
         cleanup.assert_receipt_binding(receipt, inventory, plan, phase="docs")
-        self.assertEqual(str(receipt.backup_manifest_path), examples["Receipt JSON"]["backup_manifest_path"])
+        self.assertEqual(receipt.backup_manifest_path.as_posix(), examples["Receipt JSON"]["backup_manifest_path"])
         self.assertEqual(tuple(receipt.checks), ())
         for outcome in receipt.operation_outcomes:
             operation = operations_by_index[outcome.operation_index]
