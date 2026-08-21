@@ -101,12 +101,16 @@ class CommandRunner:
         env_overlay: Mapping[str, str] | None = None,
         *,
         stdout_limit: int = MAX_STREAM_CHARS,
+        env_replacement: Mapping[str, str] | None = None,
     ) -> CompletedCommand:
         command = _validate_argv(argv)
         bounded_stdout_limit = _validate_stdout_limit(stdout_limit)
-        env = dict(os.environ)
-        if env_overlay:
-            env.update(env_overlay)
+        if env_replacement is not None:
+            env = dict(env_replacement)
+        else:
+            env = dict(os.environ)
+            if env_overlay:
+                env.update(env_overlay)
         sensitive_values = _sensitive_env_values(env)
         start = time.monotonic()
         timed_out = False

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from helper.evaluator import (
     FixturePolicy,
     PreparedWorkspace,
     RoleEvalRequest,
+    SandboxAttestation,
     prepare_workspace_marker,
 )
 from helper.models import HealthStatus, ModelRecord, ReadinessStatus, RuntimeKind
@@ -31,10 +33,10 @@ class EnvCapturingRunner(FakeRunner):
         self.env_overlays = []
         self.cwd_values = []
 
-    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None):
+    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None):
         self.env_overlays.append(dict(env_overlay or {}))
         self.cwd_values.append(Path(cwd))
-        return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit)
+        return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement)
 
 
 def _probe_agent_name(token: str) -> str:
@@ -450,12 +452,13 @@ openai/gpt-second
             "Reply exactly: PONG",
         ))
         self.assertEqual(context.env, original_env)
-        env = runner.env_overlays[-1]
+        env = runner.env_replacements[-1]
+        self.assertIsNotNone(env)
         self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "deny"})
         inline = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        self.assertEqual(inline["theme"], "dark")
+        self.assertNotIn("theme", inline)
         self.assertEqual(inline["permission"], {"*": "deny"})
-        self.assertEqual(inline["agent"]["worker"], {"model": "openai/gpt-5.6-terra"})
+        self.assertEqual(set(inline["agent"]), {agent_name})
         self.assertEqual(inline["agent"][agent_name], {"permission": "deny"})
 
     def test_live_check_adds_deny_all_inline_config_when_env_has_no_existing_config(self):
@@ -470,7 +473,8 @@ openai/gpt-second
         check = self._live_check_with_token(runner, model, None, "PONG", 60, self.context, token=token)
 
         self.assertEqual(check.status, HealthStatus.PASS)
-        env = runner.env_overlays[-1]
+        env = runner.env_replacements[-1]
+        self.assertIsNotNone(env)
         self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "deny"})
         inline = json.loads(env["OPENCODE_CONFIG_CONTENT"])
         self.assertEqual(inline["permission"], {"*": "deny"})
@@ -644,21 +648,24 @@ openai/gpt-second
         self.assertEqual(check.reason_code, "live_unsafe_permission_config")
         self.assertNotIn(secret, check.detail)
 
-    def test_live_check_malformed_inline_config_fails_closed_without_launch_or_leak(self):
-        runner = EnvCapturingRunner((_command('{"type":"text","part":{"text":"PONG"}}\n'),))
+    def test_live_check_omits_malformed_ambient_inline_config_without_leak(self):
+        token = "7" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+        ))
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6")
         secret_config = '{"apiKey":"sk-inline-secret"'
         context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENCODE_CONFIG_CONTENT": secret_config})
 
-        check = OpenCodeAdapter(runner).live_check(model, None, "PONG", 60, context)
+        check = self._live_check_with_token(runner, model, None, "PONG", 60, context, token=token)
 
-        self.assertEqual(check.status, HealthStatus.FAIL)
-        self.assertEqual(check.reason_code, "live_unsafe_permission_config")
-        self.assertFalse(check.response_matched)
-        self.assertEqual(runner.argv, [])
-        self.assertEqual(runner.env_overlays, [])
+        self.assertEqual(check.status, HealthStatus.PASS)
         self.assertEqual(context.env["OPENCODE_CONFIG_CONTENT"], secret_config)
-        self.assertNotIn("sk-inline-secret", check.detail)
+        env = runner.env_replacements[-1]
+        self.assertIsNotNone(env)
+        self.assertNotIn("sk-inline-secret", json.dumps(env))
         self.assertNotIn("OPENCODE_CONFIG_CONTENT", check.detail)
 
     def test_error_event_is_fail_even_when_process_exit_is_zero(self):
@@ -895,7 +902,14 @@ openai/gpt-second
         workspace_root = self.root / "eval-workspace"
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
-        workspace = PreparedWorkspace(workspace_root, "token-opencode", "docker")
+        workspace = PreparedWorkspace(workspace_root, "token-opencode", SandboxAttestation(
+            backend="docker",
+            workspace_root=str(workspace_root.resolve()),
+            workspace_token="token-opencode",
+            profile_digest="sha256:" + hashlib.sha256(f"docker:{workspace_root.resolve()}:network=none:env=minimal".encode("utf-8")).hexdigest(),
+            observed_at="2026-08-21T00:00:00Z",
+            self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
+        ))
         fixture = FixturePolicy(
             fixture_id="mechanical",
             fixture_version="v1",
@@ -964,10 +978,11 @@ openai/gpt-second
             },
         }
         runner = EnvCapturingRunner((
+            _command("1.18.18\n"),
             _command(json.dumps(debug_payload)),
-            _command('{"type":"text","part":{"text":"done"}}\n'),
+            _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'),
             _command("tests ok"),
-            _command("src/out.txt\n"),
+            _command("?? src/out.txt\n"),
         ))
         original_env = {
             "OPENCODE_CONFIG_CONTENT": json.dumps({"plugin": ["ambient"], "permission": {"bash": "allow"}}),
@@ -978,32 +993,35 @@ openai/gpt-second
             result = OpenCodeAdapter(runner).role_eval(request, context)
         self.assertEqual(result.status, "PASS")
         self.assertEqual(context.env, original_env)
-        self.assertEqual(runner.argv[0], ("opencode", "debug", "config", "--pure"))
-        self.assertEqual(runner.argv[1], (
+        self.assertEqual(runner.argv[0], ("opencode", "--version"))
+        self.assertEqual(runner.argv[1], ("opencode", "debug", "config", "--pure"))
+        self.assertEqual(runner.argv[2], (
             "opencode", "run", "--pure", "--format", "json", "--model", request.route.model,
             "--variant", request.route.effort, "--agent", agent_name, "--dir", str(request.workspace.root), request.task,
         ))
-        debug_env = runner.env_overlays[0]
+        debug_env = runner.env_replacements[1]
+        self.assertIsNotNone(debug_env)
         self.assertIn("XDG_CONFIG_HOME", debug_env)
+        self.assertIn("XDG_DATA_HOME", debug_env)
         self.assertNotIn("OPENCODE_CONFIG_CONTENT", debug_env)
+        self.assertNotIn("OPENCODE_PERMISSION", debug_env)
         self.assertEqual(debug_env["OPENCODE_TOKEN"], "runtime-auth-token")
         config_path = Path(debug_env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json"
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        self.assertEqual(config, debug_payload)
+        self.assertFalse(config_path.exists(), "isolated config root should be cleaned after role_eval")
         self.assertEqual(result.audit.command_runs[-1].command_id, "cmd-test")
-        self.assertEqual(runner.argv[2][:4], ("docker", "run", "--rm", "--network"))
-        self.assertEqual(runner.argv[-1], ("git", "diff", "--name-only"))
+        self.assertEqual(runner.argv[3][:4], ("docker", "run", "--rm", "--network"))
+        self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain", "--untracked-files=all"))
 
     def test_role_eval_rejects_hostile_effective_global_config_before_launch(self):
         request = self._role_eval_request()
         agent_name = "model-optimizer-eval-" + "b" * 32
         hostile = {"agent": {agent_name: {"prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"bash": "allow"}}}}
-        runner = EnvCapturingRunner((_command(json.dumps(hostile)),))
+        runner = EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(hostile)),))
         with patch("helper.adapters.opencode.secrets.token_hex", return_value="b" * 32):
             result = OpenCodeAdapter(runner).role_eval(request, self.context)
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertIn("eval_opencode_effective_config_mismatch", result.reason_codes)
-        self.assertEqual(runner.argv, [("opencode", "debug", "config", "--pure")])
+        self.assertEqual(runner.argv, [("opencode", "--version"), ("opencode", "debug", "config", "--pure")])
 
     def test_reload_semantics_reports_restart_required_for_config_changes(self):
         semantics = OpenCodeAdapter(FakeRunner.stdout("1.18.18\n")).reload_semantics(self.context)

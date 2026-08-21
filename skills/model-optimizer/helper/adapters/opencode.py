@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import secrets
+import shutil
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -369,28 +371,21 @@ def _new_probe_agent_name() -> str | None:
 
 
 def _live_probe_env_overlay(context: RuntimeContext, probe_agent_name: str) -> dict[str, str] | None:
-    inline_text = context.env.get("OPENCODE_CONFIG_CONTENT")
-    if inline_text is None or inline_text == "":
-        inline_config: dict[str, Any] = {}
-    else:
-        try:
-            parsed = json.loads(inline_text)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(parsed, Mapping):
-            return None
-        inline_config = dict(parsed)
-
-    agents_value = inline_config.get("agent")
-    agents = dict(agents_value) if isinstance(agents_value, Mapping) else {}
-    agents[probe_agent_name] = {"permission": "deny"}
-    inline_config["permission"] = dict(_DENY_ALL_PERMISSION)
-    inline_config["agent"] = agents
-
-    overlay = dict(context.env)
-    overlay["OPENCODE_PERMISSION"] = json.dumps(_DENY_ALL_PERMISSION, sort_keys=True, separators=(",", ":"))
-    overlay["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline_config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return overlay
+    inline_config: dict[str, Any] = {
+        "permission": dict(_DENY_ALL_PERMISSION),
+        "agent": {probe_agent_name: {"permission": "deny"}},
+    }
+    env: dict[str, str] = {}
+    if "PATH" in context.env:
+        env["PATH"] = context.env["PATH"]
+    elif "PATH" in os.environ:
+        env["PATH"] = os.environ["PATH"]
+    for key in ("OPENCODE_TOKEN", "OPENCODE_API_KEY", "OPENCODE_AUTH", "OPENCODE_CONSOLE_TOKEN"):
+        if key in context.env:
+            env[key] = context.env[key]
+    env["OPENCODE_PERMISSION"] = json.dumps(_DENY_ALL_PERMISSION, sort_keys=True, separators=(",", ":"))
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(inline_config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return env
 
 
 def _permission_is_deny_all(value: Any) -> bool:
@@ -660,11 +655,11 @@ class OpenCodeAdapter:
         if probe_agent_name is None:
             return self._health(model_record, effort, HealthStatus.FAIL, 0, "live_unsafe_permission_config", False, "unsafe permission config")
 
-        env_overlay = _live_probe_env_overlay(context, probe_agent_name)
-        if env_overlay is None:
+        env_replacement = _live_probe_env_overlay(context, probe_agent_name)
+        if env_replacement is None:
             return self._health(model_record, effort, HealthStatus.FAIL, 0, "live_unsafe_permission_config", False, "unsafe permission config")
 
-        probe_failure = self._verify_effective_permission_config(model_record, effort, context, env_overlay, probe_agent_name)
+        probe_failure = self._verify_effective_permission_config(model_record, effort, context, env_replacement, probe_agent_name)
         if probe_failure is not None:
             return probe_failure
 
@@ -673,7 +668,7 @@ class OpenCodeAdapter:
             argv.extend(("--variant", effort))
         argv.extend(("--agent", probe_agent_name))
         argv.append(f"Reply exactly: {sentinel}")
-        result = self.runner.run(tuple(argv), timeout=timeout, cwd=context.cwd, env_overlay=env_overlay)
+        result = self.runner.run(tuple(argv), timeout=timeout, cwd=context.cwd, env_replacement=env_replacement)
 
         if result.timed_out:
             return self._health(model_record, effort, HealthStatus.HANG, result.elapsed_ms, "live_timeout", False, result.stdout or result.stderr or "timeout")
@@ -709,7 +704,11 @@ class OpenCodeAdapter:
             return inconclusive_result(request, "eval_runtime_kind_mismatch")
         if unsupported_custom_tools(request.agent):
             return inconclusive_result(request, "eval_essential_custom_tool_unproven")
-        if request.fixture.requires_code_execution and request.workspace.sandbox_backend is None:
+        minimal_env = {"PATH": context.env.get("PATH") or os.environ.get("PATH", "")}
+        version = self.runner.run(("opencode", "--version"), timeout=10, cwd=context.cwd, env_replacement=minimal_env, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
+        if version.timed_out or version.returncode != 0 or version.stdout.strip() != request.route.runtime_version:
+            return inconclusive_result(request, "eval_runtime_version_mismatch", elapsed_ms=version.elapsed_ms)
+        if request.fixture.requires_code_execution and request.workspace.sandbox_attestation is None:
             return inconclusive_result(request, "eval_sandbox_unavailable")
         try:
             validate_role_eval_request(request)
@@ -721,27 +720,37 @@ class OpenCodeAdapter:
             return inconclusive_result(request, "eval_opencode_agent_name_unsafe")
         agent_name = f"model-optimizer-eval-{token}"
         xdg_config_home = request.workspace.root / f".opencode-eval-config-{token}"
+        xdg_data_home = request.workspace.root / f".opencode-eval-data-{token}"
         config_dir = xdg_config_home / "opencode"
         config_dir.mkdir(parents=True, exist_ok=True)
+        xdg_data_home.mkdir(parents=True, exist_ok=True)
         expected_config = opencode_eval_config(request, agent_name)
         config_path = config_dir / "opencode.json"
-        config_path.write_text(json.dumps(expected_config, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
-        env_overlay = isolated_opencode_env(context.env, xdg_config_home)
+        config_bytes = json.dumps(expected_config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        config_path.write_bytes(config_bytes)
+        env_replacement = isolated_opencode_env(context.env, xdg_config_home, xdg_data_home)
+
+        def cleanup() -> None:
+            shutil.rmtree(xdg_config_home, ignore_errors=True)
+            shutil.rmtree(xdg_data_home, ignore_errors=True)
 
         debug = self.runner.run(
             ("opencode", "debug", "config", "--pure"),
             timeout=_DEFAULT_TIMEOUT_SECONDS,
             cwd=request.workspace.root,
-            env_overlay=env_overlay,
+            env_replacement=env_replacement,
             stdout_limit=MAX_STDOUT_LIMIT_CHARS,
         )
         if debug.timed_out or debug.returncode != 0 or debug.stdout_truncated:
+            cleanup()
             return inconclusive_result(request, "eval_opencode_effective_config_mismatch", elapsed_ms=debug.elapsed_ms)
         try:
             effective = json.loads(debug.stdout)
         except json.JSONDecodeError:
+            cleanup()
             return inconclusive_result(request, "eval_opencode_effective_config_mismatch", elapsed_ms=debug.elapsed_ms)
         if not effective_config_matches(effective, expected_config, agent_name):
+            cleanup()
             return inconclusive_result(request, "eval_opencode_effective_config_mismatch", elapsed_ms=debug.elapsed_ms)
 
         argv = [
@@ -756,11 +765,16 @@ class OpenCodeAdapter:
         if request.route.effort:
             argv.extend(("--variant", request.route.effort))
         argv.extend(("--agent", agent_name, "--dir", str(request.workspace.root), request.task))
-        run = self.runner.run(tuple(argv), timeout=request.timeout, cwd=request.workspace.root, env_overlay=env_overlay, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
+        run = self.runner.run(tuple(argv), timeout=request.timeout, cwd=request.workspace.root, env_replacement=env_replacement, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
         if run.timed_out:
+            cleanup()
             return inconclusive_result(request, "eval_timeout", elapsed_ms=run.elapsed_ms)
+        if run.stdout_truncated:
+            cleanup()
+            return inconclusive_result(request, "eval_truncated_audit_stream", elapsed_ms=run.elapsed_ms)
         if run.returncode != 0:
             diagnostic = "\n".join(part for part in (run.stderr, run.stdout) if part)
+            cleanup()
             if re.search(r"rate.?limit|quota", diagnostic, re.IGNORECASE):
                 return inconclusive_result(request, "eval_rate_limited", elapsed_ms=run.elapsed_ms)
             return inconclusive_result(request, "eval_runtime_nonzero", elapsed_ms=run.elapsed_ms)
@@ -769,13 +783,14 @@ class OpenCodeAdapter:
         parsed = parse_opencode_eval_events(run.stdout, request.workspace, parse_fixture)
         role_result = result_from_parsed(request, parsed, run.elapsed_ms)
         if role_result.status == "INCONCLUSIVE":
+            cleanup()
             return role_result
 
         command_runs = run_manifest_commands(
             self.runner,
             request.workspace,
             request.fixture,
-            request.workspace.sandbox_backend,
+            request.workspace.sandbox_attestation,
             timeout=request.timeout,
             env={},
         )
@@ -785,8 +800,11 @@ class OpenCodeAdapter:
             role_result = append_command_audits(role_result, command_runs, status="INCONCLUSIVE", reason_codes=("eval_required_command_failed",))
         else:
             role_result = append_command_audits(role_result, command_runs, status="PASS", reason_codes=())
-        diff = self.runner.run(("git", "diff", "--name-only"), timeout=10, cwd=request.workspace.root, env_overlay={}, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
-        return with_changed_paths(role_result, changed_paths_from_git_diff(diff, request.workspace))
+        diff = self.runner.run(("git", "status", "--porcelain", "--untracked-files=all"), timeout=10, cwd=request.workspace.root, env_replacement=minimal_env, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
+        try:
+            return with_changed_paths(role_result, changed_paths_from_git_diff(diff, request.workspace))
+        finally:
+            cleanup()
 
     def reload_semantics(self, context: RuntimeContext) -> dict[str, Any]:
         return {
@@ -848,7 +866,7 @@ class OpenCodeAdapter:
             ("opencode", "debug", "config"),
             timeout=_DEFAULT_TIMEOUT_SECONDS,
             cwd=context.cwd,
-            env_overlay=env_overlay,
+            env_replacement=env_overlay,
             stdout_limit=MAX_STDOUT_LIMIT_CHARS,
         )
         if result.timed_out or result.returncode != 0 or result.stdout_truncated:

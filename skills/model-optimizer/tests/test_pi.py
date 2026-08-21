@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import tempfile
@@ -12,6 +13,7 @@ from helper.evaluator import (
     FixturePolicy,
     PreparedWorkspace,
     RoleEvalRequest,
+    SandboxAttestation,
     prepare_workspace_marker,
 )
 from helper.models import HealthStatus, ModelRecord, ProviderReadiness, ReadinessStatus, RuntimeKind
@@ -493,7 +495,14 @@ ok-provider     ok-model    1K       2K       yes       no
         workspace_root = self.root / "eval-workspace"
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
-        workspace = PreparedWorkspace(workspace_root, "token-pi", "docker")
+        workspace = PreparedWorkspace(workspace_root, "token-pi", SandboxAttestation(
+            backend="docker",
+            workspace_root=str(workspace_root.resolve()),
+            workspace_token="token-pi",
+            profile_digest="sha256:" + hashlib.sha256(f"docker:{workspace_root.resolve()}:network=none:env=minimal".encode("utf-8")).hexdigest(),
+            observed_at="2026-08-21T00:00:00Z",
+            self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
+        ))
         fixture = FixturePolicy(
             fixture_id="mechanical",
             fixture_version="v1",
@@ -543,13 +552,17 @@ ok-provider     ok-model    1K       2K       yes       no
     def test_role_eval_constructs_confined_pi_command_and_parses_audit(self):
         request = self._role_eval_request()
         events = "\n".join((
-            json.dumps({"type": "tool", "tool": "bash", "argv": ["python3", "-m", "unittest"], "exit_code": 0, "elapsed_ms": 10, "sandbox_backend": "docker"}),
-            json.dumps({"type": "tool", "tool": "write", "path": "src/out.txt"}),
+            json.dumps({"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "call-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 10, "sandbox_backend": "docker"}}}),
+            json.dumps({"type": "tool_execution_start", "toolCallId": "call-2", "toolName": "write", "args": {"path": "src/out.txt"}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "call-2", "toolName": "write", "isError": False, "result": {"details": {}}}),
         ))
-        runner = FakeRunner((_command(events), _command("src/out.txt\n")))
+        runner = FakeRunner((_command("0.84.2\n"), _command(events), _command("?? src/out.txt\n")))
         result = PiAdapter(runner).role_eval(request, self.context)
         argv = runner.argv[0]
-        for flag in ("--no-extensions", "--no-builtin-tools", "--extension", "--no-session", "--no-context-files", "--no-skills", "--no-prompt-templates", "--tools", "--system-prompt"):
+        self.assertEqual(runner.argv[0], ("pi", "--version"))
+        argv = runner.argv[1]
+        for flag in ("--no-extensions", "--no-builtin-tools", "--extension", "--mode", "json", "--no-session", "--no-context-files", "--no-skills", "--no-prompt-templates", "--tools", "--system-prompt"):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index("--model") + 1], request.route.model)
         self.assertEqual(argv[argv.index("--thinking") + 1], request.route.effort)
@@ -560,7 +573,7 @@ ok-provider     ok-model    1K       2K       yes       no
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.audit.changed_paths, ("src/out.txt",))
         self.assertEqual(runner.stdout_limits[0], MAX_STDOUT_LIMIT_CHARS)
-        self.assertEqual(runner.argv[-1], ("git", "diff", "--name-only"))
+        self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain", "--untracked-files=all"))
 
     def test_role_eval_unsupported_custom_tool_fails_closed_without_ambient_extension(self):
         request = self._role_eval_request()

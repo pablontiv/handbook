@@ -23,6 +23,9 @@ class FakeRunner:
         self.responses = deque(responses)
         self.argv: list[tuple[str, ...]] = []
         self.stdout_limits: list[int | None] = []
+        self.env_overlays: list[dict[str, str]] = []
+        self.env_replacements: list[dict[str, str] | None] = []
+        self.cwd_values: list[Path] = []
 
     @classmethod
     def stdout(cls, text: str, returncode: int = 0) -> "FakeRunner":
@@ -31,9 +34,12 @@ class FakeRunner:
             elapsed_ms=1, timed_out=False,
         ),))
 
-    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None):
+    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None):
         self.argv.append(tuple(argv))
         self.stdout_limits.append(stdout_limit)
+        self.env_overlays.append(dict(env_overlay or {}))
+        self.env_replacements.append(dict(env_replacement) if env_replacement is not None else None)
+        self.cwd_values.append(Path(cwd))
         if not self.responses:
             raise AssertionError(f"unexpected command: {tuple(argv)!r}")
         result = self.responses.popleft()
