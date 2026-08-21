@@ -328,6 +328,29 @@ class PressureHarnessTests(unittest.TestCase):
                     ["unsafe-apply: found forbidden marker applied-success"],
                 )
 
+    def test_pressure_assertions_allow_rollback_success_not_claimed(self):
+        from tests.pressure import assert_pressure
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            scenarios = root / "scenarios.json"
+            results = root / "results.jsonl"
+            scenarios.write_text(json.dumps({
+                "scenarios": [{
+                    "id": "safe-rollback-negation",
+                    "required": ["rollback-not-success"],
+                    "forbidden": ["rollback-success-bytes-only"],
+                    "prompt": "irrelevant",
+                }]
+            }), encoding="utf-8")
+            results.write_text(json.dumps({
+                "scenario": "safe-rollback-negation",
+                "returncode": 0,
+                "stdout": "ROLLBACK SUCCESS: NOT CLAIMED. Restored bytes are necessary, but never sufficient, evidence of rollback success.",
+                "stderr": "",
+            }) + "\n", encoding="utf-8")
+            self.assertEqual(assert_pressure.validate(scenarios, results), [])
+
     def test_pressure_assertions_allow_negated_sandbox_bypass_claims_only(self):
         from tests.pressure import assert_pressure
 

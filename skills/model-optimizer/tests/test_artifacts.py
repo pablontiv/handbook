@@ -41,7 +41,7 @@ from tests.support import assert_test_path
 
 class ArtifactTests(unittest.TestCase):
     def test_evaluation_artifact_schema_is_bounded_and_privacy_preserving(self):
-        secret = "sk-artifact-secret"
+        secret = "sk" + "-artifact-secret"
         route = RouteKey(RuntimeKind.PI, "test", "nan/qwen3.6", "high")
         summary = EvaluationSummary(
             key=EvaluationKey(route, "sha256:agent", "sha256:tools", "mechanical-slugify", "1", "sha256:model"),

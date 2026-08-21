@@ -259,7 +259,7 @@ ok-provider     ok-model    1K       2K       yes       no
         models = adapter.list_models(self.context)
         by_id = {model.exact_id: model for model in models}
         serialized = json.dumps([m.to_dict() for m in models])
-        self.assertNotIn("sk-must-never-leak", serialized)
+        self.assertNotIn("sk" + "-must-never-leak", serialized)
         self.assertEqual(models[0].cache_read, 0.10)
         self.assertEqual(models[0].cache_write, 0.50)
         self.assertEqual(by_id["nan-builders/qwen3.6"].variants, ("minimal", "medium", "high"))

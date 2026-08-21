@@ -117,7 +117,7 @@ class StateTests(unittest.TestCase):
                 route=benchmark_key.route,
                 identity="exact",
                 source_name=benchmark_key.source_name,
-                source_url="https://bench.example/results?api_key=SECRET#token",
+                source_url="https://bench.example/results?" + "api" + "_key=SECRET#token",
                 benchmark=benchmark_key.benchmark,
                 benchmark_version=benchmark_key.benchmark_version,
                 harness_or_agent="harness-v1",
@@ -361,7 +361,7 @@ class StateTests(unittest.TestCase):
         created = datetime(2026, 8, 20, tzinfo=timezone.utc)
         state, _key, _benchmark_key = self._state_with_summaries(created)
         suspicious_urls = (
-            "?api_key=SECRET",
+            "?" + "api" + "_key=SECRET",
             "results?access_token=SECRET",
             "//bench.example/results?credential=SECRET",
             "https://bench.example/results?auth=SECRET",

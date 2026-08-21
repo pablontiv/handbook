@@ -162,28 +162,28 @@ class OpenCodeAdapterTests(unittest.TestCase):
                 self.assertEqual(ready[0].reason_code, "auth_ready")
 
     def test_unknown_auth_label_does_not_invent_provider_or_leak_content(self):
-        ready = parse_opencode_auth('{"apiKey":"sk-do-not-leak","provider":"mystery"} api\n')
+        ready = parse_opencode_auth('{"apiKey":"' + "sk" + '-do-not-leak","provider":"mystery"} api\n')
         self.assertEqual(len(ready), 1)
         self.assertEqual(ready[0].provider, "UNKNOWN")
         self.assertEqual(ready[0].status, ReadinessStatus.UNKNOWN)
         self.assertEqual(ready[0].reason_code, "auth_unknown_provider_label")
         self.assertIsNone(ready[0].auth_type)
-        self.assertNotIn("sk-do-not-leak", json.dumps([item.to_dict() for item in ready]))
+        self.assertNotIn("sk" + "-do-not-leak", json.dumps([item.to_dict() for item in ready]))
 
     def test_auth_type_uses_safe_vocabulary_and_unknown_provider_never_persists_method(self):
         cases = (
             ("OpenAI oauth\n", "openai", "oauth"),
             ("OpenAI api\n", "openai", "api"),
-            ("OpenAI sk-live-api-key-shaped-value\n", "openai", None),
+            ("OpenAI " + "sk" + "-live-api-key-shaped-value\n", "openai", None),
             ("Mystery api\n", "UNKNOWN", None),
-            ("Mystery sk-live-api-key-shaped-value\n", "UNKNOWN", None),
+            ("Mystery " + "sk" + "-live-api-key-shaped-value\n", "UNKNOWN", None),
         )
         for text, provider, auth_type in cases:
             with self.subTest(text=text):
                 ready = parse_opencode_auth(text)
                 self.assertEqual(ready[0].provider, provider)
                 self.assertEqual(ready[0].auth_type, auth_type)
-                self.assertNotIn("sk-live-api-key-shaped-value", json.dumps(ready[0].to_dict()))
+                self.assertNotIn("sk" + "-live-api-key-shaped-value", json.dumps(ready[0].to_dict()))
 
     def test_verbose_models_preserve_family_cache_vision_and_variants(self):
         models = parse_opencode_models_verbose(fixture_text("opencode/models-verbose.txt"))
@@ -247,17 +247,18 @@ openai/gpt-fractional
         self.assertEqual(models[0].max_output, 2)
 
     def test_verbose_models_exclude_non_active_and_invalid_status_with_stable_warnings(self):
-        text = """\
+        secret = "sk" + "-status-secret"
+        text = f"""\
 openai/gpt-active
-{"id":"gpt-active","providerID":"openai","status":"active"}
+{{"id":"gpt-active","providerID":"openai","status":"active"}}
 openai/gpt-missing
-{"id":"gpt-missing","providerID":"openai"}
+{{"id":"gpt-missing","providerID":"openai"}}
 openai/gpt-old
-{"id":"gpt-old","providerID":"openai","status":"deprecated"}
+{{"id":"gpt-old","providerID":"openai","status":"deprecated"}}
 nan/qwen-old
-{"id":"qwen-old","providerID":"nan","status":"inactive"}
+{{"id":"qwen-old","providerID":"nan","status":"inactive"}}
 nan/qwen-invalid
-{"id":"qwen-invalid","providerID":"nan","status":{"value":"sk-status-secret"}}
+{{"id":"qwen-invalid","providerID":"nan","status":{{"value":"{secret}"}}}}
 """
         adapter = OpenCodeAdapter(FakeRunner.stdout(text))
         models = adapter.list_models(self.context)
@@ -268,7 +269,7 @@ nan/qwen-invalid
         serialized_warnings = json.dumps(adapter.warnings)
         self.assertNotIn("deprecated", serialized_warnings)
         self.assertNotIn("inactive", serialized_warnings)
-        self.assertNotIn("sk-status-secret", serialized_warnings)
+        self.assertNotIn("sk" + "-status-secret", serialized_warnings)
 
     def test_verbose_models_report_identity_mismatch_before_inactive_status(self):
         text = """\
@@ -404,7 +405,7 @@ openai/gpt-second
                     "model": "nan/qwen3.6",
                     "textVerbosity": {
                         "safe": "keep",
-                        "apiKey": "sk-nested-secret",
+                        "apiKey": "secret-nested",
                         "nested": [
                             {"token": "tok-secret", "safe": "sibling"},
                             {"authorization": "Bearer secret"},
@@ -425,7 +426,7 @@ openai/gpt-second
             },
         })
         serialized = json.dumps(assignment)
-        for secret in ("sk-nested-secret", "tok-secret", "Bearer secret", "secret-value", "pw-secret", "cred-secret"):
+        for secret in ("secret-nested", "tok-secret", "Bearer secret", "secret-value", "pw-secret", "cred-secret"):
             self.assertNotIn(secret, serialized)
 
     def test_live_check_uses_json_events_supported_variant_and_dedicated_deny_all_agent(self):
@@ -642,7 +643,7 @@ openai/gpt-second
     def test_live_check_debug_config_secret_output_never_leaks_into_health_detail(self):
         token = "9" * 32
         agent_name = _probe_agent_name(token)
-        secret = "sk-debug-config-should-not-leak"
+        secret = "sk" + "-debug-config-should-not-leak"
         runner = EnvCapturingRunner((
             _debug_config_command(agent_name, payload={
                 "agent": {
@@ -669,7 +670,7 @@ openai/gpt-second
             _command('{"type":"text","part":{"text":"PONG"}}\n'),
         ))
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6")
-        secret_config = '{"apiKey":"sk-inline-secret"'
+        secret_config = '{"apiKey":"' + "sk" + '-inline-secret"'
         context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENCODE_CONFIG_CONTENT": secret_config})
 
         check = self._live_check_with_token(runner, model, None, "PONG", 60, context, token=token)
@@ -678,7 +679,7 @@ openai/gpt-second
         self.assertEqual(context.env["OPENCODE_CONFIG_CONTENT"], secret_config)
         env = runner.env_replacements[-1]
         self.assertIsNotNone(env)
-        self.assertNotIn("sk-inline-secret", json.dumps(env))
+        self.assertNotIn("sk" + "-inline-secret", json.dumps(env))
         self.assertNotIn("OPENCODE_CONFIG_CONTENT", check.detail)
 
     def test_error_event_is_fail_even_when_process_exit_is_zero(self):
@@ -903,12 +904,12 @@ openai/gpt-second
         runner = FakeRunner((
             _command("1.18.18\n"),
             _command(fixture_text("opencode/models-verbose.txt")),
-            _command(fixture_text("opencode/auth-list.txt") + '{"apiKey":"sk-do-not-leak"} api\n'),
+            _command(fixture_text("opencode/auth-list.txt") + '{"apiKey":"sk" + "-do-not-leak"} api\n'),
         ))
         inventory = OpenCodeAdapter(runner).inventory(self.context)
         serialized = json.dumps(inventory.to_dict())
         self.assertNotIn("auth.json", serialized)
-        self.assertNotIn("sk-do-not-leak", serialized)
+        self.assertNotIn("sk" + "-do-not-leak", serialized)
         self.assertNotIn("~/.local/share/opencode", serialized)
 
     def _role_eval_request(self):

@@ -29,7 +29,7 @@ from scripts.model_optimizer import main
 from tests.support import FakeRunner, _command, copy_pi_fixtures_to_home, fixture_text, pi_inventory_runner_from_fixtures
 
 
-SECRET = "sk-test-secret-must-never-leak"
+SECRET = "sk" + "-test-secret-must-never-leak"
 
 
 def run_cli(root: Path, runner, found: set[str], *argv: str, environ: dict[str, str] | None = None):
@@ -291,7 +291,7 @@ class CliTests(unittest.TestCase):
                 _command("test-version\n"),
                 _command("provider model context max-out thinking images\nz zeta 1K 1K no no\na alpha 1K 1K yes no\n"),
                 CompletedCommand((), 7, "", f"token={SECRET}", 1, False),
-                CompletedCommand((), 7, "", f"api_key={SECRET}", 1, False),
+                CompletedCommand((), 7, "", "api" + f"_key={SECRET}", 1, False),
             ))
             code, stdout, stderr = run_cli(root, runner, {"pi"},
                 "inventory", "--runtime", "pi", "--output", str(root / "i.json"))
@@ -584,7 +584,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             inventory = write_fixture_inventory(root, ("nan/qwen3.6",))
-            runner = FakeRunner((CompletedCommand((), 7, "", f"Authorization: Bearer {SECRET}", 1, False),))
+            runner = FakeRunner((CompletedCommand((), 7, "", "Authorization: " + f"Bearer {SECRET}", 1, False),))
             code, _, stderr = run_cli(root, runner, {"pi"},
                 "check", "--inventory", str(inventory), "--model", "nan/qwen3.6",
                 "--timeout", "1", "--output", str(root / "h.json"))

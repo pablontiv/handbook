@@ -227,7 +227,11 @@ def _parse_route_arg(value: str, runtime_kind: RuntimeKind, runtime_version: str
         model, effort = value.rsplit("@", 1)
         effort = effort or None
     else:
-        model, effort = value, None
+        model, separator, effort_value = value.rpartition(":")
+        if separator and "/" in model:
+            effort = effort_value or None
+        else:
+            model, effort = value, None
     if not model or "/" not in model:
         raise SystemExit(f"invalid route: {value}")
     return RouteKey(runtime_kind, runtime_version, model, effort)

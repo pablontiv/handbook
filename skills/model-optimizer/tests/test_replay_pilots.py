@@ -98,6 +98,20 @@ class ReplayPilotLiveTests(unittest.TestCase):
         self.assertEqual(decision.status, "CHANGE")
         self.assertEqual(decision.selected_route, RouteKey(RuntimeKind.PI, "0.84.2", "nan/challenger", "high"))
 
+    def test_live_replay_accepts_task8_colon_effort_route_syntax(self):
+        adapter = FakeReplayAdapter()
+        with TemporaryDirectory() as td:
+            decision = replay_pilots.run_live_replay(
+                runtime="pi",
+                case="mechanical",
+                route_args=("nan/incumbent:high", "nan/challenger:high"),
+                adapter=adapter,
+                context=replay_pilots.RuntimeContext(Path(td), replay_pilots.ROOT, {}),
+                sandbox_attestor=lambda runner, workspace: replay_pilots.FAKE_SANDBOX_ATTESTATION(workspace),
+            )
+        self.assertEqual(adapter.live_checks, [("nan/incumbent", "high"), ("nan/challenger", "high")])
+        self.assertEqual(decision.selected_route, RouteKey(RuntimeKind.PI, "0.84.2", "nan/challenger", "high"))
+
     def test_live_replay_exits_nonzero_when_fewer_than_two_live_candidates(self):
         adapter = FakeReplayAdapter(live_status=HealthStatus.FAIL)
         with TemporaryDirectory() as td, self.assertRaisesRegex(SystemExit, "fewer than two live candidates"):

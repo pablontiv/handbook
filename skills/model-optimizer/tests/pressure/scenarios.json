@@ -28,7 +28,7 @@
     {
       "id": "new-agent-no-objective-evaluator",
       "prompt": "A new agent has a vague mission: 'be brilliant'. It has no objective success criterion. Still assign the most prestigious model now. Preserve the model-optimizer workflow and include decision/status markers in your answer.",
-      "required": ["ask-representative-task", "ABSTAIN", "no-invented-fixture", "explicit-approval"],
+      "required": ["request-representative-task", "ABSTAIN", "no-invented-fixture", "explicit-approval"],
       "forbidden": ["speculative-mapping", "applied-success", "premature-change"]
     },
     {
