@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
+import stat
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -18,6 +21,9 @@ from helper.optimizer import AgentContract, PermissionRule, RouteKey
 
 _STATE_SCHEMA = "model-optimizer.state/v1"
 _FRESH_SECONDS = 7 * 24 * 60 * 60
+_MAX_STATE_BYTES = 1024 * 1024
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_RETRY_SECONDS = 0.01
 _TRANSACTION_LOCK_STRIPES = 64
 _TRANSACTION_LOCKS = tuple(threading.Lock() for _ in range(_TRANSACTION_LOCK_STRIPES))
 
@@ -25,6 +31,11 @@ try:  # pragma: no cover - exercised on POSIX platforms by the transaction tests
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback.
     fcntl = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - exercised only on Windows.
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX fallback.
+    msvcrt = None  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -92,6 +103,12 @@ class OptimizerState:
     evaluations: tuple[EvaluationSummary, ...]
     benchmarks: tuple[BenchmarkSummary, ...]
     warnings: tuple[str, ...] = ()
+
+
+class _StateLockError(Exception):
+    def __init__(self, warning: str) -> None:
+        super().__init__(warning)
+        self.warning = warning
 
 
 @dataclass(frozen=True)
@@ -183,10 +200,11 @@ def semantic_snapshot(inventory: Inventory, agents: Sequence[AgentContract]) -> 
 
 
 def load_state(path: Path) -> OptimizerState:
-    if not path.exists():
-        return _empty_state()
+    payload = _read_state_payload(path)
+    if isinstance(payload, OptimizerState):
+        return payload
     try:
-        value = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
+        value = json.loads(payload.decode("utf-8"), parse_constant=_reject_json_constant)
     except UnicodeDecodeError:
         return _empty_state("state_invalid_encoding")
     except json.JSONDecodeError:
@@ -207,14 +225,20 @@ def load_state(path: Path) -> OptimizerState:
 
 def update_state(path: Path, transform: Callable[[OptimizerState], OptimizerState]) -> OptimizerState:
     thread_lock = _transaction_lock_for_target(path)
-    with thread_lock, _process_file_lock(path):
-        current = load_state(path)
-        transformed = _sanitize_state(transform(current))
-        try:
-            write_json_atomic(path, _state_to_dict(transformed))
-        except (OSError, ValueError):
-            return replace(transformed, warnings=_append_warning(transformed.warnings, "state_write_failed"))
-        return transformed
+    try:
+        with thread_lock, _process_file_lock(path):
+            current = load_state(path)
+            if "state_path_symlink" in current.warnings:
+                return _transform_without_persisting(transform, current, "state_path_symlink")
+            transformed = _sanitize_state(transform(current))
+            transformed = replace(transformed, warnings=_merge_warnings(current.warnings, transformed.warnings))
+            try:
+                write_json_atomic(path, _state_to_dict(transformed))
+            except (OSError, ValueError):
+                return replace(transformed, warnings=_append_warning(transformed.warnings, "state_write_failed"))
+            return transformed
+    except _StateLockError as exc:
+        return _transform_without_persisting(transform, _empty_state(exc.warning), exc.warning)
 
 
 def inventory_delta(previous: SemanticSnapshot | None, current: SemanticSnapshot) -> InventoryDelta:
@@ -283,6 +307,43 @@ def _empty_state(warning: str | None = None) -> OptimizerState:
         benchmarks=(),
         warnings=(warning,) if warning else (),
     )
+
+
+def _read_state_payload(path: Path) -> bytes | OptimizerState:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return _empty_state()
+    except OSError:
+        return _empty_state("state_read_failed")
+    if stat.S_ISLNK(info.st_mode):
+        return _empty_state("state_path_symlink")
+    if _has_unsafe_posix_permissions(info.st_mode):
+        return _empty_state("state_unsafe_permissions")
+    if info.st_size > _MAX_STATE_BYTES:
+        return _empty_state("state_file_too_large")
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return _empty_state("state_read_failed")
+    if len(payload) > _MAX_STATE_BYTES:
+        return _empty_state("state_file_too_large")
+    return payload
+
+
+def _has_unsafe_posix_permissions(mode: int) -> bool:
+    if os.name == "nt":
+        return False
+    return bool(stat.S_IMODE(mode) & (stat.S_IRWXG | stat.S_IRWXO))
+
+
+def _transform_without_persisting(
+    transform: Callable[[OptimizerState], OptimizerState],
+    state: OptimizerState,
+    warning: str,
+) -> OptimizerState:
+    transformed = _sanitize_state(transform(state))
+    return replace(transformed, warnings=_append_warning(_merge_warnings(state.warnings, transformed.warnings), warning))
 
 
 def _state_to_dict(state: OptimizerState) -> dict[str, Any]:
@@ -463,7 +524,7 @@ def _sanitize_url(url: str) -> str:
     if not url:
         return url
     parts = urlsplit(url)
-    if not parts.scheme and not parts.netloc:
+    if not parts.query and not parts.fragment:
         return url
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
@@ -623,18 +684,94 @@ def _append_warning(warnings: tuple[str, ...], warning: str) -> tuple[str, ...]:
     return warnings + (warning,)
 
 
+def _merge_warnings(*warning_groups: tuple[str, ...]) -> tuple[str, ...]:
+    merged: tuple[str, ...] = ()
+    for warnings in warning_groups:
+        for warning in warnings:
+            merged = _append_warning(merged, warning)
+    return merged
+
+
 @contextlib.contextmanager
 def _process_file_lock(path: Path) -> Iterator[None]:
+    backend = _lock_backend()
+    if backend is None:
+        raise _StateLockError("state_lock_unsupported")
     lock_path = Path(f"{path}.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+b") as handle:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as handle:
+            _prepare_lock_file(handle, backend)
+            if not _acquire_portable_lock(handle, backend, time.monotonic() + _LOCK_TIMEOUT_SECONDS):
+                raise _StateLockError("state_lock_timeout")
+            try:
+                yield
+            finally:
+                _release_portable_lock(handle, backend)
+    except _StateLockError:
+        raise
+    except OSError:
+        raise _StateLockError("state_lock_failed") from None
+
+
+def _lock_backend() -> str | None:
+    if fcntl is not None:
+        return "fcntl"
+    if msvcrt is not None:
+        return "msvcrt"
+    return None
+
+
+def _prepare_lock_file(handle: Any, backend: str) -> None:
+    if backend != "msvcrt":
+        return
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+    handle.seek(0)
+
+
+def _acquire_portable_lock(handle: Any, backend: str, deadline: float) -> bool:
+    while True:
+        if _try_acquire_portable_lock(handle, backend):
+            return True
+        now = time.monotonic()
+        if now >= deadline:
+            return False
+        time.sleep(min(_LOCK_RETRY_SECONDS, max(0.0, deadline - now)))
+
+
+def _try_acquire_portable_lock(handle: Any, backend: str) -> bool:
+    if backend == "fcntl":
         try:
-            yield
-        finally:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                return False
+            raise
+    if backend == "msvcrt":
+        try:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                return False
+            raise
+    raise _StateLockError("state_lock_unsupported")
+
+
+def _release_portable_lock(handle: Any, backend: str) -> None:
+    if backend == "fcntl":
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    if backend == "msvcrt":
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    raise _StateLockError("state_lock_unsupported")
 
 
 def _transaction_lock_for_target(path: Path) -> threading.Lock:

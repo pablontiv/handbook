@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import errno
 import json
 import math
+import os
+import stat
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Process, Queue
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+import helper.state as state_module
 from helper.models import (
     CurrentAssignment,
     Inventory,
@@ -34,6 +39,37 @@ from helper.state import (
     state_path,
     update_state,
 )
+
+
+def _add_state_evaluation_process(path_text: str, index: int, queue: Queue) -> None:
+    try:
+        route = RouteKey(RuntimeKind.PI, "0.84.2", f"nan/process-{index}", None)
+        key = EvaluationKey(
+            route=route,
+            agent_digest="sha256:agent",
+            tool_digest="sha256:tools",
+            fixture_id="process",
+            fixture_version="v1",
+            model_fingerprint=f"sha256:model-{index}",
+        )
+
+        def transform(state: OptimizerState) -> OptimizerState:
+            summary = EvaluationSummary(
+                key=key,
+                created_at="2026-08-20T00:00:00Z",
+                success=True,
+                role_score=0.5,
+                contract_success=True,
+                elapsed_ms=index,
+                metered_cost=None,
+                reason_codes=("ok",),
+            )
+            return replace(state, evaluations=state.evaluations + (summary,))
+
+        update_state(Path(path_text), transform)
+        queue.put((index, None))
+    except BaseException as exc:  # pragma: no cover - child-process diagnostics.
+        queue.put((index, repr(exc)))
 
 
 class StateTests(unittest.TestCase):
@@ -192,6 +228,7 @@ class StateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "state.json"
             path.write_text('{"schema":"model-optimizer.state/v1","secret":"raw-api-key', encoding="utf-8")
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
             state = load_state(path)
         self.assertEqual(state.evaluations, ())
         self.assertEqual(state.warnings, ("state_invalid_json",))
@@ -312,6 +349,163 @@ class StateTests(unittest.TestCase):
             returned = update_state(path, lambda _state: bad)
             self.assertFalse(path.exists())
         self.assertEqual(returned.warnings[-1], "state_write_failed")
+
+
+    def test_benchmark_summary_is_fresh_immediately_before_seven_day_boundary(self):
+        created = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        state, _key, benchmark_key = self._state_with_summaries(created)
+        self.assertIsNotNone(fresh_benchmark(state, benchmark_key, created + timedelta(days=6, seconds=86399)))
+        self.assertIsNone(fresh_benchmark(state, benchmark_key, created + timedelta(days=7)))
+
+    def test_schemeless_and_query_only_source_urls_do_not_persist_credentials(self):
+        created = datetime(2026, 8, 20, tzinfo=timezone.utc)
+        state, _key, _benchmark_key = self._state_with_summaries(created)
+        suspicious_urls = (
+            "?api_key=SECRET",
+            "results?access_token=SECRET",
+            "//bench.example/results?credential=SECRET",
+            "https://bench.example/results?auth=SECRET",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            benchmarks = tuple(replace(state.benchmarks[0], source_url=url) for url in suspicious_urls)
+            update_state(path, lambda _state: replace(state, benchmarks=benchmarks))
+            raw = path.read_text(encoding="utf-8")
+            loaded = load_state(path)
+        self.assertEqual(tuple(summary.source_url for summary in loaded.benchmarks), ("", "results", "//bench.example/results", "https://bench.example/results"))
+        self.assertNotIn("SECRET", raw)
+        self.assertNotIn("api_key", raw.lower())
+        self.assertNotIn("access_token", raw.lower())
+        self.assertNotIn("credential", raw.lower())
+        self.assertNotIn("auth", raw.lower())
+
+    def test_load_state_rejects_oversized_state_before_parsing(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            path.write_text(json.dumps({
+                "schema": "model-optimizer.state/v1",
+                "padding": "SECRET" * 200000,
+            }), encoding="utf-8")
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            state = load_state(path)
+        self.assertEqual(state.warnings, ("state_file_too_large",))
+        self.assertNotIn("SECRET", repr(state))
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits are not exposed on Windows")
+    def test_load_state_rejects_group_or_other_accessible_permissions(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            path.write_text(json.dumps({
+                "schema": "model-optimizer.state/v1",
+                "snapshot": None,
+                "evaluations": [],
+                "benchmarks": [],
+            }), encoding="utf-8")
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP)
+            state = load_state(path)
+        self.assertEqual(state.warnings, ("state_unsafe_permissions",))
+
+    def test_load_state_catches_os_errors_with_stable_warning_and_update_continues(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("SECRET")):
+                loaded = load_state(path)
+                updated = update_state(path, lambda state: replace(state, warnings=state.warnings + ("fresh_evaluation",)))
+        self.assertEqual(loaded.warnings, ("state_read_failed",))
+        self.assertIn("state_read_failed", updated.warnings)
+        self.assertIn("fresh_evaluation", updated.warnings)
+        self.assertNotIn("SECRET", repr(updated))
+
+    def test_update_state_fails_closed_when_lock_backend_is_unsupported(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            with mock.patch("helper.state.fcntl", None), mock.patch("helper.state.msvcrt", None):
+                returned = update_state(path, lambda state: replace(state, warnings=state.warnings + ("fresh",)))
+            self.assertFalse(path.exists())
+        self.assertIn("state_lock_unsupported", returned.warnings)
+        self.assertIn("fresh", returned.warnings)
+
+    def test_update_state_lock_timeout_fails_closed_without_blocking_indefinitely(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            with mock.patch("helper.state._acquire_portable_lock", return_value=False), \
+                    mock.patch("helper.state._LOCK_TIMEOUT_SECONDS", 0.001):
+                returned = update_state(path, lambda state: replace(state, warnings=state.warnings + ("fresh",)))
+            self.assertFalse(path.exists())
+        self.assertIn("state_lock_timeout", returned.warnings)
+        self.assertIn("fresh", returned.warnings)
+
+    def test_portable_lock_acquisition_retries_fcntl_and_msvcrt_without_production_timeout(self):
+        class FakeFcntl:
+            LOCK_EX = 1
+            LOCK_NB = 2
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def flock(self, _fileno: int, _flags: int) -> None:
+                self.calls += 1
+                if self.calls < 3:
+                    raise OSError(errno.EAGAIN, "busy")
+
+        class FakeMsvcrt:
+            LK_NBLCK = 1
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def locking(self, _fileno: int, _mode: int, _bytes: int) -> None:
+                self.calls += 1
+                if self.calls < 3:
+                    raise OSError(errno.EACCES, "busy")
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.lock"
+            path.write_bytes(b"\0")
+            with path.open("a+b") as handle:
+                fake_fcntl = FakeFcntl()
+                with mock.patch("helper.state.fcntl", fake_fcntl), \
+                        mock.patch("helper.state.time.monotonic", side_effect=(0.0, 0.1)), \
+                        mock.patch("helper.state.time.sleep") as sleep_mock:
+                    self.assertTrue(state_module._acquire_portable_lock(handle, "fcntl", 1.0))
+                self.assertEqual(fake_fcntl.calls, 3)
+                self.assertEqual(sleep_mock.call_count, 2)
+
+                fake_msvcrt = FakeMsvcrt()
+                with mock.patch("helper.state.msvcrt", fake_msvcrt), \
+                        mock.patch("helper.state.time.monotonic", side_effect=(0.0, 0.1)), \
+                        mock.patch("helper.state.time.sleep") as sleep_mock:
+                    self.assertTrue(state_module._acquire_portable_lock(handle, "msvcrt", 1.0))
+                self.assertEqual(fake_msvcrt.calls, 3)
+                self.assertEqual(sleep_mock.call_count, 2)
+
+    @unittest.skipUnless(state_module.fcntl is not None or state_module.msvcrt is not None, "portable lock backend unavailable")
+    def test_update_state_has_no_lost_updates_across_processes(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            queue = Queue()
+            processes = [Process(target=_add_state_evaluation_process, args=(str(path), index, queue)) for index in range(8)]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=10)
+            try:
+                failures = [queue.get(timeout=1) for _ in processes]
+            finally:
+                queue.close()
+                queue.join_thread()
+            for process in processes:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=2)
+                    self.fail("state update process did not terminate")
+            errors = [error for _index, error in failures if error is not None]
+            self.assertEqual(errors, [])
+            loaded = load_state(path)
+        self.assertEqual(len(loaded.evaluations), 8)
+        self.assertEqual(sorted(summary.elapsed_ms for summary in loaded.evaluations), list(range(8)))
 
 
 if __name__ == "__main__":
