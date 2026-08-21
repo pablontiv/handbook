@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
+from helper.evaluator import RoleEvalResult, ToolAudit, essential_eval_selection_status
 from helper.models import HealthCheck, HealthStatus, ModelRecord, RuntimeKind
 from helper.optimizer import (
     BenchmarkObservation,
@@ -311,6 +313,47 @@ class SelectionPolicyTests(unittest.TestCase):
         decision = choose_mapping(role, (challenger, unsafe_challenger), None)
         self.assertEqual(decision.status, "ABSTAIN")
         self.assertEqual(decision.reasons, ("eval_opencode_auth_unavailable",))
+
+    def test_pi_isolation_result_maps_to_candidate_infrastructure_and_abstains_with_or_without_incumbent(self):
+        role = self._role()
+        pi_route = self._route("nan/pi", "high")
+        pi_result = RoleEvalResult(
+            pi_route,
+            "fixture",
+            "v1",
+            "sha256:" + "a" * 64,
+            "INCONCLUSIVE",
+            10,
+            "",
+            ToolAudit((), (), (), 0, ()),
+            0,
+            0,
+            0,
+            None,
+            ("eval_pi_isolation_unavailable",),
+        )
+
+        def candidate_from_pi_result(route: RouteKey, incumbent: bool = False) -> CandidateEvidence:
+            selection_status, reasons = essential_eval_selection_status((replace(pi_result, route=route),))
+            infrastructure_status = "INCONCLUSIVE" if selection_status == "ABSTAIN" else "SAFE"
+            return self._candidate(
+                route,
+                self._model(route.model),
+                [self._fixture("one", 0.85), self._fixture("two", 0.86)],
+                incumbent,
+                infrastructure_status=infrastructure_status,
+                infrastructure_reasons=reasons,
+            )
+
+        without_incumbent = candidate_from_pi_result(pi_route)
+        self.assertEqual(choose_mapping(role, (without_incumbent,), None).status, "ABSTAIN")
+
+        current_route = self._route("nan/current", "medium")
+        current = self._candidate(current_route, self._model("nan/current"), [self._fixture("one", 0.80), self._fixture("two", 0.80)], True)
+        unsafe_challenger = candidate_from_pi_result(pi_route)
+        with_incumbent = choose_mapping(role, (current, unsafe_challenger), current_route)
+        self.assertEqual(with_incumbent.status, "ABSTAIN")
+        self.assertEqual(with_incumbent.reasons, ("eval_pi_isolation_unavailable",))
 
     def test_choose_mapping_ignores_unsupported_aggregate_advantage(self):
         role = self._role()

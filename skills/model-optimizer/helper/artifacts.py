@@ -16,9 +16,11 @@ _REPLACE_RETRY_ATTEMPTS = 3
 _REPLACE_RETRY_SLEEP_SECONDS = 0.01
 _WRITE_LOCK_STRIPES = 64
 _WRITE_LOCKS = tuple(threading.Lock() for _ in range(_WRITE_LOCK_STRIPES))
+_MAX_INVENTORY_PATHS = 8192
 _MAX_INVENTORY_FILES = 4096
 _MAX_INVENTORY_BYTES = 64 * 1024 * 1024
 _MAX_INVENTORY_PATH_CHARS = 512
+_INVENTORY_READ_CHUNK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -81,65 +83,124 @@ def load_health(path: Path) -> HealthArtifact:
 
 def byte_inventory(paths: tuple[Path, ...]) -> ByteInventoryResult:
     """Return a bounded before/after byte inventory for runtime config boundaries."""
+
+    def fail(reason: str) -> ByteInventoryResult:
+        return ByteInventoryResult("INCONCLUSIVE", tuple(records), (reason,))
+
+    def register_path(target: Path) -> bool:
+        nonlocal visited_paths
+        visited_paths += 1
+        if visited_paths > _MAX_INVENTORY_PATHS:
+            return False
+        return len(str(target)) <= _MAX_INVENTORY_PATH_CHARS
+
+    def digest_file(path: Path, digest: hashlib._Hash, byte_count: int) -> tuple[int, bool]:
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(_INVENTORY_READ_CHUNK_BYTES)
+                    if not chunk:
+                        return byte_count, True
+                    byte_count += len(chunk)
+                    if byte_count > _MAX_INVENTORY_BYTES:
+                        return byte_count, False
+                    digest.update(chunk)
+        except OSError:
+            return byte_count, False
+
     records: list[dict[str, Any]] = []
+    visited_paths = 0
     for path in paths:
         target = _resolved(path)
-        if len(str(target)) > _MAX_INVENTORY_PATH_CHARS:
-            return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_path_too_long",))
+        if not register_path(target):
+            return fail("inventory_too_many_paths" if visited_paths > _MAX_INVENTORY_PATHS else "inventory_path_too_long")
         try:
-            exists = target.exists()
-        except OSError:
-            return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_stat_failed",))
-        if not exists:
+            stat_result = os.lstat(target)
+        except FileNotFoundError:
             records.append({"path": str(target), "exists": False, "kind": "missing", "file_count": 0, "byte_count": 0, "digest": None})
             continue
-        try:
-            is_symlink = target.is_symlink()
-            is_dir = target.is_dir()
         except OSError:
-            return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_stat_failed",))
-        if is_symlink:
-            return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_symlink_unsupported",))
-        if is_dir:
+            return fail("inventory_stat_failed")
+
+        if os.path.islink(target):
+            return fail("inventory_symlink_unsupported")
+
+        if os.path.isdir(target):
             digest = hashlib.sha256()
-            total = 0
-            count = 0
-            try:
-                iterator = sorted(target.rglob("*"))
-            except OSError:
-                return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_walk_failed",))
-            for child in iterator:
-                child_resolved = _resolved(child)
-                if len(str(child_resolved)) > _MAX_INVENTORY_PATH_CHARS:
-                    return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_path_too_long",))
+            total_bytes = 0
+            file_count = 0
+            stack = [target]
+            while stack:
+                current = stack.pop()
                 try:
-                    if child.is_symlink() or not child.is_file():
-                        continue
-                    data = child.read_bytes()
+                    with os.scandir(current) as iterator:
+                        entries = sorted(iterator, key=lambda entry: entry.name)
                 except OSError:
-                    return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_read_failed",))
-                try:
-                    rel = str(child.relative_to(target))
-                except ValueError:
-                    return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_walk_failed",))
-                digest.update(rel.encode("utf-8", "surrogateescape"))
-                digest.update(b"\0")
-                digest.update(data)
-                total += len(data)
-                count += 1
-                if count > _MAX_INVENTORY_FILES:
-                    return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_too_many_files",))
-                if total > _MAX_INVENTORY_BYTES:
-                    return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_too_many_bytes",))
-            records.append({"path": str(target), "exists": True, "kind": "directory", "file_count": count, "byte_count": total, "digest": "sha256:" + digest.hexdigest()})
+                    return fail("inventory_walk_failed")
+                for entry in entries:
+                    child = _resolved(Path(entry.path))
+                    if not register_path(child):
+                        return fail("inventory_too_many_paths" if visited_paths > _MAX_INVENTORY_PATHS else "inventory_path_too_long")
+                    try:
+                        if entry.is_symlink():
+                            return fail("inventory_symlink_unsupported")
+                        is_dir = entry.is_dir(follow_symlinks=False)
+                        is_file = entry.is_file(follow_symlinks=False)
+                    except OSError:
+                        return fail("inventory_stat_failed")
+                    if is_dir:
+                        stack.append(child)
+                        continue
+                    if not is_file:
+                        continue
+                    try:
+                        child_stat = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        return fail("inventory_stat_failed")
+                    if file_count + 1 > _MAX_INVENTORY_FILES:
+                        return fail("inventory_too_many_files")
+                    if total_bytes + int(child_stat.st_size) > _MAX_INVENTORY_BYTES:
+                        return fail("inventory_too_many_bytes")
+                    try:
+                        relative = child.relative_to(target).as_posix()
+                    except ValueError:
+                        return fail("inventory_walk_failed")
+                    digest.update(relative.encode("utf-8", "surrogateescape"))
+                    digest.update(b"\0")
+                    total_bytes, success = digest_file(child, digest, total_bytes)
+                    if not success:
+                        if total_bytes > _MAX_INVENTORY_BYTES:
+                            return fail("inventory_too_many_bytes")
+                        return fail("inventory_read_failed")
+                    file_count += 1
+            records.append({
+                "path": str(target),
+                "exists": True,
+                "kind": "directory",
+                "file_count": file_count,
+                "byte_count": total_bytes,
+                "digest": "sha256:" + digest.hexdigest(),
+            })
             continue
-        try:
-            data = target.read_bytes()
-        except OSError:
-            return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_read_failed",))
-        if len(data) > _MAX_INVENTORY_BYTES:
-            return ByteInventoryResult("INCONCLUSIVE", tuple(records), ("inventory_too_many_bytes",))
-        records.append({"path": str(target), "exists": True, "kind": "file", "file_count": 1, "byte_count": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()})
+
+        if _MAX_INVENTORY_FILES < 1:
+            return fail("inventory_too_many_files")
+        if int(stat_result.st_size) > _MAX_INVENTORY_BYTES:
+            return fail("inventory_too_many_bytes")
+        digest = hashlib.sha256()
+        total_bytes, success = digest_file(target, digest, 0)
+        if not success:
+            if total_bytes > _MAX_INVENTORY_BYTES:
+                return fail("inventory_too_many_bytes")
+            return fail("inventory_read_failed")
+        records.append({
+            "path": str(target),
+            "exists": True,
+            "kind": "file",
+            "file_count": 1,
+            "byte_count": total_bytes,
+            "digest": "sha256:" + digest.hexdigest(),
+        })
     return ByteInventoryResult("PASS", tuple(records))
 
 

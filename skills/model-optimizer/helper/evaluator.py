@@ -6,7 +6,6 @@ import math
 import os
 import re
 import shutil
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -25,7 +24,8 @@ _FRESH_ATTESTATION_SECONDS = 24 * 60 * 60
 _STABLE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 _ALLOWED_BUILTIN_TOOLS = frozenset({"read", "write", "edit", "bash", "grep", "find", "ls"})
 _SECRET_ENV_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|COOKIE|AUTHORIZATION|CREDENTIAL", re.IGNORECASE)
-_REQUIRED_SANDBOX_TESTS = frozenset({"workspace_write", "outside_read_denied", "secret_env_denied", "network_denied"})
+_REQUIRED_SANDBOX_PROBE_IDS = ("workspace_write", "outside_read_denied", "secret_env_denied", "network_denied")
+_REQUIRED_SANDBOX_TESTS = frozenset(_REQUIRED_SANDBOX_PROBE_IDS)
 _SUPPORTED_SANDBOX_BACKENDS = frozenset({"sandbox-exec", "bwrap"})
 _CAPABILITY_PROBE_REGISTRY = {
     "custom_safe": frozenset({"capability:custom_safe:confined-tool-v1"}),
@@ -166,6 +166,13 @@ class ChangedPathsResult:
     status: str
     paths: tuple[str, ...]
     reason_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SandboxProbeSpec:
+    probe_id: str
+    command: tuple[str, ...]
+    expected_outcome: str
 
 
 def empty_audit() -> ToolAudit:
@@ -330,23 +337,61 @@ def unsupported_custom_tools(agent: AgentContract) -> tuple[str, ...]:
     return tuple(tool for tool in agent.tools if tool not in _ALLOWED_BUILTIN_TOOLS)
 
 
+def _outside_probe_path(root: Path, workspace_token: str) -> Path:
+    return root.parent / f".model-optimizer-outside-{workspace_token}.txt"
+
+
+def _required_probe_specs(root: Path, workspace_token: str) -> tuple[SandboxProbeSpec, ...]:
+    outside = _outside_probe_path(root, workspace_token)
+    return (
+        SandboxProbeSpec(
+            "workspace_write",
+            (
+                "python3",
+                "-c",
+                "from pathlib import Path; import sys; p=Path('sandbox-probe.txt'); p.write_text('ok', encoding='utf-8'); sys.stdout.write(p.read_text(encoding='utf-8'))",
+            ),
+            "ok",
+        ),
+        SandboxProbeSpec(
+            "outside_read_denied",
+            (
+                "python3",
+                "-c",
+                f"from pathlib import Path; import sys; p=Path({str(outside)!r});\ntry:\n p.read_text(encoding='utf-8'); raise SystemExit(7)\nexcept Exception:\n sys.stdout.write('denied')",
+            ),
+            "denied",
+        ),
+        SandboxProbeSpec(
+            "secret_env_denied",
+            (
+                "python3",
+                "-c",
+                "import os, sys\nif os.getenv('SECRET_SENTINEL'):\n raise SystemExit(8)\nsys.stdout.write('absent')",
+            ),
+            "absent",
+        ),
+        SandboxProbeSpec(
+            "network_denied",
+            (
+                "python3",
+                "-c",
+                "import socket, sys; s=socket.socket();\ntry:\n s.bind(('127.0.0.1', 0)); raise SystemExit(9)\nexcept OSError:\n sys.stdout.write('denied')",
+            ),
+            "denied",
+        ),
+    )
+
+
 def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace, *, now: datetime | None = None) -> SandboxAttestation | None:
     root = _resolved(workspace.root)
-    outside: Path | None = None
+    outside = _outside_probe_path(root, workspace.token)
     try:
         root.mkdir(parents=True, exist_ok=True)
-        fd, outside_name = tempfile.mkstemp(prefix=f".model-optimizer-outside-{workspace.token}-", dir=str(root.parent), text=True)
-        outside = Path(outside_name)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write("outside-sentinel")
+        outside.write_text("outside-sentinel", encoding="utf-8")
     except OSError:
         return None
-    probe_scripts: tuple[tuple[str, tuple[str, ...], str], ...] = (
-        ("workspace_write", ("python3", "-c", "from pathlib import Path; p=Path('sandbox-probe.txt'); p.write_text('ok'); print(p.read_text())"), "ok"),
-        ("outside_read_denied", ("python3", "-c", f"from pathlib import Path; p=Path({str(outside)!r});\ntry:\n p.read_text(); raise SystemExit(7)\nexcept Exception:\n print('denied')"), "denied"),
-        ("secret_env_denied", ("python3", "-c", "import os\nif os.getenv('SECRET_SENTINEL'):\n raise SystemExit(8)\nprint('absent')"), "absent"),
-        ("network_denied", ("python3", "-c", "import socket; s=socket.socket();\ntry:\n s.bind(('127.0.0.1', 0)); raise SystemExit(9)\nexcept OSError:\n print('denied')"), "denied"),
-    )
+    probe_specs = _required_probe_specs(root, workspace.token)
     observed_now = now or datetime.now(timezone.utc)
     try:
         for backend in ("sandbox-exec", "bwrap"):
@@ -357,26 +402,24 @@ def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace, *, now: da
             profile_identity = _sandbox_profile(backend, root)
             observations: list[ProbeObservation] = []
             failed = False
-            for probe_id, command, expected in probe_scripts:
-                argv = sandbox_argv(backend, root, command)
+            for spec in probe_specs:
+                argv = sandbox_argv(backend, root, spec.command)
                 try:
                     result = runner.run(argv, timeout=5, cwd=workspace.root, env_replacement=_minimal_env(), stdout_limit=MAX_STDOUT_LIMIT_CHARS)
                 except Exception:
                     failed = True
                     break
-                status = "PASS" if result.returncode == 0 and not result.timed_out and not result.stdout_truncated and expected in result.stdout else "FAIL"
                 observation = probe_observation_from_result(
-                    probe_id=probe_id,
+                    probe_id=spec.probe_id,
                     argv=argv,
                     executable_identity=executable_identity,
                     profile_identity=profile_identity,
-                    expected_outcome=expected,
-                    status=status,
+                    expected_outcome=spec.expected_outcome,
                     result=result,
                     observed_at=observed_now,
                 )
                 observations.append(observation)
-                if status != "PASS":
+                if observation.status != "PASS":
                     failed = True
                     break
             if failed:
@@ -395,11 +438,12 @@ def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace, *, now: da
                 executable_identity=executable_identity,
             )
     finally:
-        if outside is not None:
-            try:
-                outside.unlink()
-            except FileNotFoundError:
-                pass
+        try:
+            outside.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
     return None
 
 
@@ -640,10 +684,10 @@ def probe_observation_from_result(
     executable_identity: str,
     profile_identity: str,
     expected_outcome: str,
-    status: str,
     result: CompletedCommand,
     observed_at: datetime,
 ) -> ProbeObservation:
+    status = _probe_status_from_result(result, expected_outcome)
     return ProbeObservation(
         probe_id=probe_id,
         argv=tuple(argv),
@@ -659,6 +703,20 @@ def probe_observation_from_result(
         stderr_digest=_digest_text(result.stderr),
         observed_at=_datetime_text(observed_at),
     )
+
+
+def _probe_status_from_result(result: CompletedCommand, expected_outcome: str) -> str:
+    if result.returncode != 0:
+        return "FAIL"
+    if result.timed_out or result.stdout_truncated or result.stderr_truncated:
+        return "FAIL"
+    if result.stdout_decode_replaced or result.stderr_decode_replaced:
+        return "FAIL"
+    if result.stderr != "":
+        return "FAIL"
+    if result.stdout != expected_outcome:
+        return "FAIL"
+    return "PASS"
 
 
 def capability_probe_digest(
@@ -783,6 +841,8 @@ def essential_eval_selection_status(results: Sequence[RoleEvalResult]) -> tuple[
         "eval_sandbox_attestation_incomplete",
         "eval_opencode_auth_unavailable",
         "eval_opencode_effective_config_mismatch",
+        "eval_pi_isolation_unavailable",
+        "eval_pi_isolation_unverified",
         "eval_changed_paths_unavailable",
         "eval_changed_paths_invalid",
         "eval_truncated_audit_stream",
@@ -1102,25 +1162,43 @@ def _validate_sandbox_attestation(workspace: PreparedWorkspace, *, now: datetime
     if observed is None or observed > current_time or current_time - observed > timedelta(seconds=_FRESH_ATTESTATION_SECONDS):
         raise ValueError("eval_sandbox_attestation_stale")
 
-    if len(attestation.probe_observations) != len(_REQUIRED_SANDBOX_TESTS):
+    if not _absolute_executable_identity(attestation.backend, attestation.executable_identity):
+        raise ValueError("eval_sandbox_attestation_mismatch")
+
+    probe_specs = {spec.probe_id: spec for spec in _required_probe_specs(root, workspace.token)}
+    if len(attestation.probe_observations) != len(probe_specs):
         raise ValueError("eval_sandbox_attestation_incomplete")
+
+    expected_stderr_digest = _digest_text("")
     probe_names: set[str] = set()
     for observation in attestation.probe_observations:
-        if observation.probe_id not in _REQUIRED_SANDBOX_TESTS:
+        spec = probe_specs.get(observation.probe_id)
+        if spec is None or observation.probe_id in probe_names:
             raise ValueError("eval_sandbox_attestation_incomplete")
-        if observation.status != "PASS":
-            raise ValueError("eval_sandbox_attestation_incomplete")
+        expected_argv = sandbox_argv(attestation.backend, root, spec.command)
+        if observation.argv != expected_argv:
+            raise ValueError("eval_sandbox_attestation_mismatch")
+        if observation.expected_outcome != spec.expected_outcome:
+            raise ValueError("eval_sandbox_attestation_mismatch")
         if observation.executable_identity != attestation.executable_identity:
             raise ValueError("eval_sandbox_attestation_mismatch")
         if observation.profile_identity != attestation.profile_identity:
             raise ValueError("eval_sandbox_attestation_mismatch")
-        if not observation.argv or Path(observation.argv[0]).name != attestation.backend:
-            raise ValueError("eval_sandbox_attestation_mismatch")
+        if observation.returncode != 0 or observation.timed_out or observation.stdout_truncated or observation.stderr_truncated:
+            raise ValueError("eval_sandbox_attestation_incomplete")
+        if observation.stdout_digest != _digest_text(spec.expected_outcome):
+            raise ValueError("eval_sandbox_attestation_incomplete")
+        if observation.stderr_digest != expected_stderr_digest:
+            raise ValueError("eval_sandbox_attestation_incomplete")
+        if observation.status != _probe_status_from_observation(observation, spec.expected_outcome):
+            raise ValueError("eval_sandbox_attestation_incomplete")
+        if observation.status != "PASS":
+            raise ValueError("eval_sandbox_attestation_incomplete")
         observed_probe = _parse_timestamp(observation.observed_at)
         if observed_probe is None or observed_probe > current_time or current_time - observed_probe > timedelta(seconds=_FRESH_ATTESTATION_SECONDS):
             raise ValueError("eval_sandbox_attestation_stale")
         probe_names.add(observation.probe_id)
-    if probe_names != _REQUIRED_SANDBOX_TESTS:
+    if probe_names != set(probe_specs):
         raise ValueError("eval_sandbox_attestation_incomplete")
 
 
@@ -1145,6 +1223,28 @@ def _has_fresh_pass_attestation(tool_name: str, request: RoleEvalRequest, *, now
         if current_time - observed <= timedelta(seconds=_FRESH_ATTESTATION_SECONDS):
             return True
     return False
+
+
+def _probe_status_from_observation(observation: ProbeObservation, expected_outcome: str) -> str:
+    if observation.returncode != 0:
+        return "FAIL"
+    if observation.timed_out or observation.stdout_truncated or observation.stderr_truncated:
+        return "FAIL"
+    if observation.stdout_digest != _digest_text(expected_outcome):
+        return "FAIL"
+    if observation.stderr_digest != _digest_text(""):
+        return "FAIL"
+    return "PASS"
+
+
+def _absolute_executable_identity(backend: str, identity: str) -> bool:
+    prefix = f"{backend}:"
+    if not isinstance(identity, str) or not identity.startswith(prefix):
+        return False
+    path_text = identity[len(prefix):].split(":", 1)[0]
+    if not path_text:
+        return False
+    return Path(path_text).is_absolute()
 
 
 def _parse_timestamp(value: str) -> datetime | None:

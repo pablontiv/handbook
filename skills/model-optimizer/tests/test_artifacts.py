@@ -52,17 +52,46 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(before.records[1]["kind"], "missing")
         self.assertIsNone(before.records[1]["digest"])
 
-    def test_byte_inventory_is_inconclusive_on_read_or_stat_errors(self):
+    def test_byte_inventory_disposable_pi_and_opencode_boundaries_are_bounded(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pi_runtime = root / "pi-runtime"
+            opencode_runtime = root / "opencode-runtime"
+            before = byte_inventory((pi_runtime, opencode_runtime))
+            pi_runtime.mkdir()
+            opencode_runtime.mkdir()
+            (pi_runtime / "state.json").write_text("{}", encoding="utf-8")
+            (opencode_runtime / "opencode.json").write_text('{"permission":{"*":"deny"}}', encoding="utf-8")
+            after = byte_inventory((pi_runtime, opencode_runtime))
+        self.assertEqual(before.status, "PASS")
+        self.assertEqual(after.status, "PASS")
+        self.assertEqual(tuple(record["kind"] for record in before.records), ("missing", "missing"))
+        self.assertEqual(tuple(record["kind"] for record in after.records), ("directory", "directory"))
+        self.assertNotEqual(before.records, after.records)
+
+    def test_byte_inventory_is_inconclusive_on_read_stat_and_walk_errors(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             target = root / "file.txt"
             target.write_text("ok", encoding="utf-8")
-            with mock.patch.object(Path, "read_bytes", side_effect=OSError("boom")):
-                result = byte_inventory((target,))
-        self.assertEqual(result.status, "INCONCLUSIVE")
-        self.assertEqual(result.reason_codes, ("inventory_read_failed",))
+            with mock.patch.object(Path, "open", side_effect=OSError("boom")):
+                read_error = byte_inventory((target,))
+            self.assertEqual(read_error.status, "INCONCLUSIVE")
+            self.assertEqual(read_error.reason_codes, ("inventory_read_failed",))
 
-    def test_byte_inventory_enforces_bounded_cardinality(self):
+            with mock.patch("helper.artifacts.os.lstat", side_effect=OSError("stat")):
+                stat_error = byte_inventory((target,))
+            self.assertEqual(stat_error.status, "INCONCLUSIVE")
+            self.assertEqual(stat_error.reason_codes, ("inventory_stat_failed",))
+
+            directory = root / "walk"
+            directory.mkdir()
+            with mock.patch("helper.artifacts.os.scandir", side_effect=OSError("walk")):
+                walk_error = byte_inventory((directory,))
+            self.assertEqual(walk_error.status, "INCONCLUSIVE")
+            self.assertEqual(walk_error.reason_codes, ("inventory_walk_failed",))
+
+    def test_byte_inventory_enforces_bounded_cardinality_and_paths_before_read(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             directory = root / "many"
@@ -70,9 +99,21 @@ class ArtifactTests(unittest.TestCase):
             for index in range(5):
                 (directory / f"file-{index}.txt").write_text("x", encoding="utf-8")
             with mock.patch.object(artifacts_module, "_MAX_INVENTORY_FILES", 2):
-                result = byte_inventory((directory,))
-        self.assertEqual(result.status, "INCONCLUSIVE")
-        self.assertEqual(result.reason_codes, ("inventory_too_many_files",))
+                too_many_files = byte_inventory((directory,))
+            self.assertEqual(too_many_files.status, "INCONCLUSIVE")
+            self.assertEqual(too_many_files.reason_codes, ("inventory_too_many_files",))
+
+            with mock.patch.object(artifacts_module, "_MAX_INVENTORY_PATHS", 1):
+                too_many_paths = byte_inventory((directory,))
+            self.assertEqual(too_many_paths.status, "INCONCLUSIVE")
+            self.assertEqual(too_many_paths.reason_codes, ("inventory_too_many_paths",))
+
+            large = root / "large.bin"
+            large.write_bytes(b"123456")
+            with mock.patch.object(artifacts_module, "_MAX_INVENTORY_BYTES", 4), mock.patch.object(Path, "open", side_effect=AssertionError("open should not run")):
+                too_many_bytes = byte_inventory((large,))
+            self.assertEqual(too_many_bytes.status, "INCONCLUSIVE")
+            self.assertEqual(too_many_bytes.reason_codes, ("inventory_too_many_bytes",))
 
     def test_canonical_digest_ignores_mapping_insertion_order(self):
         self.assertEqual(canonical_bytes({"b": 2, "a": 1}), b'{"a":1,"b":2}')

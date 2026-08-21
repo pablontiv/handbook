@@ -1,5 +1,7 @@
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -66,23 +68,65 @@ class EvaluatorContractTests(unittest.TestCase):
         observed_at = datetime.now(timezone.utc).replace(microsecond=0)
         executable_identity = "bwrap:/fake/bwrap:1:2:3"
         profile_identity = f"bwrap:{self.workspace_root.resolve()}:network=none:env=minimal"
+        outside_probe = self.workspace_root.resolve().parent / ".model-optimizer-outside-token-123.txt"
+        probe_specs = (
+            (
+                "workspace_write",
+                (
+                    "python3",
+                    "-c",
+                    "from pathlib import Path; import sys; p=Path('sandbox-probe.txt'); p.write_text('ok', encoding='utf-8'); sys.stdout.write(p.read_text(encoding='utf-8'))",
+                ),
+                "ok",
+            ),
+            (
+                "outside_read_denied",
+                (
+                    "python3",
+                    "-c",
+                    f"from pathlib import Path; import sys; p=Path({str(outside_probe)!r});\ntry:\n p.read_text(encoding='utf-8'); raise SystemExit(7)\nexcept Exception:\n sys.stdout.write('denied')",
+                ),
+                "denied",
+            ),
+            (
+                "secret_env_denied",
+                (
+                    "python3",
+                    "-c",
+                    "import os, sys\nif os.getenv('SECRET_SENTINEL'):\n raise SystemExit(8)\nsys.stdout.write('absent')",
+                ),
+                "absent",
+            ),
+            (
+                "network_denied",
+                (
+                    "python3",
+                    "-c",
+                    "import socket, sys; s=socket.socket();\ntry:\n s.bind(('127.0.0.1', 0)); raise SystemExit(9)\nexcept OSError:\n sys.stdout.write('denied')",
+                ),
+                "denied",
+            ),
+        )
         observations: tuple[ProbeObservation, ...] = tuple(
             probe_observation_from_result(
                 probe_id=probe_id,
-                argv=("bwrap", "--unshare-net", "--bind", str(self.workspace_root.resolve()), str(self.workspace_root.resolve()), "--chdir", str(self.workspace_root.resolve()), "python3", "-c", "print('ok')"),
+                argv=(
+                    "bwrap",
+                    "--unshare-net",
+                    "--bind",
+                    str(self.workspace_root.resolve()),
+                    str(self.workspace_root.resolve()),
+                    "--chdir",
+                    str(self.workspace_root.resolve()),
+                    *command,
+                ),
                 executable_identity=executable_identity,
                 profile_identity=profile_identity,
                 expected_outcome=expected,
-                status="PASS",
                 result=CompletedCommand((), 0, expected, "", 1, False),
                 observed_at=observed_at,
             )
-            for probe_id, expected in (
-                ("workspace_write", "ok"),
-                ("outside_read_denied", "denied"),
-                ("secret_env_denied", "absent"),
-                ("network_denied", "denied"),
-            )
+            for probe_id, command, expected in probe_specs
         )
         self.workspace = PreparedWorkspace(self.workspace_root, "token-123", SandboxAttestation(
             backend="bwrap",
@@ -344,6 +388,113 @@ class EvaluatorContractTests(unittest.TestCase):
         missing_probe = replace(self.workspace.sandbox_attestation, probe_observations=incomplete_observations, profile_digest=incomplete_digest)
         self.assert_invalid(replace(self.request, workspace=replace(self.workspace, sandbox_attestation=missing_probe)), "eval_sandbox_attestation_incomplete")
 
+    def test_probe_observations_derive_status_from_result_semantics(self):
+        observed_at = datetime.now(timezone.utc).replace(microsecond=0)
+        pass_probe = probe_observation_from_result(
+            probe_id="workspace_write",
+            argv=("bwrap", "--unshare-net", "python3", "-c", "print('ok')"),
+            executable_identity="bwrap:/fake/bwrap:1:2:3",
+            profile_identity="bwrap:/tmp/work:network=none:env=minimal",
+            expected_outcome="ok",
+            result=CompletedCommand((), 0, "ok", "", 1, False),
+            observed_at=observed_at,
+        )
+        self.assertEqual(pass_probe.status, "PASS")
+        fail_probe = probe_observation_from_result(
+            probe_id="workspace_write",
+            argv=pass_probe.argv,
+            executable_identity=pass_probe.executable_identity,
+            profile_identity=pass_probe.profile_identity,
+            expected_outcome="ok",
+            result=CompletedCommand((), 0, "partial", "", 1, False),
+            observed_at=observed_at,
+        )
+        self.assertEqual(fail_probe.status, "FAIL")
+
+    def test_sandbox_attestation_rejects_tampered_probe_observation_fields(self):
+        base_attestation = self.workspace.sandbox_attestation
+        base_observation = base_attestation.probe_observations[0]
+
+        def mutated_attestation(updated: ProbeObservation) -> SandboxAttestation:
+            observations = (updated, *base_attestation.probe_observations[1:])
+            digest = sandbox_attestation_digest(
+                base_attestation.backend,
+                self.workspace_root,
+                self.workspace.token,
+                base_attestation.executable_identity,
+                base_attestation.profile_identity,
+                observations,
+            )
+            return replace(base_attestation, probe_observations=observations, profile_digest=digest)
+
+        cases = (
+            (replace(base_observation, probe_id="unknown"), "eval_sandbox_attestation_incomplete"),
+            (replace(base_observation, argv=base_observation.argv[:-1]), "eval_sandbox_attestation_mismatch"),
+            (replace(base_observation, executable_identity="bwrap:relative:1:2:3"), "eval_sandbox_attestation_mismatch"),
+            (replace(base_observation, profile_identity="bwrap:/other:network=none:env=minimal"), "eval_sandbox_attestation_mismatch"),
+            (replace(base_observation, expected_outcome="tampered"), "eval_sandbox_attestation_mismatch"),
+            (replace(base_observation, status="FAIL"), "eval_sandbox_attestation_incomplete"),
+            (replace(base_observation, returncode=1), "eval_sandbox_attestation_incomplete"),
+            (replace(base_observation, timed_out=True), "eval_sandbox_attestation_incomplete"),
+            (replace(base_observation, stdout_truncated=True), "eval_sandbox_attestation_incomplete"),
+            (replace(base_observation, stderr_truncated=True), "eval_sandbox_attestation_incomplete"),
+            (replace(base_observation, stdout_digest="sha256:" + "f" * 64), "eval_sandbox_attestation_incomplete"),
+            (replace(base_observation, stderr_digest="sha256:" + "f" * 64), "eval_sandbox_attestation_incomplete"),
+            (replace(base_observation, observed_at=(datetime.now(timezone.utc) + timedelta(seconds=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z")), "eval_sandbox_attestation_stale"),
+        )
+        for updated, reason in cases:
+            with self.subTest(field=reason):
+                tampered = mutated_attestation(updated)
+                self.assert_invalid(
+                    replace(self.request, workspace=replace(self.workspace, sandbox_attestation=tampered)),
+                    reason,
+                )
+
+    def test_capability_attestation_mismatch_matrix(self):
+        probe_id = "capability:custom_safe:confined-tool-v1"
+        custom_reqs = replace(self.requirements, essential_custom_tools=("custom_safe",))
+        base_now = datetime.now(timezone.utc).replace(microsecond=0)
+        observed_at = (base_now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+
+        def attestation_for(request: RoleEvalRequest, *, status: str = "PASS", when: str = observed_at, tool_name: str = "custom_safe") -> CapabilityAttestation:
+            return CapabilityAttestation(
+                tool_name,
+                probe_id,
+                status,
+                when,
+                capability_probe_digest(request, tool_name, probe_id, status=status, observed_at=when),
+            )
+
+        valid = attestation_for(self.request)
+        validate_role_eval_request(
+            replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(valid,))),
+            now=base_now,
+        )
+
+        alternate_root = self.root / "alternate-workspace"
+        alternate_root.mkdir()
+        alternate_workspace = replace(self.workspace, root=alternate_root)
+        mismatches = (
+            attestation_for(self.request, status="FAIL"),
+            replace(valid, observed_at=base_now.isoformat().replace("+00:00", "Z")),
+            attestation_for(replace(self.request, workspace=alternate_workspace)),
+            attestation_for(replace(self.request, workspace=replace(self.workspace, token="token-other"))),
+            attestation_for(replace(self.request, fixture=replace(self.fixture, manifest_digest="sha256:" + "e" * 64))),
+            attestation_for(replace(self.request, route=replace(self.route, runtime_kind=RuntimeKind.OPENCODE))),
+            attestation_for(replace(self.request, route=replace(self.route, runtime_version="0.84.3"))),
+            attestation_for(replace(self.request, route=replace(self.route, model="nan/other"))),
+            attestation_for(replace(self.request, route=replace(self.route, effort="medium"))),
+            attestation_for(replace(self.request, workspace=replace(self.workspace, sandbox_attestation=replace(self.workspace.sandbox_attestation, profile_digest="sha256:" + "d" * 64)))),
+            replace(valid, probe_digest=capability_probe_digest(self.request, "other_tool", probe_id, status="PASS", observed_at=observed_at)),
+        )
+        for mismatched in mismatches:
+            with self.subTest(attestation=mismatched):
+                with self.assertRaisesRegex(ValueError, "eval_essential_custom_tool_unproven"):
+                    validate_role_eval_request(
+                        replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(mismatched,))),
+                        now=base_now,
+                    )
+
     def test_parse_pi_requires_correlated_runtime_tool_execution_events(self):
         forged = "\n".join((
             json.dumps({"type": "tool", "tool": "bash", "argv": ["python3", "-m", "unittest"], "exit_code": 0}),
@@ -462,6 +613,90 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertEqual(too_many.status, "INCONCLUSIVE")
         self.assertIn("eval_changed_paths_too_large", too_many.reason_codes)
 
+    def test_changed_paths_real_git_porcelain_boundaries(self):
+        if shutil.which("git") is None:
+            self.skipTest("git is unavailable")
+
+        def init_repo(path: Path) -> Path:
+            path.mkdir(parents=True, exist_ok=True)
+            subprocess.run(("git", "init", "-q"), cwd=path, check=True)
+            subprocess.run(("git", "config", "user.email", "test@example.com"), cwd=path, check=True)
+            subprocess.run(("git", "config", "user.name", "Test"), cwd=path, check=True)
+            return path
+
+        runner = CommandRunner()
+
+        untracked_repo = init_repo(self.root / "git-untracked")
+        (untracked_repo / "tracked.txt").write_text("base", encoding="utf-8")
+        subprocess.run(("git", "add", "tracked.txt"), cwd=untracked_repo, check=True)
+        subprocess.run(("git", "commit", "-qm", "init"), cwd=untracked_repo, check=True)
+        (untracked_repo / "new.txt").write_text("new", encoding="utf-8")
+        untracked_result = runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=5, cwd=untracked_repo, env_overlay={})
+        parsed_untracked = changed_paths_from_git_status(untracked_result, PreparedWorkspace(untracked_repo, "token-git", None))
+        self.assertEqual(parsed_untracked.status, "PASS")
+        self.assertIn("new.txt", parsed_untracked.paths)
+
+        rename_repo = init_repo(self.root / "git-rename")
+        (rename_repo / "old.txt").write_text("rename", encoding="utf-8")
+        subprocess.run(("git", "add", "old.txt"), cwd=rename_repo, check=True)
+        subprocess.run(("git", "commit", "-qm", "init"), cwd=rename_repo, check=True)
+        subprocess.run(("git", "mv", "old.txt", "new.txt"), cwd=rename_repo, check=True)
+        rename_result = runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=5, cwd=rename_repo, env_overlay={})
+        parsed_rename = changed_paths_from_git_status(rename_result, PreparedWorkspace(rename_repo, "token-git", None))
+        self.assertEqual(parsed_rename.status, "PASS")
+        self.assertEqual(parsed_rename.paths, ("new.txt", "old.txt"))
+
+        copy_repo = init_repo(self.root / "git-copy")
+        (copy_repo / "src.txt").write_text("copy me\n", encoding="utf-8")
+        subprocess.run(("git", "add", "src.txt"), cwd=copy_repo, check=True)
+        subprocess.run(("git", "commit", "-qm", "init"), cwd=copy_repo, check=True)
+        (copy_repo / "copy.txt").write_text("copy me\n", encoding="utf-8")
+        (copy_repo / "src.txt").write_text("copy me\nplus\n", encoding="utf-8")
+        subprocess.run(("git", "add", "src.txt", "copy.txt"), cwd=copy_repo, check=True)
+        subprocess.run(("git", "config", "status.renames", "copies"), cwd=copy_repo, check=True)
+        copy_result = runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=5, cwd=copy_repo, env_overlay={})
+        parsed_copy = changed_paths_from_git_status(copy_result, PreparedWorkspace(copy_repo, "token-git", None))
+        self.assertEqual(parsed_copy.status, "PASS")
+        self.assertIn("copy.txt", parsed_copy.paths)
+        self.assertIn("src.txt", parsed_copy.paths)
+
+        timeout_result = runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=0.0001, cwd=copy_repo, env_overlay={})
+        parsed_timeout = changed_paths_from_git_status(timeout_result, PreparedWorkspace(copy_repo, "token-git", None))
+        self.assertEqual(parsed_timeout.status, "INCONCLUSIVE")
+        self.assertIn("eval_changed_paths_unavailable", parsed_timeout.reason_codes)
+
+        truncation_result = runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=5, cwd=copy_repo, env_overlay={}, stdout_limit=8)
+        parsed_truncation = changed_paths_from_git_status(truncation_result, PreparedWorkspace(copy_repo, "token-git", None))
+        self.assertEqual(parsed_truncation.status, "INCONCLUSIVE")
+        self.assertIn("eval_changed_paths_unavailable", parsed_truncation.reason_codes)
+
+        cardinality_repo = init_repo(self.root / "git-cardinality")
+        (cardinality_repo / "base.txt").write_text("base", encoding="utf-8")
+        subprocess.run(("git", "add", "base.txt"), cwd=cardinality_repo, check=True)
+        subprocess.run(("git", "commit", "-qm", "init"), cwd=cardinality_repo, check=True)
+        for index in range(130):
+            (cardinality_repo / f"file-{index}.txt").write_text("x", encoding="utf-8")
+        cardinality_result = runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=5, cwd=cardinality_repo, env_overlay={})
+        parsed_cardinality = changed_paths_from_git_status(cardinality_result, PreparedWorkspace(cardinality_repo, "token-git", None))
+        self.assertEqual(parsed_cardinality.status, "INCONCLUSIVE")
+        self.assertIn("eval_changed_paths_too_large", parsed_cardinality.reason_codes)
+
+        fake_git_dir = self.root / "fake-git"
+        fake_git_dir.mkdir()
+        fake_git = fake_git_dir / "git"
+        fake_git.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'?? src/\\xff.txt\\x00')\n", encoding="utf-8")
+        fake_git.chmod(0o755)
+        decode_result = runner.run(
+            ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+            timeout=5,
+            cwd=copy_repo,
+            env_replacement={"PATH": str(fake_git_dir) + os.pathsep + os.environ.get("PATH", "")},
+        )
+        parsed_decode = changed_paths_from_git_status(decode_result, PreparedWorkspace(copy_repo, "token-git", None))
+        self.assertTrue(decode_result.stdout_decode_replaced)
+        self.assertEqual(parsed_decode.status, "INCONCLUSIVE")
+        self.assertIn("eval_changed_paths_invalid", parsed_decode.reason_codes)
+
     def test_parser_status_matrix_pass_fail_hang_inconclusive(self):
         success = parse_pi_eval_events("\n".join((
             json.dumps({"type": "tool_execution_start", "toolCallId": "ok", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
@@ -480,6 +715,8 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertEqual(hang.status, "HANG")
         inconclusive = parse_pi_eval_events("{not-json", self.workspace, self.fixture)
         self.assertEqual(inconclusive.status, "INCONCLUSIVE")
+        opencode_hang = parse_opencode_eval_events(json.dumps({"type": "timeout"}), self.workspace, self.fixture)
+        self.assertEqual(opencode_hang.status, "HANG")
 
     def test_parser_rejects_candidate_command_backend_mismatch(self):
         mismatch = "\n".join((
@@ -527,6 +764,11 @@ class EvaluatorContractTests(unittest.TestCase):
             ("eval_sandbox_unavailable",),
         )
         self.assertEqual(essential_eval_selection_status((result,)), ("ABSTAIN", ("eval_sandbox_unavailable",)))
+        pi_isolation = replace(result, reason_codes=("eval_pi_isolation_unverified", "eval_pi_isolation_unavailable"))
+        self.assertEqual(
+            essential_eval_selection_status((pi_isolation,)),
+            ("ABSTAIN", ("eval_pi_isolation_unverified", "eval_pi_isolation_unavailable")),
+        )
 
     def test_real_command_runner_timeout_terminates_process_group_children(self):
         script = self.root / "spawn_child.py"

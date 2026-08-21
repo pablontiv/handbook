@@ -664,8 +664,9 @@ class PiAdapter:
             if not isinstance(item, Mapping):
                 return inconclusive_result(request, "eval_pi_isolation_unverified", elapsed_ms=preflight.elapsed_ms)
             name = item.get("name")
-            if isinstance(name, str):
-                command_names.append(name)
+            if not isinstance(name, str) or not name.strip():
+                return inconclusive_result(request, "eval_pi_isolation_unverified", elapsed_ms=preflight.elapsed_ms)
+            command_names.append(name)
         if command_names != ["model_optimizer_eval_smoke"]:
             return inconclusive_result(request, "eval_pi_isolation_unavailable", elapsed_ms=preflight.elapsed_ms)
 

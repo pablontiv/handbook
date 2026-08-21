@@ -512,23 +512,65 @@ ok-provider     ok-model    1K       2K       yes       no
         observed_at = datetime.now(timezone.utc).replace(microsecond=0)
         executable_identity = "bwrap:/fake/bwrap:1:2:3"
         profile_identity = f"bwrap:{workspace_root.resolve()}:network=none:env=minimal"
+        outside_probe = workspace_root.resolve().parent / ".model-optimizer-outside-token-pi.txt"
+        probe_specs = (
+            (
+                "workspace_write",
+                (
+                    "python3",
+                    "-c",
+                    "from pathlib import Path; import sys; p=Path('sandbox-probe.txt'); p.write_text('ok', encoding='utf-8'); sys.stdout.write(p.read_text(encoding='utf-8'))",
+                ),
+                "ok",
+            ),
+            (
+                "outside_read_denied",
+                (
+                    "python3",
+                    "-c",
+                    f"from pathlib import Path; import sys; p=Path({str(outside_probe)!r});\ntry:\n p.read_text(encoding='utf-8'); raise SystemExit(7)\nexcept Exception:\n sys.stdout.write('denied')",
+                ),
+                "denied",
+            ),
+            (
+                "secret_env_denied",
+                (
+                    "python3",
+                    "-c",
+                    "import os, sys\nif os.getenv('SECRET_SENTINEL'):\n raise SystemExit(8)\nsys.stdout.write('absent')",
+                ),
+                "absent",
+            ),
+            (
+                "network_denied",
+                (
+                    "python3",
+                    "-c",
+                    "import socket, sys; s=socket.socket();\ntry:\n s.bind(('127.0.0.1', 0)); raise SystemExit(9)\nexcept OSError:\n sys.stdout.write('denied')",
+                ),
+                "denied",
+            ),
+        )
         observations: tuple[ProbeObservation, ...] = tuple(
             probe_observation_from_result(
                 probe_id=probe_id,
-                argv=("bwrap", "--unshare-net", "--bind", str(workspace_root.resolve()), str(workspace_root.resolve()), "--chdir", str(workspace_root.resolve()), "python3", "-c", "print('ok')"),
+                argv=(
+                    "bwrap",
+                    "--unshare-net",
+                    "--bind",
+                    str(workspace_root.resolve()),
+                    str(workspace_root.resolve()),
+                    "--chdir",
+                    str(workspace_root.resolve()),
+                    *command,
+                ),
                 executable_identity=executable_identity,
                 profile_identity=profile_identity,
                 expected_outcome=expected,
-                status="PASS",
                 result=CompletedCommand((), 0, expected, "", 1, False),
                 observed_at=observed_at,
             )
-            for probe_id, expected in (
-                ("workspace_write", "ok"),
-                ("outside_read_denied", "denied"),
-                ("secret_env_denied", "absent"),
-                ("network_denied", "denied"),
-            )
+            for probe_id, command, expected in probe_specs
         )
         workspace = PreparedWorkspace(workspace_root, "token-pi", SandboxAttestation(
             backend="bwrap",
@@ -637,7 +679,7 @@ ok-provider     ok-model    1K       2K       yes       no
         self.assertIn("fs.lstatSync(resolved)", extension)
         self.assertIn("eval_path_missing_or_dangling_symlink", extension)
         self.assertIn("await fsp.lstat(item)", extension)
-        self.assertIn("if (stat.isSymbolicLink()) return", extension)
+        self.assertIn("if (stat.isSymbolicLink()) throw new Error(\"eval_recursive_symlink_unsupported\")", extension)
         self.assertIn("requireAllowed(real, allowedRead", extension)
 
     def test_real_runtime_smoke_rejects_symlink_escapes_for_read_grep_and_find(self):
@@ -653,11 +695,15 @@ ok-provider     ok-model    1K       2K       yes       no
         existing_escape = workspace / "src" / "existing-out"
         dangling_escape = workspace / "src" / "dangling"
         nested_parent = workspace / "src" / "nested"
-        recursive_escape = workspace / "src" / "recursive"
+        recursive_parent = workspace / "src" / "recursive-parent"
+        recursive_parent.mkdir()
+        (recursive_parent / "inside.txt").write_text("sentinel inside", encoding="utf-8")
+        (recursive_parent / "link-existing").symlink_to(outside_dir / "secret.txt")
+        (recursive_parent / "link-dangling").symlink_to(outside_dir / "missing.txt")
+        (recursive_parent / "link-outside-dir").symlink_to(outside_dir)
         existing_escape.symlink_to(outside_dir / "secret.txt")
         dangling_escape.symlink_to(outside_dir / "missing.txt")
         nested_parent.symlink_to(outside_dir)
-        recursive_escape.symlink_to(outside_dir)
 
         policy = {
             "workspace_root": str(workspace.resolve()),
@@ -680,13 +726,13 @@ ok-provider     ok-model    1K       2K       yes       no
         self.assertTrue(str(read_nested["helper_probe"]).startswith("FAIL:"))
         self.assertIn("eval_path_outside_workspace", str(read_nested["helper_probe"]))
 
-        grep_recursive = self._run_real_pi_smoke(workspace, policy, smoke_mode="grep", smoke_read_path="src/recursive")
+        grep_recursive = self._run_real_pi_smoke(workspace, policy, smoke_mode="grep", smoke_read_path="src/recursive-parent")
         self.assertTrue(str(grep_recursive["helper_probe"]).startswith("FAIL:"))
-        self.assertIn("eval_path_outside_workspace", str(grep_recursive["helper_probe"]))
+        self.assertIn("eval_recursive_symlink_unsupported", str(grep_recursive["helper_probe"]))
 
-        find_recursive = self._run_real_pi_smoke(workspace, policy, smoke_mode="find", smoke_read_path="src/recursive")
+        find_recursive = self._run_real_pi_smoke(workspace, policy, smoke_mode="find", smoke_read_path="src/recursive-parent")
         self.assertTrue(str(find_recursive["helper_probe"]).startswith("FAIL:"))
-        self.assertIn("eval_path_outside_workspace", str(find_recursive["helper_probe"]))
+        self.assertIn("eval_recursive_symlink_unsupported", str(find_recursive["helper_probe"]))
 
     def test_role_eval_constructs_confined_pi_command_and_parses_audit(self):
         request = self._role_eval_request()
@@ -749,6 +795,31 @@ ok-provider     ok-model    1K       2K       yes       no
         result = PiAdapter(runner).role_eval(request, self.context)
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertIn("eval_pi_isolation_unavailable", result.reason_codes)
+
+    def test_role_eval_fails_closed_when_rpc_commands_are_malformed(self):
+        request = self._role_eval_request()
+        malformed = _command(json.dumps({
+            "id": "commands-1",
+            "type": "response",
+            "command": "get_commands",
+            "success": True,
+            "data": {"commands": [{"name": "model_optimizer_eval_smoke"}, {"source": "extension"}]},
+        }) + "\n")
+        runner = FakeRunner((_command("0.84.2\n"), malformed))
+        result = PiAdapter(runner).role_eval(request, self.context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_pi_isolation_unverified", result.reason_codes)
+
+    def test_role_eval_runtime_required_command_failure_maps_to_fail(self):
+        request = self._role_eval_request()
+        events = "\n".join((
+            json.dumps({"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "call-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 1, "elapsed_ms": 10, "sandbox_backend": "bwrap"}}}),
+        ))
+        preflight = _command(json.dumps({"id": "commands-1", "type": "response", "command": "get_commands", "success": True, "data": {"commands": [{"name": "model_optimizer_eval_smoke"}]}}) + "\n")
+        runner = FakeRunner((_command("0.84.2\n"), preflight, _command(events), _command("")))
+        result = PiAdapter(runner).role_eval(request, self.context)
+        self.assertEqual(result.status, "FAIL")
 
     def test_role_eval_runtime_timeout_is_hang_boundary(self):
         request = self._role_eval_request()

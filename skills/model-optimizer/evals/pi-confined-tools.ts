@@ -138,7 +138,7 @@ async function confinedGrepHelper(root: string, allowedRead: string[], rawPath: 
   async function visit(item: string): Promise<void> {
     if (output.length >= max) return;
     const stat = await fsp.lstat(item);
-    if (stat.isSymbolicLink()) return;
+    if (stat.isSymbolicLink()) throw new Error("eval_recursive_symlink_unsupported");
     const real = await fsp.realpath(item);
     if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
     requireAllowed(real, allowedRead, "eval_read_not_allowed");
@@ -170,7 +170,7 @@ async function confinedFindHelper(root: string, allowedRead: string[], rawPath: 
   async function visit(item: string): Promise<void> {
     if (output.length >= max) return;
     const stat = await fsp.lstat(item);
-    if (stat.isSymbolicLink()) return;
+    if (stat.isSymbolicLink()) throw new Error("eval_recursive_symlink_unsupported");
     const real = await fsp.realpath(item);
     if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
     requireAllowed(real, allowedRead, "eval_read_not_allowed");
