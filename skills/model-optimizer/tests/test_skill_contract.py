@@ -111,6 +111,40 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("ask the user for one representative task", flow)
         self.assertIn("abstain until supplied", flow)
 
+    def test_approval_apply_reference_covers_scope_reload_and_rollback_contract(self):
+        flow = (REFERENCES / "optimization-flow.md").read_text(encoding="utf-8")
+        for phrase in (
+            "ApprovedChange(agent, previous_route, selected_route, apply_target, source_digest)",
+            "project-local Pi definitions map to project `.pi/subagents.json`",
+            "global Pi definitions map to `$PI_CODING_AGENT_DIR/subagents.json` or `~/.pi/agent/subagents.json`",
+            "project OpenCode config overrides global fields only where present",
+            "Do not copy inherited global values into project config",
+            "edit only `model_profiles[agent].model` and supported effort",
+            "edit only `agent.<name>.model` and `variant`",
+            "Markdown frontmatter `model` and `variant` fields",
+            "backup bytes must exactly equal the original source bytes",
+            "restore with `os.replace`",
+            "verify the restored agent path",
+        ):
+            self.assertIn(phrase, flow)
+        expected_order = (
+            "read selected config and fallback scope",
+            "create timestamped backup",
+            "edit only `model_profiles[agent].model`",
+            "parse JSON to validate",
+            "reload or restart/new session",
+            "invoke affected subagent path",
+            "atomically restore",
+            "parse again",
+            "second reload/restart",
+            "10. verify the restored agent path",
+        )
+        position = -1
+        for phrase in expected_order:
+            found = flow.find(phrase)
+            self.assertGreater(found, position, phrase)
+            position = found
+
     def test_public_proposal_and_internal_approval_payload_are_separated(self):
         flow = (REFERENCES / "optimization-flow.md").read_text(encoding="utf-8")
         proposal_match = re.search(r"```proposal\n(?P<body>.*?)\n```", flow, re.DOTALL)

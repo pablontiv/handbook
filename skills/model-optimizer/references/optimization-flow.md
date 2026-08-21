@@ -70,11 +70,41 @@ The internal approval payload is not shown as the public recommendation. It exis
 
 - The evidence helper remains read-only.
 - Before approval, emit only inventory, check, evaluate, and cache-benchmark evidence commands.
-- After approval, mutate only the native runtime source discovered during inventory.
+- The internal payload is `ApprovedChange(agent, previous_route, selected_route, apply_target, source_digest)`. Construct it only after explicit approval is bound to the concise proposal; do not derive write targets from the rendered proposal text.
+- After approval, mutate only the native runtime source discovered during inventory. project-local Pi definitions map to project `.pi/subagents.json`; global Pi definitions map to `$PI_CODING_AGENT_DIR/subagents.json` or `~/.pi/agent/subagents.json`. project OpenCode config overrides global fields only where present. Do not copy inherited global values into project config.
+- backup bytes must exactly equal the original source bytes. Place the timestamped backup beside the runtime-native configuration surface for the selected source scope.
 - Validate syntax before reload.
 - Verify the configured affected agent path after reload; a direct model probe is insufficient.
-- If any write, validation, reload, or post-reload path check fails, restore the backup, validate the restored file, reload/restart again, and verify restored affected agent paths.
+- If any write, validation, reload, or post-reload path check fails, restore with `os.replace` from the backup, validate the restored file, reload/restart again, and verify the restored agent path before reporting rollback success.
 - Do not claim rollback success from restored bytes alone.
+
+### Pi approved apply sequence
+
+1. read selected config and fallback scope from the discovered Pi agent contract;
+2. create timestamped backup in the runtime-native backup directory;
+3. edit only `model_profiles[agent].model` and supported effort in the exact project or global `subagents.json`;
+4. parse JSON to validate;
+5. reload or restart/new session as required by the active Pi runtime;
+6. invoke affected subagent path and verify it resolves to the selected route;
+7. on failure, atomically restore from backup;
+8. parse again to validate restored JSON;
+9. perform the second reload/restart;
+10. verify the restored agent path before reporting rollback success.
+
+Do not copy inherited global values into project config.
+
+### OpenCode approved apply sequence
+
+1. read selected config and fallback scope from the discovered OpenCode agent contract;
+2. create timestamped backup in the runtime-native backup directory;
+3. edit only `agent.<name>.model` and `variant` in the exact discovered `opencode.json` source, or the Markdown frontmatter `model` and `variant` fields in the exact discovered Markdown definition;
+4. parse JSON to validate JSON sources, or validate bounded Markdown frontmatter for Markdown sources;
+5. reload or restart/new session as required by the active OpenCode runtime;
+6. invoke affected agent path and verify it resolves to the selected route;
+7. on failure, atomically restore from backup;
+8. parse again to validate restored JSON or restored Markdown frontmatter;
+9. perform the second reload/restart;
+10. verify the restored agent path before reporting rollback success.
 
 ## Privacy and sandbox rules
 
