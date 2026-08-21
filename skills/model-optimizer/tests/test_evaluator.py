@@ -876,8 +876,10 @@ class EvaluatorContractTests(unittest.TestCase):
             identity_two = evaluator_module._executable_identity(str(executable), "bwrap")
         finally:
             self._identity_patch.start()
-        self.assertRegex(identity_one, r"^bwrap:/.*:sha256:[0-9a-f]{64}$")
-        self.assertRegex(identity_two, r"^bwrap:/.*:sha256:[0-9a-f]{64}$")
+        self.assertRegex(identity_one, r"^bwrap:.+:sha256:[0-9a-f]{64}$")
+        self.assertRegex(identity_two, r"^bwrap:.+:sha256:[0-9a-f]{64}$")
+        self.assertIn(str(executable.resolve()), identity_one)
+        self.assertIn(str(executable.resolve()), identity_two)
         self.assertNotEqual(identity_one, identity_two)
 
     def test_changed_paths_collection_is_typed_and_fail_closed(self):
@@ -971,21 +973,22 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertEqual(parsed_cardinality.status, "INCONCLUSIVE")
         self.assertIn("eval_changed_paths_too_large", parsed_cardinality.reason_codes)
 
-        fake_git_dir = self.root / "fake-git"
-        fake_git_dir.mkdir()
-        fake_git = fake_git_dir / "git"
-        fake_git.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'?? src/\\xff.txt\\x00')\n", encoding="utf-8")
-        fake_git.chmod(0o755)
-        decode_result = runner.run(
-            ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
-            timeout=5,
-            cwd=copy_repo,
-            env_replacement={"PATH": str(fake_git_dir) + os.pathsep + os.environ.get("PATH", "")},
-        )
-        parsed_decode = changed_paths_from_git_status(decode_result, PreparedWorkspace(copy_repo, "token-git", None))
-        self.assertTrue(decode_result.stdout_decode_replaced)
-        self.assertEqual(parsed_decode.status, "INCONCLUSIVE")
-        self.assertIn("eval_changed_paths_invalid", parsed_decode.reason_codes)
+        if os.name != "nt":
+            fake_git_dir = self.root / "fake-git"
+            fake_git_dir.mkdir()
+            fake_git = fake_git_dir / "git"
+            fake_git.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'?? src/\\xff.txt\\x00')\n", encoding="utf-8")
+            fake_git.chmod(0o755)
+            decode_result = runner.run(
+                ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+                timeout=5,
+                cwd=copy_repo,
+                env_replacement={"PATH": str(fake_git_dir) + os.pathsep + os.environ.get("PATH", "")},
+            )
+            parsed_decode = changed_paths_from_git_status(decode_result, PreparedWorkspace(copy_repo, "token-git", None))
+            self.assertTrue(decode_result.stdout_decode_replaced)
+            self.assertEqual(parsed_decode.status, "INCONCLUSIVE")
+            self.assertIn("eval_changed_paths_invalid", parsed_decode.reason_codes)
 
     def test_parser_status_matrix_pass_fail_hang_inconclusive(self):
         success = parse_pi_eval_events("\n".join((
@@ -1060,6 +1063,7 @@ class EvaluatorContractTests(unittest.TestCase):
             ("ABSTAIN", ("eval_pi_isolation_unverified", "eval_pi_isolation_unavailable")),
         )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup is validated on POSIX hosts only")
     def test_real_command_runner_timeout_terminates_process_group_children(self):
         script = self.root / "spawn_child.py"
         marker = self.root / "child-marker"

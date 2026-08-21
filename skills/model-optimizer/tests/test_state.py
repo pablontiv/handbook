@@ -181,14 +181,19 @@ class StateTests(unittest.TestCase):
         )
 
     def test_state_path_uses_xdg_cache_home_then_home_fallback(self):
-        self.assertEqual(
-            state_path({"XDG_CACHE_HOME": "/cache"}, Path("/home/u"), (Path("/home/u/.pi/agent"),)),
-            Path("/cache/model-optimizer/state.json"),
-        )
-        self.assertEqual(
-            state_path({}, Path("/home/u"), (Path("/home/u/.pi/agent"),)),
-            Path("/home/u/.cache/model-optimizer/state.json"),
-        )
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            cache_home = root / "cache"
+            home = root / "home" / "u"
+            config_tree = home / ".pi" / "agent"
+            self.assertEqual(
+                state_path({"XDG_CACHE_HOME": str(cache_home)}, home, (config_tree,)),
+                cache_home / "model-optimizer" / "state.json",
+            )
+            self.assertEqual(
+                state_path({}, home, (config_tree,)),
+                home / ".cache" / "model-optimizer" / "state.json",
+            )
 
     def test_state_path_rejects_relative_xdg_and_config_tree_overlap(self):
         with self.assertRaisesRegex(ValueError, "state_cache_home_not_absolute"):
