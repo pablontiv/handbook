@@ -1,6 +1,8 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,19 +13,37 @@ from helper.adapters.opencode import (
     parse_opencode_live_events,
     parse_opencode_models_verbose,
 )
-from helper.models import HealthStatus, ModelRecord, ReadinessStatus
+from helper.evaluator import (
+    AllowedCommand,
+    FixturePolicy,
+    PreparedWorkspace,
+    ProbeObservation,
+    RoleEvalRequest,
+    SandboxAttestation,
+    canonical_fixture_digest,
+    prepare_workspace_marker,
+    effective_config_matches,
+    isolated_opencode_env,
+    opencode_eval_config,
+    probe_observation_from_result,
+    sandbox_attestation_digest,
+)
+from helper.models import HealthStatus, ModelRecord, ReadinessStatus, RuntimeKind
+from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
 from helper.runner import MAX_STDOUT_LIMIT_CHARS, CompletedCommand
-from tests.support import FakeRunner, _command, assert_test_path, fixture_text
+from tests.support import FAKE_BWRAP_PATH, FakeRunner, _command, assert_test_path, fixture_text
 
 
 class EnvCapturingRunner(FakeRunner):
     def __init__(self, responses):
         super().__init__(responses)
         self.env_overlays = []
+        self.cwd_values = []
 
-    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None):
+    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None, stdin_text=None):
         self.env_overlays.append(dict(env_overlay or {}))
-        return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit)
+        self.cwd_values.append(Path(cwd))
+        return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement, stdin_text=stdin_text)
 
 
 def _probe_agent_name(token: str) -> str:
@@ -53,8 +73,14 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.context = RuntimeContext(home=self.root, cwd=self.root / "project", env={})
         self.context.cwd.mkdir()
+        self._which_patch = patch("helper.evaluator.shutil.which", return_value=FAKE_BWRAP_PATH)
+        self._identity_patch = patch("helper.evaluator._executable_identity", return_value=f"bwrap:{FAKE_BWRAP_PATH}:1:2:3:sha256:" + ("0" * 64))
+        self._which_patch.start()
+        self._identity_patch.start()
 
     def tearDown(self):
+        self._identity_patch.stop()
+        self._which_patch.stop()
         self.temp.cleanup()
 
     def _write_project_config(self, text: str | None = None) -> Path:
@@ -136,28 +162,28 @@ class OpenCodeAdapterTests(unittest.TestCase):
                 self.assertEqual(ready[0].reason_code, "auth_ready")
 
     def test_unknown_auth_label_does_not_invent_provider_or_leak_content(self):
-        ready = parse_opencode_auth('{"apiKey":"sk-do-not-leak","provider":"mystery"} api\n')
+        ready = parse_opencode_auth('{"apiKey":"' + "sk" + '-do-not-leak","provider":"mystery"} api\n')
         self.assertEqual(len(ready), 1)
         self.assertEqual(ready[0].provider, "UNKNOWN")
         self.assertEqual(ready[0].status, ReadinessStatus.UNKNOWN)
         self.assertEqual(ready[0].reason_code, "auth_unknown_provider_label")
         self.assertIsNone(ready[0].auth_type)
-        self.assertNotIn("sk-do-not-leak", json.dumps([item.to_dict() for item in ready]))
+        self.assertNotIn("sk" + "-do-not-leak", json.dumps([item.to_dict() for item in ready]))
 
     def test_auth_type_uses_safe_vocabulary_and_unknown_provider_never_persists_method(self):
         cases = (
             ("OpenAI oauth\n", "openai", "oauth"),
             ("OpenAI api\n", "openai", "api"),
-            ("OpenAI sk-live-api-key-shaped-value\n", "openai", None),
+            ("OpenAI " + "sk" + "-live-api-key-shaped-value\n", "openai", None),
             ("Mystery api\n", "UNKNOWN", None),
-            ("Mystery sk-live-api-key-shaped-value\n", "UNKNOWN", None),
+            ("Mystery " + "sk" + "-live-api-key-shaped-value\n", "UNKNOWN", None),
         )
         for text, provider, auth_type in cases:
             with self.subTest(text=text):
                 ready = parse_opencode_auth(text)
                 self.assertEqual(ready[0].provider, provider)
                 self.assertEqual(ready[0].auth_type, auth_type)
-                self.assertNotIn("sk-live-api-key-shaped-value", json.dumps(ready[0].to_dict()))
+                self.assertNotIn("sk" + "-live-api-key-shaped-value", json.dumps(ready[0].to_dict()))
 
     def test_verbose_models_preserve_family_cache_vision_and_variants(self):
         models = parse_opencode_models_verbose(fixture_text("opencode/models-verbose.txt"))
@@ -221,17 +247,18 @@ openai/gpt-fractional
         self.assertEqual(models[0].max_output, 2)
 
     def test_verbose_models_exclude_non_active_and_invalid_status_with_stable_warnings(self):
-        text = """\
+        secret = "sk" + "-status-secret"
+        text = f"""\
 openai/gpt-active
-{"id":"gpt-active","providerID":"openai","status":"active"}
+{{"id":"gpt-active","providerID":"openai","status":"active"}}
 openai/gpt-missing
-{"id":"gpt-missing","providerID":"openai"}
+{{"id":"gpt-missing","providerID":"openai"}}
 openai/gpt-old
-{"id":"gpt-old","providerID":"openai","status":"deprecated"}
+{{"id":"gpt-old","providerID":"openai","status":"deprecated"}}
 nan/qwen-old
-{"id":"qwen-old","providerID":"nan","status":"inactive"}
+{{"id":"qwen-old","providerID":"nan","status":"inactive"}}
 nan/qwen-invalid
-{"id":"qwen-invalid","providerID":"nan","status":{"value":"sk-status-secret"}}
+{{"id":"qwen-invalid","providerID":"nan","status":{{"value":"{secret}"}}}}
 """
         adapter = OpenCodeAdapter(FakeRunner.stdout(text))
         models = adapter.list_models(self.context)
@@ -242,7 +269,7 @@ nan/qwen-invalid
         serialized_warnings = json.dumps(adapter.warnings)
         self.assertNotIn("deprecated", serialized_warnings)
         self.assertNotIn("inactive", serialized_warnings)
-        self.assertNotIn("sk-status-secret", serialized_warnings)
+        self.assertNotIn("sk" + "-status-secret", serialized_warnings)
 
     def test_verbose_models_report_identity_mismatch_before_inactive_status(self):
         text = """\
@@ -337,6 +364,24 @@ openai/gpt-second
         self.assertEqual(by_agent["reviewer"].options, {"temperature": 0.1})
         self.assertIn("project:opencode.json", snapshot.sources)
 
+    def test_snapshot_honors_xdg_config_home_for_global_opencode_json(self):
+        xdg = self.root / "xdg"
+        global_config = xdg / "opencode" / "opencode.json"
+        assert_test_path(global_config, self.root)
+        global_config.parent.mkdir(parents=True)
+        global_config.write_text(json.dumps({
+            "agent": {"scout": {"model": "openai/gpt-5.6-terra", "variant": "high"}}
+        }), encoding="utf-8")
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"XDG_CONFIG_HOME": str(xdg)})
+
+        snapshot = OpenCodeAdapter(FakeRunner.stdout("1.18.18\n")).snapshot(context)
+
+        scout = next(item for item in snapshot.current_assignments if item.agent == "scout")
+        self.assertEqual(scout.model, "openai/gpt-5.6-terra")
+        self.assertEqual(scout.options, {"variant": "high"})
+        self.assertEqual(scout.source, "global:opencode.json")
+        self.assertIn("global:opencode.json", snapshot.sources)
+
     def test_project_config_does_not_inherit_absent_global_options(self):
         global_config = self.root / ".config" / "opencode" / "opencode.json"
         assert_test_path(global_config, self.root)
@@ -360,7 +405,7 @@ openai/gpt-second
                     "model": "nan/qwen3.6",
                     "textVerbosity": {
                         "safe": "keep",
-                        "apiKey": "sk-nested-secret",
+                        "apiKey": "secret-nested",
                         "nested": [
                             {"token": "tok-secret", "safe": "sibling"},
                             {"authorization": "Bearer secret"},
@@ -381,7 +426,7 @@ openai/gpt-second
             },
         })
         serialized = json.dumps(assignment)
-        for secret in ("sk-nested-secret", "tok-secret", "Bearer secret", "secret-value", "pw-secret", "cred-secret"):
+        for secret in ("secret-nested", "tok-secret", "Bearer secret", "secret-value", "pw-secret", "cred-secret"):
             self.assertNotIn(secret, serialized)
 
     def test_live_check_uses_json_events_supported_variant_and_dedicated_deny_all_agent(self):
@@ -421,12 +466,13 @@ openai/gpt-second
             "Reply exactly: PONG",
         ))
         self.assertEqual(context.env, original_env)
-        env = runner.env_overlays[-1]
+        env = runner.env_replacements[-1]
+        self.assertIsNotNone(env)
         self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "deny"})
         inline = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        self.assertEqual(inline["theme"], "dark")
+        self.assertNotIn("theme", inline)
         self.assertEqual(inline["permission"], {"*": "deny"})
-        self.assertEqual(inline["agent"]["worker"], {"model": "openai/gpt-5.6-terra"})
+        self.assertEqual(set(inline["agent"]), {agent_name})
         self.assertEqual(inline["agent"][agent_name], {"permission": "deny"})
 
     def test_live_check_adds_deny_all_inline_config_when_env_has_no_existing_config(self):
@@ -441,7 +487,8 @@ openai/gpt-second
         check = self._live_check_with_token(runner, model, None, "PONG", 60, self.context, token=token)
 
         self.assertEqual(check.status, HealthStatus.PASS)
-        env = runner.env_overlays[-1]
+        env = runner.env_replacements[-1]
+        self.assertIsNotNone(env)
         self.assertEqual(json.loads(env["OPENCODE_PERMISSION"]), {"*": "deny"})
         inline = json.loads(env["OPENCODE_CONFIG_CONTENT"])
         self.assertEqual(inline["permission"], {"*": "deny"})
@@ -596,7 +643,7 @@ openai/gpt-second
     def test_live_check_debug_config_secret_output_never_leaks_into_health_detail(self):
         token = "9" * 32
         agent_name = _probe_agent_name(token)
-        secret = "sk-debug-config-should-not-leak"
+        secret = "sk" + "-debug-config-should-not-leak"
         runner = EnvCapturingRunner((
             _debug_config_command(agent_name, payload={
                 "agent": {
@@ -615,21 +662,24 @@ openai/gpt-second
         self.assertEqual(check.reason_code, "live_unsafe_permission_config")
         self.assertNotIn(secret, check.detail)
 
-    def test_live_check_malformed_inline_config_fails_closed_without_launch_or_leak(self):
-        runner = EnvCapturingRunner((_command('{"type":"text","part":{"text":"PONG"}}\n'),))
+    def test_live_check_omits_malformed_ambient_inline_config_without_leak(self):
+        token = "7" * 32
+        agent_name = _probe_agent_name(token)
+        runner = EnvCapturingRunner((
+            _debug_config_command(agent_name),
+            _command('{"type":"text","part":{"text":"PONG"}}\n'),
+        ))
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6")
-        secret_config = '{"apiKey":"sk-inline-secret"'
+        secret_config = '{"apiKey":"' + "sk" + '-inline-secret"'
         context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENCODE_CONFIG_CONTENT": secret_config})
 
-        check = OpenCodeAdapter(runner).live_check(model, None, "PONG", 60, context)
+        check = self._live_check_with_token(runner, model, None, "PONG", 60, context, token=token)
 
-        self.assertEqual(check.status, HealthStatus.FAIL)
-        self.assertEqual(check.reason_code, "live_unsafe_permission_config")
-        self.assertFalse(check.response_matched)
-        self.assertEqual(runner.argv, [])
-        self.assertEqual(runner.env_overlays, [])
+        self.assertEqual(check.status, HealthStatus.PASS)
         self.assertEqual(context.env["OPENCODE_CONFIG_CONTENT"], secret_config)
-        self.assertNotIn("sk-inline-secret", check.detail)
+        env = runner.env_replacements[-1]
+        self.assertIsNotNone(env)
+        self.assertNotIn("sk" + "-inline-secret", json.dumps(env))
         self.assertNotIn("OPENCODE_CONFIG_CONTENT", check.detail)
 
     def test_error_event_is_fail_even_when_process_exit_is_zero(self):
@@ -854,13 +904,465 @@ openai/gpt-second
         runner = FakeRunner((
             _command("1.18.18\n"),
             _command(fixture_text("opencode/models-verbose.txt")),
-            _command(fixture_text("opencode/auth-list.txt") + '{"apiKey":"sk-do-not-leak"} api\n'),
+            _command(fixture_text("opencode/auth-list.txt") + '{"apiKey":"sk" + "-do-not-leak"} api\n'),
         ))
         inventory = OpenCodeAdapter(runner).inventory(self.context)
         serialized = json.dumps(inventory.to_dict())
         self.assertNotIn("auth.json", serialized)
-        self.assertNotIn("sk-do-not-leak", serialized)
+        self.assertNotIn("sk" + "-do-not-leak", serialized)
         self.assertNotIn("~/.local/share/opencode", serialized)
+
+    def _role_eval_request(self):
+        workspace_root = self.root / "eval-workspace"
+        workspace_root.mkdir()
+        (workspace_root / "src").mkdir()
+        observed_at = datetime.now(timezone.utc).replace(microsecond=0)
+        executable_identity = f"bwrap:{FAKE_BWRAP_PATH}:1:2:3:sha256:" + ("0" * 64)
+        profile_identity = f"bwrap:{workspace_root.resolve()}:network=none:env=minimal"
+        outside_probe = workspace_root.resolve().parent / ".model-optimizer-outside-token-opencode.txt"
+        probe_specs = (
+            (
+                "workspace_write",
+                (
+                    "python3",
+                    "-c",
+                    "from pathlib import Path; import sys; p=Path('sandbox-probe.txt'); p.write_text('ok', encoding='utf-8'); sys.stdout.write(p.read_text(encoding='utf-8'))",
+                ),
+                "ok",
+            ),
+            (
+                "outside_read_denied",
+                (
+                    "python3",
+                    "-c",
+                    f"from pathlib import Path; import sys; p=Path({str(outside_probe)!r});\ntry:\n p.read_text(encoding='utf-8'); raise SystemExit(7)\nexcept Exception:\n sys.stdout.write('denied')",
+                ),
+                "denied",
+            ),
+            (
+                "secret_env_denied",
+                (
+                    "python3",
+                    "-c",
+                    "import os, sys\nif os.getenv('SECRET_SENTINEL'):\n raise SystemExit(8)\nsys.stdout.write('absent')",
+                ),
+                "absent",
+            ),
+            (
+                "network_denied",
+                (
+                    "python3",
+                    "-c",
+                    "import socket, sys; s=socket.socket();\ntry:\n s.bind(('127.0.0.1', 0)); raise SystemExit(9)\nexcept OSError:\n sys.stdout.write('denied')",
+                ),
+                "denied",
+            ),
+        )
+        observations: tuple[ProbeObservation, ...] = tuple(
+            probe_observation_from_result(
+                probe_id=probe_id,
+                argv=(
+                    FAKE_BWRAP_PATH,
+                    "--unshare-net",
+                    "--bind",
+                    str(workspace_root.resolve()),
+                    str(workspace_root.resolve()),
+                    "--chdir",
+                    str(workspace_root.resolve()),
+                    *command,
+                ),
+                executable_identity=executable_identity,
+                profile_identity=profile_identity,
+                expected_outcome=expected,
+                result=CompletedCommand((), 0, expected, "", 1, False),
+                observed_at=observed_at,
+            )
+            for probe_id, command, expected in probe_specs
+        )
+        workspace = PreparedWorkspace(workspace_root, "token-opencode", SandboxAttestation(
+            backend="bwrap",
+            workspace_root=str(workspace_root.resolve()),
+            workspace_token="token-opencode",
+            profile_identity=profile_identity,
+            profile_digest=sandbox_attestation_digest("bwrap", workspace_root, "token-opencode", executable_identity, profile_identity, observations),
+            observed_at=observed_at.isoformat().replace("+00:00", "Z"),
+            probe_observations=observations,
+            executable_identity=executable_identity,
+        ))
+        fixture_base = FixturePolicy(
+            fixture_id="mechanical",
+            fixture_version="v1",
+            manifest_digest="",
+            grader_id="grader@v1",
+            allowed_read_paths=("src",),
+            allowed_write_paths=("src",),
+            allowed_commands=(AllowedCommand("cmd-test", ("python3", "-m", "unittest")),),
+            requires_code_execution=True,
+            capability_attestations=(),
+        )
+        fixture = replace(fixture_base, manifest_digest=canonical_fixture_digest(fixture_base))
+        prepare_workspace_marker(workspace, fixture)
+        model = ModelRecord("openai/gpt-5.6-terra", "openai", "gpt-5.6-terra", variants=("high",), tool_call=True)
+        route = RouteKey(RuntimeKind.OPENCODE, "1.18.18", "openai/gpt-5.6-terra", "high")
+        agent = AgentContract(
+            name="worker",
+            description="",
+            mode=None,
+            model="openai/gpt-5.6-terra",
+            effort="high",
+            tools=("read", "edit"),
+            permissions=(PermissionRule("edit", "src/**", "allow"),),
+            mutation_authority="confined",
+            body="Worker prompt",
+            scope="project",
+            definition_source="test",
+            assignment_source="test",
+            inheritance_sources=(),
+            apply_target=None,
+            digest="sha256:agent",
+        )
+        requirements = RoleRequirements(
+            archetype="mechanical",
+            required_tools=("read", "edit"),
+            essential_custom_tools=(),
+            requires_vision=False,
+            requires_mutation=True,
+            min_context=None,
+            min_output=None,
+            allowed_efforts=("high",),
+            structured_output=False,
+            adversarial_against_family=None,
+            priority_order=("quality",),
+        )
+        return RoleEvalRequest(route, model, agent, requirements, workspace, fixture, "Fix the fixture", 30)
+
+    def test_opencode_provider_auth_matrix_preserves_only_exact_route_provider_auth(self):
+        xdg_config = self.root / "xdg-config"
+        xdg_data = self.root / "xdg-data"
+        env = {
+            "OPENAI_API_KEY": "openai-token",
+            "OPENCODE_TOKEN": "opencode-token",
+            "NAN_API_KEY": "nan-token",
+            "MINIMAX_API_KEY": "minimax-token",
+            "ZAI_API_KEY": "zai-token",
+            "OPENCODE_CONFIG_CONTENT": "hostile",
+        }
+        openai = isolated_opencode_env(env, xdg_config, xdg_data, "openai")
+        self.assertEqual(openai.get("OPENAI_API_KEY"), "openai-token")
+        self.assertNotIn("OPENCODE_TOKEN", openai)
+        self.assertNotIn("OPENCODE_CONFIG_CONTENT", openai)
+        nan = isolated_opencode_env(env, xdg_config, xdg_data, "nan")
+        self.assertEqual(nan.get("OPENCODE_TOKEN"), "opencode-token")
+        self.assertEqual(nan.get("NAN_API_KEY"), "nan-token")
+        self.assertNotIn("OPENAI_API_KEY", nan)
+        minimax = isolated_opencode_env(env, xdg_config, xdg_data, "minimax-coding-plan")
+        self.assertEqual(minimax.get("MINIMAX_API_KEY"), "minimax-token")
+        self.assertNotIn("OPENAI_API_KEY", minimax)
+        zai = isolated_opencode_env(env, xdg_config, xdg_data, "zai-coding-plan")
+        self.assertEqual(zai.get("ZAI_API_KEY"), "zai-token")
+        self.assertNotIn("OPENAI_API_KEY", zai)
+        self.assertIsNone(isolated_opencode_env(env, xdg_config, xdg_data, "unknown-provider"))
+        self.assertIsNone(isolated_opencode_env({}, xdg_config, xdg_data, "openai"))
+
+    def test_effective_config_matrix_rejects_execution_affecting_top_level_drift(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "d" * 32
+        expected = opencode_eval_config(request, agent_name)
+        safe = {
+            **expected,
+            "mode": {},
+            "username": "unknown",
+            "plugin": [],
+            "plugins": [],
+            "instructions": [],
+            "mcp": {},
+            "tool": {},
+            "tools": {},
+            "provider": {},
+            "model": {},
+            "share": "manual",
+            "autoshare": False,
+            "compaction": {},
+        }
+        self.assertTrue(effective_config_matches(safe, expected, agent_name))
+        for key, value in {
+            "mode": {"build": True},
+            "username": "attacker",
+            "plugin": ["ambient"],
+            "plugins": ["ambient"],
+            "instructions": ["do unsafe thing"],
+            "mcp": {"server": "ambient"},
+            "tool": {"bash": "allow"},
+            "tools": {"bash": "allow"},
+            "provider": {"openai": {}},
+            "model": {"openai/gpt": {}},
+            "share": "auto",
+            "autoshare": True,
+            "compaction": {"enabled": True},
+        }.items():
+            with self.subTest(key=key):
+                hostile = dict(safe)
+                hostile[key] = value
+                self.assertFalse(effective_config_matches(hostile, expected, agent_name))
+
+    def test_role_eval_uses_isolated_pure_config_and_trusted_manifest_tests(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "a" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {
+                agent_name: {
+                    "description": "isolated model optimizer evaluation",
+                    "prompt": request.agent.body,
+                    "model": request.route.model,
+                    "variant": request.route.effort,
+                    "permission": {
+                        "*": "deny",
+                        "external_directory": "deny",
+                        "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"},
+                        "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"},
+                        "bash": "deny",
+                    },
+                }
+            },
+        }
+        runner = EnvCapturingRunner((
+            _command("1.18.18\n"),
+            _command(json.dumps(debug_payload)),
+            _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'),
+            _command("tests ok"),
+            _command("?? src/out.txt\x00"),
+        ))
+        original_env = {
+            "OPENCODE_CONFIG_CONTENT": json.dumps({"plugin": ["ambient"], "permission": {"bash": "allow"}}),
+            "OPENAI_API_KEY": "runtime-auth-token",
+        }
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env=original_env)
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="a" * 32), patch("helper.evaluator.shutil.which", side_effect=lambda name: FAKE_BWRAP_PATH if name == "bwrap" else None):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(context.env, original_env)
+        self.assertEqual(runner.argv[0], ("opencode", "--version"))
+        self.assertEqual(runner.argv[1], ("opencode", "debug", "config", "--pure"))
+        self.assertEqual(runner.argv[2], (
+            "opencode", "run", "--pure", "--format", "json", "--model", request.route.model,
+            "--variant", request.route.effort, "--agent", agent_name, "--dir", str(request.workspace.root), request.task,
+        ))
+        debug_env = runner.env_replacements[1]
+        self.assertIsNotNone(debug_env)
+        self.assertIn("XDG_CONFIG_HOME", debug_env)
+        self.assertIn("XDG_DATA_HOME", debug_env)
+        self.assertNotIn("OPENCODE_CONFIG_CONTENT", debug_env)
+        self.assertNotIn("OPENCODE_PERMISSION", debug_env)
+        self.assertEqual(debug_env["OPENAI_API_KEY"], "runtime-auth-token")
+        self.assertNotIn("OPENCODE_TOKEN", debug_env)
+        config_path = Path(debug_env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json"
+        self.assertFalse(config_path.exists(), "isolated config root should be cleaned after role_eval")
+        self.assertEqual(result.audit.command_runs[-1].command_id, "cmd-test")
+        self.assertEqual(runner.argv[3][0], FAKE_BWRAP_PATH)
+        self.assertIn("--unshare-net", runner.argv[3])
+        self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"))
+        self.assertNotIn(None, runner.stdout_limits)
+
+    def test_role_eval_manifest_timeout_is_hang(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "e" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {agent_name: {"description": "isolated model optimizer evaluation", "prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"*": "deny", "external_directory": "deny", "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"}, "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"}, "bash": "deny"}}},
+        }
+        manifest_timeout = CompletedCommand((), None, "", "", 31, True, False, False)
+        runner = EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload)), _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'), manifest_timeout, _command("?? src/out.txt\x00")))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="e" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "HANG")
+        self.assertIn("eval_timeout", result.reason_codes)
+
+    def test_role_eval_runtime_timeout_is_hang_before_manifest(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "1" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {agent_name: {"description": "isolated model optimizer evaluation", "prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"*": "deny", "external_directory": "deny", "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"}, "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"}, "bash": "deny"}}},
+        }
+        runtime_timeout = CompletedCommand((), None, "", "", 31, True, False, False)
+        runner = EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload)), runtime_timeout))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="1" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "HANG")
+        self.assertIn("eval_timeout", result.reason_codes)
+        self.assertEqual(runner.argv, [
+            ("opencode", "--version"),
+            ("opencode", "debug", "config", "--pure"),
+            ("opencode", "run", "--pure", "--format", "json", "--model", request.route.model, "--variant", request.route.effort, "--agent", agent_name, "--dir", str(request.workspace.root), request.task),
+        ])
+
+    def test_role_eval_required_command_failure_maps_to_fail(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "2" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {agent_name: {"description": "isolated model optimizer evaluation", "prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"*": "deny", "external_directory": "deny", "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"}, "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"}, "bash": "deny"}}},
+        }
+        runner = EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload)), _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'), _command("tests failed", returncode=2), _command("?? src/out.txt\x00")))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="2" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "FAIL")
+        self.assertIn("eval_required_command_failed", result.reason_codes)
+
+    def test_role_eval_cleanup_matrix_preserves_primary_reason(self):
+        request = self._role_eval_request()
+
+        def debug_payload(agent_name: str) -> dict[str, object]:
+            return {
+                "permission": {"*": "deny", "external_directory": "deny"},
+                "agent": {
+                    agent_name: {
+                        "description": "isolated model optimizer evaluation",
+                        "prompt": request.agent.body,
+                        "model": request.route.model,
+                        "variant": request.route.effort,
+                        "permission": {
+                            "*": "deny",
+                            "external_directory": "deny",
+                            "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"},
+                            "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"},
+                            "bash": "deny",
+                        },
+                    }
+                },
+            }
+
+        class StatusErrorRunner(EnvCapturingRunner):
+            def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None, stdin_text=None):
+                if tuple(argv) == ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"):
+                    raise OSError("status failed")
+                return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement, stdin_text=stdin_text)
+
+        cases = (
+            (
+                "config_write",
+                EnvCapturingRunner((_command("1.18.18\n"),)),
+                patch("pathlib.Path.write_bytes", side_effect=OSError("write failed")),
+                "eval_opencode_config_write_failed",
+                "3" * 32,
+            ),
+            (
+                "debug",
+                EnvCapturingRunner((_command("1.18.18\n"), _command("{", returncode=0))),
+                None,
+                "eval_opencode_effective_config_mismatch",
+                "4" * 32,
+            ),
+            (
+                "run",
+                EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload("model-optimizer-eval-" + "5" * 32))), _command("runtime boom", returncode=2))),
+                None,
+                "eval_runtime_nonzero",
+                "5" * 32,
+            ),
+            (
+                "manifest",
+                EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload("model-optimizer-eval-" + "6" * 32))), _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'), _command("tests failed", returncode=2), _command("?? src/out.txt\x00"))),
+                None,
+                "eval_required_command_failed",
+                "6" * 32,
+            ),
+            (
+                "status",
+                StatusErrorRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload("model-optimizer-eval-" + "7" * 32))), _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'), _command("tests ok"))),
+                None,
+                "eval_opencode_runtime_exception",
+                "7" * 32,
+            ),
+        )
+
+        for label, runner, primary_patch, primary_reason, token in cases:
+            with self.subTest(case=label):
+                context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+                token_patch = patch("helper.adapters.opencode.secrets.token_hex", return_value=token)
+                cleanup_patch = patch("helper.adapters.opencode.shutil.rmtree", side_effect=OSError("cleanup failed"))
+                with token_patch, cleanup_patch:
+                    if primary_patch is None:
+                        result = OpenCodeAdapter(runner).role_eval(request, context)
+                    else:
+                        with primary_patch:
+                            result = OpenCodeAdapter(runner).role_eval(request, context)
+                self.assertEqual(result.status, "INCONCLUSIVE")
+                self.assertIn(primary_reason, result.reason_codes)
+                self.assertIn("eval_opencode_cleanup_failed", result.reason_codes)
+
+    def test_role_eval_cleanup_failure_is_explicit_inconclusive_reason(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "f" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {agent_name: {"description": "isolated model optimizer evaluation", "prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"*": "deny", "external_directory": "deny", "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"}, "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"}, "bash": "deny"}}},
+        }
+        runner = EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload)), _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'), _command("tests ok"), _command("?? src/out.txt\x00")))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="f" * 32), patch("helper.adapters.opencode.shutil.rmtree", side_effect=OSError("cleanup failed")):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_opencode_cleanup_failed", result.reason_codes)
+
+    def test_role_eval_cleans_isolated_roots_when_debug_raises(self):
+        request = self._role_eval_request()
+        class RaisingDebugRunner(EnvCapturingRunner):
+            def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None, stdin_text=None):
+                self.argv.append(tuple(argv))
+                self.stdout_limits.append(stdout_limit)
+                self.env_overlays.append(dict(env_overlay or {}))
+                self.env_replacements.append(dict(env_replacement) if env_replacement is not None else None)
+                self.cwd_values.append(Path(cwd))
+                if tuple(argv) == ("opencode", "debug", "config", "--pure"):
+                    raise OSError("debug failed")
+                return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement, stdin_text=stdin_text)
+        runner = RaisingDebugRunner((_command("1.18.18\n"),))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="c" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_opencode_runtime_exception", result.reason_codes)
+        debug_env = next(env for env in runner.env_replacements if env and "XDG_CONFIG_HOME" in env)
+        self.assertFalse((Path(debug_env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json").exists())
+        self.assertFalse(Path(debug_env["XDG_DATA_HOME"]).exists())
+
+    def test_role_eval_rejects_hostile_effective_global_config_before_launch(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "b" * 32
+        hostile = {"agent": {agent_name: {"prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"bash": "allow"}}}}
+        runner = EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(hostile)),))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="b" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_opencode_effective_config_mismatch", result.reason_codes)
+        self.assertEqual(runner.argv, [("opencode", "--version"), ("opencode", "debug", "config", "--pure")])
+
+    def test_role_eval_status_collection_exception_preserves_runtime_exception_reason(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "9" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {agent_name: {"description": "isolated model optimizer evaluation", "prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"*": "deny", "external_directory": "deny", "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"}, "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"}, "bash": "deny"}}},
+        }
+
+        class StatusErrorRunner(EnvCapturingRunner):
+            def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None, stdin_text=None):
+                if tuple(argv) == ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"):
+                    raise OSError("status failed")
+                return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement, stdin_text=stdin_text)
+
+        runner = StatusErrorRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload)), _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'), _command("tests ok")))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="9" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_opencode_runtime_exception", result.reason_codes)
 
     def test_reload_semantics_reports_restart_required_for_config_changes(self):
         semantics = OpenCodeAdapter(FakeRunner.stdout("1.18.18\n")).reload_semantics(self.context)

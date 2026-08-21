@@ -1,0 +1,11 @@
+{
+  "schema": "model-optimizer.eval-fixture/v1",
+  "id": "regression-retry-delay",
+  "version": "1",
+  "archetype": "debugger",
+  "task": "Diagnose the failing retry-delay test. Do not modify any files.",
+  "grader": "regression-retry-delay-v1",
+  "allowed_changed_files": [],
+  "allowed_commands": [{"id": "python-unittest", "argv": ["python3", "-m", "unittest", "discover", "-v"]}],
+  "requires_code_execution": true
+}

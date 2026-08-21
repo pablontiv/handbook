@@ -65,9 +65,9 @@ Review path:
 
 ### `model-optimizer`
 
-Optimize Pi and OpenCode model assignments with runtime-local evidence. The skill includes a read-only Python 3.11+ helper for inventory and bounded live checks. It does not automatically apply configuration, configure providers, install runtimes, or create fallback routing; online sources are metadata only.
+Optimize Pi and OpenCode model assignments with runtime-local evidence. The skill includes a read-only Python 3.11+ helper for inventory, bounded live checks, runtime-exact confined evaluations, and benchmark-prior cache entries. It does not provide a helper `apply`, `write`, or `configure` command; native configuration edits occur only inside the approved skill workflow after explicit approval, backup, validation, reload, and affected agent-path verification.
 
-Install manually by copying or installing the self-contained [`skills/model-optimizer/`](skills/model-optimizer/) directory through your Agent Skills mechanism.
+Install manually by copying or installing the self-contained [`skills/model-optimizer/`](skills/model-optimizer/) directory through your Agent Skills mechanism. See [`skills/model-optimizer/references/optimization-flow.md`](skills/model-optimizer/references/optimization-flow.md), [`skills/model-optimizer/references/benchmark-sources.md`](skills/model-optimizer/references/benchmark-sources.md), and [`skills/model-optimizer/references/contracts.md`](skills/model-optimizer/references/contracts.md) for the implemented workflow and contracts.
 
 ## Planned skills
 

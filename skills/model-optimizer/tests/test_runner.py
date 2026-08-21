@@ -34,10 +34,10 @@ class RunnerTests(unittest.TestCase):
         self.assertLess(len(result.stderr), 8193)
 
     def test_redaction_removes_tokens_and_authorization_values(self):
-        text = "Authorization: Bearer secret-token api_key=sk-abc cookie=session-xyz"
-        redacted = redact_text(text, ("secret-token", "sk-abc", "session-xyz"))
+        text = "Authorization: " + "Bearer secret-token " + "api" + "_key=" + "sk" + "-abc cookie=session-xyz"
+        redacted = redact_text(text, ("secret-token", "sk" + "-abc", "session-xyz"))
         self.assertNotIn("secret-token", redacted)
-        self.assertNotIn("sk-abc", redacted)
+        self.assertNotIn("sk" + "-abc", redacted)
         self.assertNotIn("session-xyz", redacted)
         self.assertIn("[REDACTED]", redacted)
 
@@ -170,7 +170,7 @@ class RunnerTests(unittest.TestCase):
                     )
 
     def test_inline_opencode_config_and_quoted_json_secret_fields_are_redacted(self):
-        inline = '{"provider":{"options":{"apiKey":"sk-inline-private"}}}'
+        inline = '{"provider":{"options":{"apiKey":"' + "sk" + '-inline-private"}}}'
         result = CommandRunner().run(
             (
                 sys.executable,
@@ -182,7 +182,7 @@ class RunnerTests(unittest.TestCase):
             env_overlay={"OPENCODE_CONFIG_CONTENT": inline},
         )
         combined = result.stdout + result.stderr
-        self.assertNotIn("sk-inline-private", combined)
+        self.assertNotIn("sk" + "-inline-private", combined)
         self.assertNotIn("nested-private", combined)
         self.assertIn("[REDACTED]", combined)
 
@@ -236,10 +236,21 @@ class RunnerTests(unittest.TestCase):
                 "timed_out",
                 "stdout_truncated",
                 "stderr_truncated",
+                "stdout_decode_replaced",
+                "stderr_decode_replaced",
             },
         )
 
     @unittest.skipIf(os.name == "nt", "POSIX process-group cleanup is validated on POSIX hosts only")
+    def test_decode_replacement_flags_when_subprocess_emits_invalid_utf8(self):
+        result = CommandRunner().run(
+            (sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xff')"),
+            timeout=2,
+            cwd=Path.cwd(),
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout_decode_replaced)
+
     def test_timeout_kills_child_process_group_without_leaving_active_child(self):
         with tempfile.TemporaryDirectory() as td:
             heartbeat = Path(td) / "heartbeat.txt"

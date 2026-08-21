@@ -5,55 +5,40 @@ description: Use when optimizing, assigning, validating, or refreshing models fo
 
 ## Core principle
 
-Catalog is not a live response. Runtime-local live evidence outranks catalogs, advisors, aliases, and stale snapshots. Only an exact runtime model ID with a live PASS through the selected runtime is assignable. Without that evidence, do not produce a final mapping or claim success.
+Run one logical optimize flow. Catalog is not a live response: only exact runtime-local model IDs with current live evidence may become assignments. Public benchmarks are priors, aliases are uncertainty, and native config edits happen only after human approval.
 
-## Runtime gate
+## Concise workflow
 
-Resolve Pi versus OpenCode before runtime reads. If both are plausible, ask one concise question. If no runtime/tool access is available, state checks are not executed, fill the output contract with pending evidence, give the exact next commands, and stop before changes.
+1. **detect Pi/OpenCode** before runtime reads. If both are plausible, ask one concise question; if neither can be checked, report pending evidence and stop before changes.
+2. Run **inventory and delta** with the read-only helper, then identify newly ready providers/models, changed or new agents, missing/unhealthy incumbents, and materially affected routes only; do not sweep a full matrix.
+3. Read all affected agent definitions using **scope precedence** for Pi/OpenCode, including inherited tools, permission rules, mutation authority, source scope, and the internal apply target.
+4. **derive requirements** and priorities: archetype, tools, context/output, vision, structured output, reasoning/effort, latency, cost, reliability, cache, and adversarial-family independence.
+5. **live-check incumbent** routes and plausible challengers. The shortlist is at most four complete routes per agent, including the incumbent when present.
+6. Reconcile **bounded benchmark sources** only for affected roles. Preserve identity classes exactly: `EXACT`, `MODEL_EQUIVALENT`, `FAMILY_PROXY`, `ABSENT`, `UNKNOWN`, and `SOURCE_UNAVAILABLE`; search failure is `SOURCE_UNAVAILABLE`, not absence.
+7. Run runtime-exact, **tool-confined role evaluation** adaptively for finalists. Do not expose ambient extensions, unrestricted host tools, credentials, arbitrary project paths, raw prompts, raw responses, tool arguments, source code, transcripts, or config paths.
+8. Render a **concise proposal**, `NEEDS_MORE_EVIDENCE`, no-op, or `ABSTAIN`. A challenger must materially improve; ties or unresolved evidence retain the incumbent.
+9. Stop for **explicit approval**. Requests to hurry, optimize, apply, certify, or explain are not approval to mutate configuration.
+10. After approval: **backup, apply minimally, validate, reload**, verify affected agent paths, and on any write/validation/reload/path failure restore the backup, validate again, reload again, and verify restored agent paths before reporting rollback success.
 
-## Evidence sets
+Detailed rules live in `references/optimization-flow.md`, `references/benchmark-sources.md`, and `references/contracts.md`.
 
-Use nested sets: catalog-local IDs advertised by the runtime; ready-local IDs with ready credentials; live-local IDs that respond through the runtime. FAIL/HANG, unauthenticated, catalog-only, advisor-only, and never-responded IDs are exclusions for this run.
+## Read-only helper examples
 
-## Helper usage
-
-Use only read-only helpers:
+Use existing helper commands only for evidence before approval:
 
 ```bash
 python scripts/model_optimizer.py inventory --runtime auto --output inventory.json
-python scripts/model_optimizer.py check --inventory inventory.json --model provider/model --timeout 60 --output health.json
+python scripts/model_optimizer.py check --inventory inventory.json --model provider/model --effort high --timeout 60 --output health.json
+python scripts/model_optimizer.py evaluate --inventory inventory.json --agent implementer --model provider/model --effort high --fixture mechanical-slugify --timeout 180 --output evaluation.json
+python scripts/model_optimizer.py cache-benchmark --inventory inventory.json --model provider/model --effort high --identity EXACT --source-name Terminal-Bench --benchmark Terminal-Bench --benchmark-version latest-stable --source-url https://example.invalid/replace-with-source --evaluated-model-identity provider/model --harness-or-agent terminal-bench --reasoning-mode high --observed-at 2026-08-20T00:00:00Z --metric-name score --metric-value omit
 ```
 
-The helper never mutates configuration.
+The helper never mutates configuration. Do not invent or call helper mutation subcommands named `apply`, `write`, or `configure`.
 
-## Selection criteria
+## Decision and approval surface
 
-Classify every agent assignment before naming models: workload, context/output, tool use, vision, reasoning criticality, speed, cost, quotas, cache, supported options, and current assignment health. Analyze all assignments and list every required remap, including prompt-stated unauthenticated or catalog-only assignments; never repair one profile and ship.
-
-## Adversarial pairs
-
-Adversarial independence requires different model families. Different providers serving the same family are not an adversarial pair. Treat `claude-x` and `claude-y` as the same Claude family unless live metadata proves otherwise. Require different model families when enough live-local PASS families exist.
-
-## Online reconciliation
-
-Use official or advisor metadata only after runtime-local inventory/readiness/live checks. Advisor-only or catalog-only models stay excluded. Preserve conflicts and use runtime-local values for IDs, options, context, and modalities.
-
-## Proposal contract
-
-Proposals include before/after mappings, exclusions, evidence, and exact config fields. If profiles are absent, show before/after as pending, not final. Include effort/options only when supported by the runtime/provider. Unsupported effort is omitted from config and may appear only as prompt-level intent.
-
-## Approval and apply
-
-Stop for explicit approval before writes. A request to optimize, hurry, apply, certify, or explain changes is not approval to mutate configuration.
-
-## Reload confirmation
-
-After approved native apply, state hot-reload, `/reload`, restart, or new-session semantics. Require post-reload responses from affected agent paths before claiming success.
+Return exactly one decision per affected route: `CHANGE`, `NO_CHANGE`, `NEEDS_MORE_EVIDENCE`, or `ABSTAIN`. The public proposal may show only agent, current/recommended model and effort, concise reason, important uncertainty/exclusion, and operational trade-off. Keep exact config targets, source paths, cache keys, and artifact plumbing internal to the approval payload.
 
 ## Red flags
 
-Stop on urgency overriding checks, catalog prestige, aliases, partial remap, unsupported effort, success-before-reload, or provider-name independence claims.
-
-## Output contract
-
-Report exactly: Target runtime; Evidence status; Complete assignment analysis; Candidate health PASS/FAIL/HANG; Exclusions; Proposed before/after; Options versus prompt intent; Approval gate; Reload and post-reload plan.
+Stop on urgency overriding checks, benchmark-only aliases, stale cached PASS with current live failure, unsupported sandbox for mutation fixtures, ambient Pi/OpenCode permission escalation, partial remap claims, provider-name independence claims, success-before-reload, or rollback success based only on restored bytes. If a mutation/code-execution fixture has no supported sandbox backend, return `ABSTAIN`; do not certify it from host execution.

@@ -1,0 +1,1 @@
+{"type":"tool_use","part":{"type":"tool","tool":"bash","state":{"status":"completed","metadata":{"command_id":"cmd-test","exit_code":2,"elapsed_ms":15,"sandbox_backend":"bwrap"}}}}
