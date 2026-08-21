@@ -10,12 +10,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from helper import evaluator as evaluator_module
 from helper.evaluator import (
     AllowedCommand,
     CapabilityAttestation,
     ChangedPathsResult,
     CommandAudit,
     FixturePolicy,
+    GradeResult,
     PreparedWorkspace,
     ProbeObservation,
     RoleEvalRequest,
@@ -25,7 +27,12 @@ from helper.evaluator import (
     canonical_fixture_digest,
     capability_probe_digest,
     changed_paths_from_git_status,
+    cited_lines,
     essential_eval_selection_status,
+    grade_fixture,
+    load_fixture,
+    load_representative_fixture,
+    prepare_fixture,
     parse_opencode_eval_events,
     parse_pi_eval_events,
     prepare_workspace_marker,
@@ -39,6 +46,8 @@ from helper.models import ModelRecord, RuntimeKind
 from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
 from helper.runner import CompletedCommand, CommandRunner
 from tests.support import FakeRunner, _command, fixture_text
+
+SKILL_ROOT = Path(__file__).resolve().parents[1]
 
 
 class RecordingRunner(FakeRunner):
@@ -55,6 +64,129 @@ class RecordingRunner(FakeRunner):
         self.cwd_values.append(Path(cwd))
         self.timeout_values.append(timeout)
         return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement, stdin_text=stdin_text)
+
+
+class TrustedFixtureTests(unittest.TestCase):
+    def _route(self):
+        return RouteKey(RuntimeKind.PI, "0.84.2", "nan/qwen3.6", "high")
+
+    def _result(self, fixture, *, status="PASS", text="", changed=(), command_exit=0):
+        return RoleEvalResult(
+            self._route(),
+            fixture.fixture_id,
+            fixture.version,
+            fixture.manifest_digest,
+            status,
+            100,
+            text,
+            ToolAudit(("bash",), (CommandAudit("python-unittest", command_exit, 25, "bwrap"),), tuple(changed), 0, ()),
+            0,
+            0,
+            0,
+            None,
+            (),
+        )
+
+    def test_load_fixture_enforces_id_grader_bounds_and_symlink_escape(self):
+        fixture = load_fixture(SKILL_ROOT, "mechanical-slugify")
+        self.assertEqual(fixture.fixture_id, "mechanical-slugify")
+        self.assertEqual(fixture.grader_id, "mechanical-slugify-v1")
+        for bad_id in ("../mechanical-slugify", "Mechanical", "", "a" * 65):
+            with self.subTest(bad_id=bad_id), self.assertRaisesRegex(ValueError, "eval_fixture_id_invalid"):
+                load_fixture(SKILL_ROOT, bad_id)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "evals").mkdir()
+            (root / "evals" / "escape").symlink_to(SKILL_ROOT / "evals" / "mechanical-slugify")
+            with self.assertRaisesRegex(ValueError, "eval_fixture_path_escape"):
+                load_fixture(root, "escape")
+            unknown = root / "evals" / "unknown"
+            unknown.mkdir()
+            (unknown / "eval.json").write_text(json.dumps({
+                "schema": "model-optimizer.eval-fixture/v1",
+                "id": "unknown",
+                "version": "1",
+                "archetype": "mechanical",
+                "task": "Do it",
+                "grader": "unknown-grader",
+                "allowed_changed_files": [],
+                "allowed_commands": [],
+                "requires_code_execution": False,
+            }), encoding="utf-8")
+            (unknown / "project").mkdir()
+            with self.assertRaisesRegex(ValueError, "eval_fixture_unknown_grader"):
+                load_fixture(root, "unknown")
+
+    def test_representative_fixture_must_be_beneath_temp_root_and_marker_token(self):
+        with tempfile.TemporaryDirectory() as td:
+            temp_root = Path(td) / "owned"
+            fixture_path = temp_root / "representative"
+            (fixture_path / "project").mkdir(parents=True)
+            (fixture_path / ".model-optimizer-representative-token").write_text("token-abc", encoding="utf-8")
+            (fixture_path / "eval.json").write_text(json.dumps({
+                "schema": "model-optimizer.eval-fixture/v1",
+                "id": "representative",
+                "version": "1",
+                "archetype": "mechanical",
+                "task": "Do it",
+                "grader": "mechanical-slugify-v1",
+                "allowed_changed_files": ["slugify.py"],
+                "allowed_commands": [{"id": "python-unittest", "argv": ["python3", "-m", "unittest", "discover", "-v"]}],
+                "requires_code_execution": True,
+            }), encoding="utf-8")
+            fixture = load_representative_fixture(temp_root, fixture_path, "token-abc")
+            self.assertEqual(fixture.fixture_id, "representative")
+            with self.assertRaisesRegex(ValueError, "eval_representative_token_mismatch"):
+                load_representative_fixture(temp_root, fixture_path, "wrong")
+            with self.assertRaisesRegex(ValueError, "eval_representative_path_escape"):
+                load_representative_fixture(temp_root, Path(td) / "outside", "token-abc")
+
+    def test_prepare_fixture_copies_project_to_disposable_workspace_and_baselines_are_red(self):
+        expected_failures = {
+            "mechanical-slugify": "FAILED",
+            "mechanical-duration": "FAILED",
+            "regression-timeout": "FAILED",
+            "regression-retry-delay": "FAILED",
+        }
+        for fixture_id, expected in expected_failures.items():
+            with self.subTest(fixture_id=fixture_id):
+                fixture = load_fixture(SKILL_ROOT, fixture_id)
+                prepared = prepare_fixture(fixture)
+                self.addCleanup(lambda root=prepared.root: shutil.rmtree(root, ignore_errors=True))
+                self.assertTrue((prepared.root / ".model-optimizer-eval.json").exists())
+                command = subprocess.run(["python3", "-m", "unittest", "discover", "-v"], cwd=prepared.root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+                self.assertNotEqual(command.returncode, 0)
+                self.assertIn(expected, command.stdout)
+
+    def test_mechanical_graders_require_successful_unittest_command_and_allowed_changes(self):
+        fixture = load_fixture(SKILL_ROOT, "mechanical-slugify")
+        prepared = prepare_fixture(fixture)
+        self.addCleanup(lambda root=prepared.root: shutil.rmtree(root, ignore_errors=True))
+        good = grade_fixture(fixture, prepared.root, self._result(fixture, changed=("slugify.py",)))
+        self.assertEqual(good, GradeResult("PASS", 1.0, True, ()))
+        no_test = grade_fixture(fixture, prepared.root, self._result(fixture, changed=("slugify.py",), command_exit=None))
+        self.assertEqual(no_test.status, "FAIL")
+        self.assertIn("fixture_required_command_missing", no_test.reason_codes)
+        bad_change = grade_fixture(fixture, prepared.root, self._result(fixture, changed=("test_slugify.py",)))
+        self.assertIn("fixture_unauthorized_change", bad_change.reason_codes)
+
+    def test_regression_semantic_graders_accept_line_variants_and_reject_wrong_cause_or_mutation(self):
+        fixture = load_fixture(SKILL_ROOT, "regression-timeout")
+        prepared = prepare_fixture(fixture)
+        self.addCleanup(lambda root=prepared.root: shutil.rmtree(root, ignore_errors=True))
+        accepted = """status: diagnosed
+root_cause: client.py returns timeout_ms without converting milliseconds to seconds
+evidence: client.py:4-9 and test_service.py:7
+proposed_fix: divide config[\"timeout_ms\"] by 1000
+confidence: high
+"""
+        self.assertEqual(cited_lines("see client.py:5,8 and client.py:10-11", "client.py"), {5, 8, 10, 11})
+        good = grade_fixture(fixture, prepared.root, self._result(fixture, status="FAIL", text=accepted, command_exit=1))
+        self.assertEqual(good.status, "PASS")
+        wrong = grade_fixture(fixture, prepared.root, self._result(fixture, status="FAIL", text=accepted.replace("client.py returns timeout_ms", "the caller passes"), command_exit=1))
+        self.assertIn("fixture_wrong_root_cause", wrong.reason_codes)
+        mutated = grade_fixture(fixture, prepared.root, self._result(fixture, status="FAIL", text=accepted, changed=("client.py",), command_exit=1))
+        self.assertIn("fixture_unauthorized_change", mutated.reason_codes)
 
 
 class EvaluatorContractTests(unittest.TestCase):
@@ -589,6 +721,30 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertIsNone(backend)
         result = run_manifest_commands(runner, self.workspace, self.fixture, backend, timeout=5)
         self.assertEqual(result, ())
+
+    def test_select_sandbox_backend_never_overwrites_or_unlinks_preexisting_outside_sentinel(self):
+        predictable = self.workspace_root.resolve().parent / f".model-optimizer-outside-{self.workspace.token}.txt"
+        predictable.write_text("owned-by-someone-else", encoding="utf-8")
+        runner = RecordingRunner(())
+        with patch("helper.evaluator.shutil.which", return_value=None):
+            backend = select_sandbox_backend(runner, self.workspace)
+        self.assertIsNone(backend)
+        self.assertEqual(predictable.read_text(encoding="utf-8"), "owned-by-someone-else")
+
+    def test_executable_identity_binds_canonical_path_stat_and_hash(self):
+        self._identity_patch.stop()
+        try:
+            executable = self.root / "bin" / "backend"
+            executable.parent.mkdir()
+            executable.write_text("#!/bin/sh\necho one\n", encoding="utf-8")
+            identity_one = evaluator_module._executable_identity(str(executable), "bwrap")
+            executable.write_text("#!/bin/sh\necho two\n", encoding="utf-8")
+            identity_two = evaluator_module._executable_identity(str(executable), "bwrap")
+        finally:
+            self._identity_patch.start()
+        self.assertRegex(identity_one, r"^bwrap:/.*:sha256:[0-9a-f]{64}$")
+        self.assertRegex(identity_two, r"^bwrap:/.*:sha256:[0-9a-f]{64}$")
+        self.assertNotEqual(identity_one, identity_two)
 
     def test_changed_paths_collection_is_typed_and_fail_closed(self):
         ok = changed_paths_from_git_status(_command("?? src/out.txt\x00"), self.workspace)

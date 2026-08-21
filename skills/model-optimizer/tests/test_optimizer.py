@@ -355,6 +355,18 @@ class SelectionPolicyTests(unittest.TestCase):
         self.assertEqual(with_incumbent.status, "ABSTAIN")
         self.assertEqual(with_incumbent.reasons, ("eval_pi_isolation_unavailable",))
 
+    def test_choose_mapping_requires_two_fixture_quality_advantage_not_one_fixture_spike(self):
+        role = self._role()
+        current_route = self._route("nan/current", "medium")
+        current = self._candidate(current_route, self._model("nan/current"), [self._fixture("one", 0.60), self._fixture("two", 0.60)], True)
+        one_fixture = self._candidate(self._route("nan/one-fixture", "high"), self._model("nan/one-fixture"), [self._fixture("one", 0.71), self._fixture("two", 0.60)])
+        self.assertEqual(choose_mapping(role, (current, one_fixture), current_route).status, "NO_CHANGE")
+
+        two_fixture = self._candidate(self._route("nan/two-fixture", "high"), self._model("nan/two-fixture"), [self._fixture("one", 0.71), self._fixture("two", 0.72)])
+        decision = choose_mapping(role, (current, two_fixture), current_route)
+        self.assertEqual(decision.status, "CHANGE")
+        self.assertEqual(decision.reasons, ("material_quality_advantage",))
+
     def test_choose_mapping_ignores_unsupported_aggregate_advantage(self):
         role = self._role()
         current_route = self._route("nan/current", "medium")

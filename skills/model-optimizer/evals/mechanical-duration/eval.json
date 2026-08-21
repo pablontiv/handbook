@@ -1,0 +1,11 @@
+{
+  "schema": "model-optimizer.eval-fixture/v1",
+  "id": "mechanical-duration",
+  "version": "1",
+  "archetype": "mechanical",
+  "task": "Implement duration.py to satisfy the existing tests. Modify only duration.py and do not commit.",
+  "grader": "mechanical-duration-v1",
+  "allowed_changed_files": ["duration.py"],
+  "allowed_commands": [{"id": "python-unittest", "argv": ["python3", "-m", "unittest", "discover", "-v"]}],
+  "requires_code_execution": true
+}

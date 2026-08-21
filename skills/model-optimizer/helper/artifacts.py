@@ -132,39 +132,49 @@ def byte_inventory(paths: tuple[Path, ...]) -> ByteInventoryResult:
             stack = [target]
             while stack:
                 current = stack.pop()
+                directories: list[Path] = []
+                files: list[tuple[str, Path, int]] = []
+                pending_file_count = 0
+                pending_bytes = 0
                 try:
                     with os.scandir(current) as iterator:
-                        entries = sorted(iterator, key=lambda entry: entry.name)
+                        for entry in iterator:
+                            child = _resolved(Path(entry.path))
+                            if not register_path(child):
+                                return fail("inventory_too_many_paths" if visited_paths > _MAX_INVENTORY_PATHS else "inventory_path_too_long")
+                            try:
+                                if entry.is_symlink():
+                                    return fail("inventory_symlink_unsupported")
+                                is_dir = entry.is_dir(follow_symlinks=False)
+                                is_file = entry.is_file(follow_symlinks=False)
+                            except OSError:
+                                return fail("inventory_stat_failed")
+                            if is_dir:
+                                directories.append(child)
+                                continue
+                            if not is_file:
+                                continue
+                            try:
+                                child_stat = entry.stat(follow_symlinks=False)
+                            except OSError:
+                                return fail("inventory_stat_failed")
+                            if file_count + pending_file_count + 1 > _MAX_INVENTORY_FILES:
+                                return fail("inventory_too_many_files")
+                            child_size = int(child_stat.st_size)
+                            if total_bytes + pending_bytes + child_size > _MAX_INVENTORY_BYTES:
+                                return fail("inventory_too_many_bytes")
+                            try:
+                                relative = child.relative_to(target).as_posix()
+                            except ValueError:
+                                return fail("inventory_walk_failed")
+                            files.append((relative, child, child_size))
+                            pending_file_count += 1
+                            pending_bytes += child_size
                 except OSError:
                     return fail("inventory_walk_failed")
-                for entry in entries:
-                    child = _resolved(Path(entry.path))
-                    if not register_path(child):
-                        return fail("inventory_too_many_paths" if visited_paths > _MAX_INVENTORY_PATHS else "inventory_path_too_long")
-                    try:
-                        if entry.is_symlink():
-                            return fail("inventory_symlink_unsupported")
-                        is_dir = entry.is_dir(follow_symlinks=False)
-                        is_file = entry.is_file(follow_symlinks=False)
-                    except OSError:
-                        return fail("inventory_stat_failed")
-                    if is_dir:
-                        stack.append(child)
-                        continue
-                    if not is_file:
-                        continue
-                    try:
-                        child_stat = entry.stat(follow_symlinks=False)
-                    except OSError:
-                        return fail("inventory_stat_failed")
-                    if file_count + 1 > _MAX_INVENTORY_FILES:
-                        return fail("inventory_too_many_files")
-                    if total_bytes + int(child_stat.st_size) > _MAX_INVENTORY_BYTES:
-                        return fail("inventory_too_many_bytes")
-                    try:
-                        relative = child.relative_to(target).as_posix()
-                    except ValueError:
-                        return fail("inventory_walk_failed")
+                for directory in sorted(directories, reverse=True):
+                    stack.append(directory)
+                for relative, child, _child_size in sorted(files, key=lambda item: item[0]):
                     digest.update(relative.encode("utf-8", "surrogateescape"))
                     digest.update(b"\0")
                     total_bytes, success = digest_file(child, digest, total_bytes)

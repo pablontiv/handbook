@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,17 @@ _CAPABILITY_PROBE_REGISTRY = {
 _MAX_AUDIT_ITEMS = 128
 _MAX_AUDIT_TEXT = 240
 _MAX_ELAPSED_MS = 24 * 60 * 60 * 1000
+_EVAL_FIXTURE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_MAX_EVAL_MANIFEST_BYTES = 64 * 1024
+_MAX_EVAL_PROJECT_FILE_BYTES = 256 * 1024
+_MAX_EVAL_PROJECT_FILES = 64
+_REPRESENTATIVE_TOKEN_NAME = ".model-optimizer-representative-token"
+_KNOWN_GRADERS = frozenset({
+    "mechanical-slugify-v1",
+    "mechanical-duration-v1",
+    "regression-timeout-v1",
+    "regression-retry-delay-v1",
+})
 
 
 @dataclass(frozen=True)
@@ -62,6 +74,7 @@ class SandboxAttestation:
     observed_at: str
     probe_observations: tuple[ProbeObservation, ...]
     executable_identity: str = "unknown"
+    outside_sentinel_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,6 +159,29 @@ class RoleEvalResult:
     output_tokens: int
     cache_read_tokens: int
     metered_cost: float | None
+    reason_codes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class EvalFixture:
+    fixture_id: str
+    version: str
+    archetype: str
+    task: str
+    grader_id: str
+    allowed_changed_files: tuple[str, ...]
+    allowed_commands: tuple[AllowedCommand, ...]
+    requires_code_execution: bool
+    root: Path
+    project_path: Path
+    manifest_digest: str
+
+
+@dataclass(frozen=True)
+class GradeResult:
+    status: str
+    role_score: float
+    contract_success: bool
     reason_codes: tuple[str, ...]
 
 
@@ -291,6 +327,106 @@ def pi_confined_extension_path() -> Path:
     return (Path(__file__).resolve().parents[1] / "evals" / "pi-confined-tools.ts").resolve()
 
 
+def load_fixture(skill_root: Path, fixture_id: str) -> EvalFixture:
+    if not isinstance(fixture_id, str) or not _EVAL_FIXTURE_ID_RE.fullmatch(fixture_id):
+        raise ValueError("eval_fixture_id_invalid")
+    evals_root = _resolved(skill_root / "evals")
+    fixture_root = _resolved(evals_root / fixture_id)
+    if (evals_root / fixture_id).is_symlink() or not _is_relative_to(fixture_root, evals_root):
+        raise ValueError("eval_fixture_path_escape")
+    if not fixture_root.exists() or not fixture_root.is_dir():
+        raise ValueError("eval_fixture_unknown")
+    return _load_eval_fixture_dir(fixture_root, expected_id=fixture_id)
+
+
+def load_representative_fixture(temp_root: Path, fixture_path: Path, token: str) -> EvalFixture:
+    owned_root = _resolved(temp_root)
+    fixture_root = _resolved(fixture_path)
+    if not _is_relative_to(fixture_root, owned_root):
+        raise ValueError("eval_representative_path_escape")
+    marker = fixture_root / _REPRESENTATIVE_TOKEN_NAME
+    try:
+        observed = marker.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError("eval_representative_token_missing") from exc
+    if observed != token:
+        raise ValueError("eval_representative_token_mismatch")
+    return _load_eval_fixture_dir(fixture_root, expected_id=None)
+
+
+def prepare_fixture(fixture: EvalFixture) -> PreparedWorkspace:
+    workspace = Path(tempfile.mkdtemp(prefix=f"model-optimizer-{fixture.fixture_id}-")).resolve()
+    _copy_project_bounded(fixture.project_path, workspace)
+    token = _digest_text(f"{fixture.fixture_id}:{workspace}:{datetime.now(timezone.utc).isoformat()}")[7:39]
+    marker = workspace / _MARKER_NAME
+    marker.write_text(json.dumps({
+        "token": token,
+        "fixture_id": fixture.fixture_id,
+        "fixture_version": fixture.version,
+        "manifest_digest": fixture.manifest_digest,
+        "grader_id": fixture.grader_id,
+    }, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    return PreparedWorkspace(workspace, token, None)
+
+
+def grade_fixture(fixture: EvalFixture, workspace: Path, result: RoleEvalResult) -> GradeResult:
+    reasons: list[str] = []
+    if result.fixture_id != fixture.fixture_id or result.fixture_version != fixture.version or result.manifest_digest != fixture.manifest_digest:
+        _append_unique(reasons, "fixture_identity_mismatch")
+    unauthorized = tuple(path for path in result.audit.changed_paths if path not in fixture.allowed_changed_files)
+    if unauthorized:
+        _append_unique(reasons, "fixture_unauthorized_change")
+    required_command = next((command for command in fixture.allowed_commands if command.command_id == "python-unittest"), None)
+    required_runs = tuple(audit for audit in result.audit.command_runs if audit.command_id == "python-unittest")
+    if required_command is not None and (not required_runs or all(audit.exit_code is None for audit in required_runs)):
+        _append_unique(reasons, "fixture_required_command_missing")
+
+    if fixture.grader_id.startswith("mechanical-"):
+        if result.status != "PASS" or not required_runs or any(audit.exit_code != 0 for audit in required_runs):
+            _append_unique(reasons, "fixture_required_command_failed")
+        if not reasons:
+            return GradeResult("PASS", 1.0, True, ())
+        return _grade_with_reasons(reasons, total=3)
+
+    if fixture.grader_id == "regression-timeout-v1":
+        _grade_regression_text(
+            result.final_text,
+            filename="client.py",
+            required_line=8,
+            cause_terms=("timeout_ms", "millisecond", "second"),
+            fix_terms=("/1000", "1000"),
+            reject_terms=("caller",),
+            reasons=reasons,
+        )
+    elif fixture.grader_id == "regression-retry-delay-v1":
+        _grade_regression_text(
+            result.final_text,
+            filename="worker.py",
+            required_line=6,
+            cause_terms=("retry_delay_ms", "sleep", "second"),
+            fix_terms=("/1000", "1000"),
+            reject_terms=("caller",),
+            reasons=reasons,
+        )
+    else:
+        _append_unique(reasons, "fixture_unknown_grader")
+    if not reasons:
+        return GradeResult("PASS", 1.0, True, ())
+    return _grade_with_reasons(reasons, total=6)
+
+
+def cited_lines(text: str, filename: str) -> set[int]:
+    lines: set[int] = set()
+    for spec in re.findall(rf"{re.escape(filename)}:([0-9,-]+)", text, re.IGNORECASE):
+        for part in spec.split(","):
+            if "-" in part:
+                start, end = map(int, part.split("-", 1))
+                lines.update(range(start, end + 1))
+            else:
+                lines.add(int(part))
+    return lines
+
+
 def validate_role_eval_request(request: RoleEvalRequest, *, now: datetime | None = None) -> None:
     recomputed_digest = canonical_fixture_digest(request.fixture)
     if request.fixture.manifest_digest != recomputed_digest:
@@ -341,8 +477,20 @@ def _outside_probe_path(root: Path, workspace_token: str) -> Path:
     return root.parent / f".model-optimizer-outside-{workspace_token}.txt"
 
 
-def _required_probe_specs(root: Path, workspace_token: str) -> tuple[SandboxProbeSpec, ...]:
-    outside = _outside_probe_path(root, workspace_token)
+def _create_owned_outside_sentinel(root: Path, workspace_token: str) -> tuple[Path, Path]:
+    parent = _resolved(root.parent)
+    temp_dir = Path(tempfile.mkdtemp(prefix=f".model-optimizer-probe-{workspace_token}-", dir=parent))
+    sentinel = temp_dir / "outside-sentinel.txt"
+    fd = os.open(sentinel, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, b"outside-sentinel")
+    finally:
+        os.close(fd)
+    return temp_dir, sentinel
+
+
+def _required_probe_specs(root: Path, workspace_token: str, outside_path: Path | None = None) -> tuple[SandboxProbeSpec, ...]:
+    outside = outside_path or _outside_probe_path(root, workspace_token)
     return (
         SandboxProbeSpec(
             "workspace_write",
@@ -385,13 +533,12 @@ def _required_probe_specs(root: Path, workspace_token: str) -> tuple[SandboxProb
 
 def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace, *, now: datetime | None = None) -> SandboxAttestation | None:
     root = _resolved(workspace.root)
-    outside = _outside_probe_path(root, workspace.token)
     try:
         root.mkdir(parents=True, exist_ok=True)
-        outside.write_text("outside-sentinel", encoding="utf-8")
+        sentinel_dir, outside = _create_owned_outside_sentinel(root, workspace.token)
     except OSError:
         return None
-    probe_specs = _required_probe_specs(root, workspace.token)
+    probe_specs = _required_probe_specs(root, workspace.token, outside)
     observed_now = now or datetime.now(timezone.utc)
     try:
         for backend in ("sandbox-exec", "bwrap"):
@@ -436,14 +583,10 @@ def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace, *, now: da
                 observed_at=_datetime_text(observed_now),
                 probe_observations=tuple(observations),
                 executable_identity=executable_identity,
+                outside_sentinel_path=str(outside),
             )
     finally:
-        try:
-            outside.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
+        shutil.rmtree(sentinel_dir, ignore_errors=True)
     return None
 
 
@@ -1101,6 +1244,177 @@ def _command_audit_from_details(value: Any, default_backend: str | None) -> Comm
         return None
 
 
+def _load_eval_fixture_dir(fixture_root: Path, *, expected_id: str | None) -> EvalFixture:
+    manifest_path = fixture_root / "eval.json"
+    try:
+        stat = manifest_path.stat()
+        if stat.st_size > _MAX_EVAL_MANIFEST_BYTES:
+            raise ValueError("eval_fixture_manifest_too_large")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except ValueError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("eval_fixture_manifest_invalid") from exc
+    if manifest.get("schema") != "model-optimizer.eval-fixture/v1":
+        raise ValueError("eval_fixture_schema_invalid")
+    fixture_id = manifest.get("id")
+    if not isinstance(fixture_id, str) or not _EVAL_FIXTURE_ID_RE.fullmatch(fixture_id):
+        raise ValueError("eval_fixture_id_invalid")
+    if expected_id is not None and fixture_id != expected_id:
+        raise ValueError("eval_fixture_id_mismatch")
+    grader_id = manifest.get("grader")
+    if grader_id not in _KNOWN_GRADERS:
+        raise ValueError("eval_fixture_unknown_grader")
+    version = manifest.get("version")
+    archetype = manifest.get("archetype")
+    task = manifest.get("task")
+    if not all(isinstance(item, str) and item for item in (version, archetype, task)):
+        raise ValueError("eval_fixture_manifest_invalid")
+    allowed_changed = manifest.get("allowed_changed_files")
+    if not isinstance(allowed_changed, list) or not all(_safe_relative_project_path(item) for item in allowed_changed):
+        raise ValueError("eval_fixture_manifest_invalid")
+    raw_commands = manifest.get("allowed_commands")
+    if not isinstance(raw_commands, list):
+        raise ValueError("eval_fixture_manifest_invalid")
+    commands: list[AllowedCommand] = []
+    for item in raw_commands:
+        if not isinstance(item, Mapping):
+            raise ValueError("eval_fixture_manifest_invalid")
+        command_id = item.get("id")
+        argv = item.get("argv")
+        if command_id != "python-unittest" or argv != ["python3", "-m", "unittest", "discover", "-v"]:
+            raise ValueError("eval_fixture_ambient_command_forbidden")
+        commands.append(AllowedCommand(command_id, tuple(argv)))
+    project_path = _resolved(fixture_root / "project")
+    if not _is_relative_to(project_path, fixture_root) or not project_path.is_dir():
+        raise ValueError("eval_fixture_project_invalid")
+    _project_files_digest(project_path)
+    digest = _digest_text(json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n" + _project_files_digest(project_path))
+    return EvalFixture(
+        fixture_id=fixture_id,
+        version=version,
+        archetype=archetype,
+        task=task,
+        grader_id=grader_id,
+        allowed_changed_files=tuple(allowed_changed),
+        allowed_commands=tuple(commands),
+        requires_code_execution=manifest.get("requires_code_execution") is True,
+        root=fixture_root,
+        project_path=project_path,
+        manifest_digest=digest,
+    )
+
+
+def _project_files_digest(project_path: Path) -> str:
+    digest = hashlib.sha256()
+    files = _project_files_bounded(project_path)
+    for relative, path in sorted(files, key=lambda item: item[0]):
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(64 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+        except OSError as exc:
+            raise ValueError("eval_fixture_project_unreadable") from exc
+    return "sha256:" + digest.hexdigest()
+
+
+def _project_files_bounded(project_path: Path) -> tuple[tuple[str, Path], ...]:
+    files: list[tuple[str, Path]] = []
+    stack = [project_path]
+    visited = 0
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as iterator:
+                directories: list[Path] = []
+                current_files: list[tuple[str, Path]] = []
+                for entry in iterator:
+                    visited += 1
+                    if visited > _MAX_EVAL_PROJECT_FILES * 2:
+                        raise ValueError("eval_fixture_project_too_large")
+                    path = _resolved(Path(entry.path))
+                    if not _is_relative_to(path, project_path):
+                        raise ValueError("eval_fixture_path_escape")
+                    try:
+                        if entry.is_symlink():
+                            raise ValueError("eval_fixture_path_escape")
+                        if entry.is_dir(follow_symlinks=False):
+                            directories.append(path)
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        stat = entry.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise ValueError("eval_fixture_project_unreadable") from exc
+                    if stat.st_size > _MAX_EVAL_PROJECT_FILE_BYTES:
+                        raise ValueError("eval_fixture_project_too_large")
+                    if len(files) + len(current_files) + 1 > _MAX_EVAL_PROJECT_FILES:
+                        raise ValueError("eval_fixture_project_too_large")
+                    current_files.append((path.relative_to(project_path).as_posix(), path))
+        except ValueError:
+            raise
+        except OSError as exc:
+            raise ValueError("eval_fixture_project_unreadable") from exc
+        stack.extend(sorted(directories, reverse=True))
+        files.extend(current_files)
+    return tuple(files)
+
+
+def _copy_project_bounded(project_path: Path, workspace: Path) -> None:
+    for relative, source in _project_files_bounded(project_path):
+        destination = workspace / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        data = source.read_bytes()
+        if len(data) > _MAX_EVAL_PROJECT_FILE_BYTES:
+            raise ValueError("eval_fixture_project_too_large")
+        destination.write_bytes(data)
+
+
+def _safe_relative_project_path(value: Any) -> bool:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    path = Path(value)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def _grade_with_reasons(reasons: Sequence[str], *, total: int) -> GradeResult:
+    unique = tuple(dict.fromkeys(reasons))
+    failed = len(unique)
+    score = max(0.0, min(1.0, (total - failed) / total))
+    if not math.isfinite(score):
+        score = 0.0
+    return GradeResult("FAIL", score, False, unique)
+
+
+def _grade_regression_text(
+    text: str,
+    *,
+    filename: str,
+    required_line: int,
+    cause_terms: Sequence[str],
+    fix_terms: Sequence[str],
+    reject_terms: Sequence[str],
+    reasons: list[str],
+) -> None:
+    lowered = (text or "").lower()
+    fields = ("status", "root_cause", "evidence", "proposed_fix", "confidence")
+    for field in fields:
+        if not re.search(rf"^\s*{field}\s*:", text or "", re.IGNORECASE | re.MULTILINE):
+            _append_unique(reasons, "fixture_missing_field")
+            break
+    if any(term in lowered for term in reject_terms) or not all(term.lower() in lowered for term in cause_terms):
+        _append_unique(reasons, "fixture_wrong_root_cause")
+    if required_line not in cited_lines(text or "", filename):
+        _append_unique(reasons, "fixture_missing_line_evidence")
+    if not any(term.lower() in lowered for term in fix_terms) or not re.search(r"/\s*1000|divide\b.*\b1000", lowered):
+        _append_unique(reasons, "fixture_missing_fix")
+
+
 def _validate_marker(workspace: PreparedWorkspace, fixture: FixturePolicy) -> None:
     marker = _resolved(workspace.root) / _MARKER_NAME
     try:
@@ -1165,7 +1479,8 @@ def _validate_sandbox_attestation(workspace: PreparedWorkspace, *, now: datetime
     if not _absolute_executable_identity(attestation.backend, attestation.executable_identity):
         raise ValueError("eval_sandbox_attestation_mismatch")
 
-    probe_specs = {spec.probe_id: spec for spec in _required_probe_specs(root, workspace.token)}
+    outside_path = Path(attestation.outside_sentinel_path) if attestation.outside_sentinel_path else None
+    probe_specs = {spec.probe_id: spec for spec in _required_probe_specs(root, workspace.token, outside_path)}
     if len(attestation.probe_observations) != len(probe_specs):
         raise ValueError("eval_sandbox_attestation_incomplete")
 
@@ -1344,10 +1659,18 @@ def _valid_utf8_text(value: str) -> bool:
 def _executable_identity(executable: str, backend: str) -> str:
     path = Path(executable)
     try:
-        stat = path.stat()
-        return f"{backend}:{path.resolve()}:{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}"
+        resolved = path.resolve(strict=True)
+        stat = resolved.stat()
+        digest = hashlib.sha256()
+        with resolved.open("rb") as handle:
+            while True:
+                chunk = handle.read(64 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return f"{backend}:{resolved}:{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}:sha256:{digest.hexdigest()}"
     except OSError:
-        return f"{backend}:{executable}:unknown"
+        return f"{backend}:{Path(executable).resolve(strict=False)}:unknown"
 
 
 def _resolved(path: Path) -> Path:

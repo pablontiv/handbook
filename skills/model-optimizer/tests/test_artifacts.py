@@ -1,6 +1,8 @@
 import json
 import math
 import os
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -52,6 +54,71 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(before.records[1]["kind"], "missing")
         self.assertIsNone(before.records[1]["digest"])
 
+    def test_byte_inventory_brackets_genuine_disposable_pi_rpc_when_available(self):
+        if shutil.which("pi") is None:
+            self.skipTest("pi runtime unavailable")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pi_home = root / "home"
+            pi_runtime = root / "pi-runtime"
+            workspace = root / "workspace"
+            pi_home.mkdir()
+            pi_runtime.mkdir()
+            workspace.mkdir()
+            before = byte_inventory((pi_runtime,))
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": str(pi_home),
+                "PI_CODING_AGENT_DIR": str(pi_runtime / "agent"),
+                "PI_SESSION_DIR": str(pi_runtime / "sessions"),
+                "XDG_CONFIG_HOME": str(pi_runtime / "xdg-config"),
+                "XDG_DATA_HOME": str(pi_runtime / "xdg-data"),
+                "XDG_CACHE_HOME": str(pi_runtime / "xdg-cache"),
+                "NPM_CONFIG_USERCONFIG": str(pi_runtime / "npmrc"),
+            }
+            payload = '{"id":"state-1","type":"request","command":"get_state","params":{}}\n{"id":"abort-1","type":"request","command":"abort","params":{}}\n'
+            command = subprocess.run(
+                ["pi", "--offline", "--mode", "rpc", "--no-session", "--session-dir", str(pi_runtime / "sessions"), "--no-context-files", "--no-skills", "--no-prompt-templates", "--tools", "read"],
+                cwd=workspace,
+                env=env,
+                input=payload,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+            )
+            after = byte_inventory((pi_runtime,))
+        self.assertEqual(command.returncode, 0, command.stderr[-500:])
+        self.assertEqual(before.status, "PASS")
+        self.assertEqual(after.status, "PASS")
+
+    def test_byte_inventory_brackets_genuine_disposable_opencode_debug_when_available(self):
+        if shutil.which("opencode") is None:
+            self.skipTest("opencode runtime unavailable")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            workspace = root / "workspace"
+            opencode_runtime = root / "opencode-runtime"
+            config_home = opencode_runtime / "config"
+            data_home = opencode_runtime / "data"
+            workspace.mkdir()
+            config_home.mkdir(parents=True)
+            data_home.mkdir(parents=True)
+            before = byte_inventory((opencode_runtime,))
+            command = subprocess.run(
+                ["opencode", "debug", "config", "--pure"],
+                cwd=workspace,
+                env={"PATH": os.environ.get("PATH", ""), "XDG_CONFIG_HOME": str(config_home), "XDG_DATA_HOME": str(data_home)},
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+            )
+            after = byte_inventory((opencode_runtime,))
+        self.assertEqual(command.returncode, 0, command.stderr[-500:])
+        self.assertEqual(before.status, "PASS")
+        self.assertEqual(after.status, "PASS")
+
     def test_byte_inventory_disposable_pi_and_opencode_boundaries_are_bounded(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -90,6 +157,40 @@ class ArtifactTests(unittest.TestCase):
                 walk_error = byte_inventory((directory,))
             self.assertEqual(walk_error.status, "INCONCLUSIVE")
             self.assertEqual(walk_error.reason_codes, ("inventory_walk_failed",))
+
+    def test_byte_inventory_stops_scandir_incrementally_before_overconsuming_unbounded_iterators(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            directory = root / "many"
+            directory.mkdir()
+            for index in range(5):
+                (directory / f"file-{index}.txt").write_text("x", encoding="utf-8")
+            original_scandir = os.scandir
+            counts = {"next": 0}
+
+            class CountingScandir:
+                def __init__(self, path):
+                    self._inner = original_scandir(path)
+
+                def __enter__(self):
+                    self._inner.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self._inner.__exit__(*args)
+
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    counts["next"] += 1
+                    return next(self._inner)
+
+            with mock.patch("helper.artifacts.os.scandir", side_effect=lambda path: CountingScandir(path)), mock.patch.object(artifacts_module, "_MAX_INVENTORY_FILES", 1):
+                result = byte_inventory((directory,))
+            self.assertEqual(result.status, "INCONCLUSIVE")
+            self.assertEqual(result.reason_codes, ("inventory_too_many_files",))
+            self.assertLessEqual(counts["next"], 2)
 
     def test_byte_inventory_enforces_bounded_cardinality_and_paths_before_read(self):
         with tempfile.TemporaryDirectory() as td:
