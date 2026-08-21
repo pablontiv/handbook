@@ -63,6 +63,47 @@ class AgentContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, f"^{expected}"):
                     parse_agent_definition(path, scope="project", config_path=Path(td) / "subagents.json")
 
+    def test_rejects_documented_size_bounds_with_stable_errors(self):
+        frontmatter = "name: big\n" + ("description: x\n" * 1300)
+        cases = (
+            (frontmatter.encode("utf-8") + b"---\nBody\n", "agent_definition_frontmatter_too_large"),
+            (b"---\nname: big\n---\n" + (b"x" * (256 * 1024)), "agent_definition_too_large"),
+        )
+        for raw, expected in cases:
+            with self.subTest(expected=expected), TemporaryDirectory() as td:
+                path = Path(td) / "agent.md"
+                path.write_bytes(b"---\n" + raw if expected.endswith("frontmatter_too_large") else raw)
+                with self.assertRaisesRegex(ValueError, f"^{expected}"):
+                    parse_agent_definition(path, scope="project", config_path=Path(td) / "subagents.json")
+
+    def test_rejects_ambiguous_explicit_inheritance_directives(self):
+        cases = (
+            ("---\nname: child\ninherit: base\n---\nBody\n", "agent_definition_ambiguous_inheritance"),
+            ("---\nname: child\nextends: base\n---\nBody\n", "agent_definition_ambiguous_inheritance"),
+            ("---\nname: child\n<<: *base\n---\nBody\n", "agent_definition_ambiguous_inheritance"),
+            ("---\nname: child\ntools: *base\n---\nBody\n", "agent_definition_unsupported_yaml"),
+        )
+        for text, expected in cases:
+            with self.subTest(expected=expected), TemporaryDirectory() as td:
+                path = Path(td) / "agent.md"
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, f"^{expected}"):
+                    parse_agent_definition(path, scope="global", config_path=Path(td) / "subagents.json")
+
+    def test_mutation_authority_covers_all_effective_permission_values(self):
+        cases = (
+            ("---\nname: reader\ntools: read\n---\nBody\n", "denied"),
+            ("---\nname: confined\ntools: edit\npermissions:\n  edit:\n    '*.py': ask\n---\nBody\n", "confined"),
+            ("---\nname: unrestricted\ntools:\n  edit: true\npermissions:\n  edit: allow\n---\nBody\n", "unrestricted"),
+            ("---\nname: unknown\ntools: edit\n---\nBody\n", "unknown"),
+        )
+        for text, expected in cases:
+            with self.subTest(expected=expected), TemporaryDirectory() as td:
+                path = Path(td) / "agent.md"
+                path.write_text(text, encoding="utf-8")
+                contract = parse_agent_definition(path, scope="global", config_path=Path(td) / "subagents.json")
+                self.assertEqual(contract.mutation_authority, expected)
+
     def test_rejects_non_utf8_definition_with_stable_error(self):
         with TemporaryDirectory() as td:
             path = Path(td) / "agent.md"
@@ -156,8 +197,23 @@ class SelectionPolicyTests(unittest.TestCase):
         self.assertEqual(gate_candidate(self._role(), text_route, text_only_model, failing), ("route_live_unavailable",))
         wrong_effort = self._route("nan/qwen3.6", "max")
         self.assertEqual(gate_candidate(self._role(allowed_efforts=("minimal", "medium")), wrong_effort, text_only_model, passing_health), (
+            "route_live_effort_mismatch",
             "unsupported_effort",
             "disallowed_effort",
+        ))
+
+    def test_gate_candidate_fails_closed_for_unknown_required_capabilities_and_live_effort(self):
+        route = self._route("nan/qwen3.6", "high")
+        unknown_tool_model = self._model("nan/qwen3.6", tool_call=None, variants=())
+        mismatched_health = self._health("nan/qwen3.6", "medium")
+        self.assertEqual(gate_candidate(self._role(required_tools=("edit",)), route, unknown_tool_model, mismatched_health), (
+            "route_live_effort_mismatch",
+            "unsupported_effort",
+            "required_tool_call_missing",
+        ))
+        mutation_role = self._role(requires_mutation=True)
+        self.assertEqual(gate_candidate(mutation_role, self._route("nan/qwen3.6", None), unknown_tool_model, self._health("nan/qwen3.6", None)), (
+            "required_mutation_missing",
         ))
 
     def test_shortlist_filters_unavailable_routes_preserves_incumbent_and_effort(self):
@@ -181,6 +237,26 @@ class SelectionPolicyTests(unittest.TestCase):
         self.assertIn(current_route, [item.route for item in shortlist])
         self.assertNotIn("nan/failing", [item.route.model for item in shortlist])
         self.assertIn("high", [item.route.effort for item in shortlist])
+
+    def test_shortlist_operational_ordering_honors_role_priority_order(self):
+        cheap_slow = self._candidate(
+            self._route("nan/cheap-slow", "medium"),
+            self._model("nan/cheap-slow"),
+            [self._fixture("a", 0.80, elapsed=2000, cost=0.10)],
+        )
+        fast_expensive = self._candidate(
+            self._route("nan/fast-expensive", "medium"),
+            self._model("nan/fast-expensive"),
+            [self._fixture("a", 0.80, elapsed=500, cost=1.00)],
+        )
+        self.assertEqual(
+            shortlist_candidates(self._role(priority_order=("cost", "latency")), (cheap_slow, fast_expensive), None, limit=1)[0].route,
+            cheap_slow.route,
+        )
+        self.assertEqual(
+            shortlist_candidates(self._role(priority_order=("latency", "cost")), (cheap_slow, fast_expensive), None, limit=1)[0].route,
+            fast_expensive.route,
+        )
 
     def test_choose_mapping_handles_ties_abstention_and_material_fixture_advantage(self):
         role = self._role()
@@ -213,6 +289,59 @@ class SelectionPolicyTests(unittest.TestCase):
         current = self._candidate(current_route, self._model("nan/current"), [self._fixture("one", 0.80), self._fixture("two", 0.80)], True, benchmark_score=0.1)
         challenger = self._candidate(self._route("nan/challenger", "high"), self._model("nan/challenger"), [self._fixture("one", 0.80), self._fixture("two", 0.80)], benchmark_score=0.99)
         self.assertEqual(choose_mapping(role, (current, challenger), current_route).status, "NO_CHANGE")
+
+    def test_choose_mapping_accepts_higher_mandatory_tier_without_common_fixtures_only_when_conclusive(self):
+        role = self._role()
+        current_route = self._route("nan/current", "medium")
+        current = self._candidate(current_route, self._model("nan/current"), [self._fixture("incumbent-only", 0.61)], True)
+        higher_tier = self._candidate(self._route("nan/higher", "high"), self._model("nan/higher"), [self._fixture("challenger-only", 0.91)])
+        decision = choose_mapping(role, (current, higher_tier), current_route)
+        self.assertEqual(decision.status, "CHANGE")
+        self.assertEqual(decision.reasons, ("higher_mandatory_tier",))
+
+        same_tier = self._candidate(self._route("nan/same", "high"), self._model("nan/same"), [self._fixture("different", 0.69)])
+        self.assertNotEqual(choose_mapping(role, (current, same_tier), current_route).status, "CHANGE")
+
+    def test_choose_mapping_uses_pairwise_compatible_fixtures_for_each_challenger(self):
+        role = self._role()
+        current_route = self._route("nan/current", "medium")
+        current = self._candidate(current_route, self._model("nan/current"), [self._fixture("one", 0.80), self._fixture("two", 0.80)], True)
+        tied_challenger = self._candidate(self._route("nan/tied", "high"), self._model("nan/tied"), [self._fixture("one", 0.80), self._fixture("two", 0.80)])
+        unrelated = self._candidate(self._route("nan/unrelated", "medium"), self._model("nan/unrelated"), [self._fixture("other", 0.50)])
+        self.assertEqual(choose_mapping(role, (current, tied_challenger, unrelated), current_route).status, "NO_CHANGE")
+
+    def test_choose_mapping_new_agent_needs_conclusive_local_fixture_evidence_before_change(self):
+        role = self._role()
+        candidate = self._candidate(self._route("nan/new", "medium"), self._model("nan/new"), [])
+        decision = choose_mapping(role, (candidate,), None)
+        self.assertEqual(decision.status, "NEEDS_MORE_EVIDENCE")
+        self.assertEqual(decision.selected_route, candidate.route)
+        self.assertIsNone(decision.next_fixture)
+
+    def test_choose_mapping_operational_advantage_requires_two_comparable_runs_without_regression(self):
+        role = self._role(priority_order=("latency", "cost"))
+        current_route = self._route("nan/current", "medium")
+        current = self._candidate(current_route, self._model("nan/current"), [
+            self._fixture("one", 0.80, elapsed=1000, cost=1.0),
+            self._fixture("two", 0.80, elapsed=1000, cost=1.0),
+        ], True)
+        faster = self._candidate(self._route("nan/faster", "high"), self._model("nan/faster"), [
+            self._fixture("one", 0.80, elapsed=790, cost=1.0),
+            self._fixture("two", 0.80, elapsed=790, cost=1.0),
+        ])
+        self.assertEqual(choose_mapping(role, (current, faster), current_route).reasons, ("material_operational_advantage",))
+
+        unreliable = self._candidate(self._route("nan/unreliable", "high"), self._model("nan/unreliable"), [
+            self._fixture("one", 0.80, elapsed=790, reliable=False),
+            self._fixture("two", 0.80, elapsed=790),
+        ])
+        self.assertEqual(choose_mapping(role, (current, unreliable), current_route).status, "NO_CHANGE")
+
+        intrusive = self._candidate(self._route("nan/intrusive", "high"), self._model("nan/intrusive"), [
+            self._fixture("one", 0.80, elapsed=790, interventions=1),
+            self._fixture("two", 0.80, elapsed=790),
+        ])
+        self.assertEqual(choose_mapping(role, (current, intrusive), current_route).status, "NO_CHANGE")
 
     def test_identity_classification_distinguishes_source_and_model_match_quality(self):
         route = self._route("openai/gpt-5.6-terra", "high")
@@ -256,9 +385,46 @@ class AgentDiscoveryTests(unittest.TestCase):
             self.assertEqual(worker.effort, "medium")
             self.assertEqual(worker.tools, ("read", "edit"))
             self.assertEqual([(rule.capability, rule.pattern, rule.action) for rule in worker.permissions], [("edit", "*.py", "ask")])
+            self.assertEqual(worker.mutation_authority, "confined")
+            self.assertEqual(worker.definition_source, "project:subagents/worker.md")
             self.assertEqual(worker.assignment_source, "project:subagents.json")
             self.assertEqual(worker.inheritance_sources, ("global:agents/worker.md",))
             self.assertEqual(worker.apply_target, str(cwd / ".pi" / "subagents.json"))
+
+    def test_pi_discovery_includes_settings_and_environment_assignments_without_silent_omission(self):
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / "home"
+            cwd = root / "project"
+            global_root = root / "pi-root"
+            home.mkdir()
+            cwd.mkdir()
+            global_root.mkdir()
+            (global_root / "settings.json").write_text(json.dumps({
+                "defaultProvider": "openai-codex",
+                "defaultModel": "gpt-5.6-terra",
+                "defaultThinkingLevel": "high",
+            }), encoding="utf-8")
+
+            contracts = discover_agent_contracts(RuntimeKind.PI, home, cwd, {
+                "PI_CODING_AGENT_DIR": str(global_root),
+                "PI_PROVIDER": "nan",
+                "PI_MODEL": "qwen3.6",
+                "PI_REASONING_LEVEL": "minimal",
+            })
+            by_name = {contract.name: contract for contract in contracts}
+
+            self.assertIn("current", by_name)
+            self.assertEqual(by_name["current"].model, "nan/qwen3.6")
+            self.assertEqual(by_name["current"].effort, "minimal")
+            self.assertEqual(by_name["current"].assignment_source, "env")
+            self.assertIsNone(by_name["current"].apply_target)
+            self.assertIn("default", by_name)
+            self.assertEqual(by_name["default"].model, "openai-codex/gpt-5.6-terra")
+            self.assertEqual(by_name["default"].effort, "high")
+            self.assertEqual(by_name["default"].definition_source, "global:settings.json#default")
+            self.assertEqual(by_name["default"].assignment_source, "global:settings.json")
+            self.assertEqual(by_name["default"].apply_target, str(global_root / "settings.json"))
 
     def test_opencode_discovery_reads_xdg_markdown_project_markdown_and_inline_agents(self):
         with TemporaryDirectory() as td:
@@ -281,7 +447,7 @@ class AgentDiscoveryTests(unittest.TestCase):
             (cwd / "opencode.json").write_text(json.dumps({
                 "agent": {
                     "builder": {"model": "nan/qwen3.6", "variant": "medium", "permission": {"edit": {"*.py": "ask"}}},
-                    "inline": {"description": "inline project", "mode": "primary", "tools": ["read"]},
+                    "inline": {"description": "inline project", "mode": "primary", "tools": ["bash"], "permission": {"bash": "allow"}},
                 }
             }), encoding="utf-8")
 
@@ -290,11 +456,21 @@ class AgentDiscoveryTests(unittest.TestCase):
 
             self.assertEqual(set(by_name), {"builder", "inline", "scout"})
             self.assertEqual(by_name["builder"].scope, "project")
+            self.assertEqual(by_name["builder"].definition_source, "project:agents/builder.md")
+            self.assertEqual(by_name["builder"].assignment_source, "project:opencode.json#agent.builder")
             self.assertEqual(by_name["builder"].model, "nan/qwen3.6")
             self.assertEqual(by_name["builder"].effort, "medium")
             self.assertEqual(by_name["builder"].apply_target, str(cwd / "opencode.json"))
             self.assertEqual([(rule.capability, rule.pattern, rule.action) for rule in by_name["builder"].permissions], [("edit", "*.py", "ask")])
+            self.assertEqual(by_name["builder"].mutation_authority, "confined")
             self.assertEqual(by_name["inline"].scope, "project")
             self.assertIsNone(by_name["inline"].model)
+            self.assertEqual(by_name["inline"].definition_source, "project:opencode.json#agent.inline")
+            self.assertIsNone(by_name["inline"].assignment_source)
             self.assertEqual(by_name["inline"].mode, "primary")
+            self.assertEqual(by_name["inline"].tools, ("bash",))
+            self.assertEqual(by_name["inline"].mutation_authority, "unrestricted")
             self.assertEqual(by_name["inline"].inheritance_sources, ("global:opencode.json#agent.inline",))
+            self.assertEqual(by_name["inline"].apply_target, str(cwd / "opencode.json"))
+            self.assertEqual(by_name["scout"].definition_source, "global:agents/scout.md")
+            self.assertEqual(by_name["scout"].assignment_source, "global:opencode.json#agent.scout")

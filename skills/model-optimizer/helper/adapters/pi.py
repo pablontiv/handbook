@@ -141,10 +141,6 @@ def _agent_dir(home: Path, environ: Mapping[str, str] | None = None) -> Path:
     return pi_global_agent_dir(home, environ)
 
 
-def _project_agent_dir(cwd: Path) -> Path:
-    return cwd / ".pi" / "agent"
-
-
 def _load_json(path: Path) -> tuple[Any | None, str | None]:
     if not path.exists():
         return None, None

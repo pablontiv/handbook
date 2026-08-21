@@ -187,9 +187,11 @@ def gate_candidate(requirements: RoleRequirements, route: RouteKey, model: Model
     reasons: list[str] = []
     if route.model != model.exact_id or health.model != route.model:
         reasons.append("route_model_mismatch")
+    if health.effort != route.effort:
+        reasons.append("route_live_effort_mismatch")
     if health.status is not HealthStatus.PASS or not health.response_matched:
         reasons.append("route_live_unavailable")
-    if route.effort is not None and model.variants and route.effort not in model.variants:
+    if route.effort is not None and (not model.variants or route.effort not in model.variants):
         reasons.append("unsupported_effort")
     if requirements.allowed_efforts and route.effort not in requirements.allowed_efforts:
         reasons.append("disallowed_effort")
@@ -199,9 +201,9 @@ def gate_candidate(requirements: RoleRequirements, route: RouteKey, model: Model
         reasons.append("context_window_too_small")
     if requirements.min_output is not None and (model.max_output is None or model.max_output < requirements.min_output):
         reasons.append("max_output_too_small")
-    if requirements.required_tools and model.tool_call is False:
+    if requirements.required_tools and model.tool_call is not True:
         reasons.append("required_tool_call_missing")
-    if requirements.requires_mutation and model.tool_call is False:
+    if requirements.requires_mutation and model.tool_call is not True:
         reasons.append("required_mutation_missing")
     if requirements.essential_custom_tools:
         reasons.append("essential_custom_tools_unverified")
@@ -227,7 +229,7 @@ def shortlist_candidates(
                 selected.append(candidate)
                 break
     challengers = [candidate for candidate in eligible if candidate.route != incumbent]
-    challengers.sort(key=_shortlist_sort_key)
+    challengers.sort(key=lambda candidate: _shortlist_sort_key(requirements, candidate))
     for candidate in challengers:
         if len(selected) >= max(0, limit):
             break
@@ -246,16 +248,20 @@ def choose_mapping(
     incumbent_candidate = next((candidate for candidate in eligible if incumbent is not None and candidate.route == incumbent), None)
     challengers = [candidate for candidate in eligible if incumbent is None or candidate.route != incumbent]
     if incumbent_candidate is None:
-        best = _best_candidate_without_incumbent(challengers or list(eligible))
+        best = _best_candidate_without_incumbent(requirements, challengers or list(eligible))
         return best
+    needs_more_evidence = False
     for challenger in challengers:
+        if _has_higher_mandatory_tier(challenger, incumbent_candidate):
+            return MappingDecision("CHANGE", challenger.route, None, ("higher_mandatory_tier",))
         if _has_material_quality_advantage(challenger, incumbent_candidate):
             return MappingDecision("CHANGE", challenger.route, None, ("material_quality_advantage",))
         if _has_material_operational_advantage(requirements, challenger, incumbent_candidate):
             return MappingDecision("CHANGE", challenger.route, None, ("material_operational_advantage",))
-    comparable_fixture_count = _compatible_fixture_count(eligible)
-    if comparable_fixture_count < 2 and challengers:
-        return MappingDecision("NEEDS_MORE_EVIDENCE", incumbent_candidate.route, "additional_compatible_fixture", ("one_fixture_tie",))
+        if _needs_more_pairwise_evidence(challenger, incumbent_candidate):
+            needs_more_evidence = True
+    if needs_more_evidence:
+        return MappingDecision("NEEDS_MORE_EVIDENCE", incumbent_candidate.route, None, ("one_fixture_tie",))
     return MappingDecision("NO_CHANGE", incumbent_candidate.route, None, ("incumbent_retained",))
 
 
@@ -301,6 +307,9 @@ def _discover_pi_agent_contracts(home: Path, cwd: Path, environ: Mapping[str, st
                 apply_target=str(assignment["path"]),
                 inherited=(),
             )
+    for contract in _pi_current_contracts(global_root, environ):
+        inherited = (by_name[contract.name].definition_source,) if contract.name in by_name else ()
+        by_name[contract.name] = replace(contract, inheritance_sources=inherited)
     return tuple(by_name[name] for name in sorted(by_name))
 
 
@@ -396,6 +405,83 @@ def _read_pi_assignments(sources: Sequence[tuple[str, Path]]) -> dict[str, dict[
     return assignments
 
 
+def _pi_current_contracts(global_root: Path, environ: Mapping[str, str]) -> tuple[AgentContract, ...]:
+    contracts: list[AgentContract] = []
+    env_model = _exact_model(environ.get("PI_PROVIDER"), environ.get("PI_MODEL"))
+    env_effort = _nonempty_string(environ.get("PI_REASONING_LEVEL"))
+    if env_model:
+        contracts.append(_synthetic_assignment_contract(
+            "current",
+            model=env_model,
+            effort=env_effort,
+            definition_source="env#current",
+            assignment_source="env",
+            apply_target=None,
+        ))
+    settings_path = global_root / "settings.json"
+    settings = _read_json_object(settings_path)
+    settings_model = _exact_model(settings.get("defaultProvider"), settings.get("defaultModel"))
+    if settings_model:
+        contracts.append(_synthetic_assignment_contract(
+            "default",
+            model=settings_model,
+            effort=_nonempty_string(settings.get("defaultThinkingLevel")),
+            definition_source="global:settings.json#default",
+            assignment_source="global:settings.json",
+            apply_target=str(settings_path),
+        ))
+    return tuple(contracts)
+
+
+def _synthetic_assignment_contract(
+    name: str,
+    *,
+    model: str,
+    effort: str | None,
+    definition_source: str,
+    assignment_source: str,
+    apply_target: str | None,
+) -> AgentContract:
+    digest_payload = json.dumps({
+        "name": name,
+        "model": model,
+        "effort": effort,
+        "definition_source": definition_source,
+        "assignment_source": assignment_source,
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return AgentContract(
+        name=name,
+        description="",
+        mode=None,
+        model=model,
+        effort=effort,
+        tools=(),
+        permissions=(),
+        mutation_authority="denied",
+        body="",
+        scope="global" if definition_source.startswith("global:") else "runtime",
+        definition_source=definition_source,
+        assignment_source=assignment_source,
+        inheritance_sources=(),
+        apply_target=apply_target,
+        digest="sha256:" + hashlib.sha256(digest_payload).hexdigest(),
+    )
+
+
+def _exact_model(provider_value: Any, model_value: Any) -> str | None:
+    model = _nonempty_string(model_value)
+    if model is None:
+        return None
+    if "/" in model:
+        return model
+    provider = _nonempty_string(provider_value)
+    return f"{provider}/{model}" if provider else model
+
+
+def _nonempty_string(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _read_opencode_agents(path: Path) -> tuple[tuple[str, Mapping[str, Any]], ...]:
     value = _read_json_object(path)
     agents = value.get("agent")
@@ -464,13 +550,25 @@ def _family_from_model_id(model_id: str) -> str | None:
     return lowered.split("-", 1)[0].split(".", 1)[0] if lowered else None
 
 
-def _shortlist_sort_key(candidate: CandidateEvidence) -> tuple[Any, ...]:
+def _shortlist_sort_key(requirements: RoleRequirements, candidate: CandidateEvidence) -> tuple[Any, ...]:
     fixture_scores = [fixture.role_score for fixture in candidate.fixtures if fixture.success and fixture.contract_success]
     score = max(fixture_scores) if fixture_scores else -1.0
-    reliability = candidate.reliability_rate if candidate.reliability_rate is not None else _candidate_reliability(candidate)
-    elapsed = candidate.median_elapsed_ms if candidate.median_elapsed_ms is not None else _candidate_median_elapsed(candidate)
-    cost = candidate.metered_cost if candidate.metered_cost is not None else _candidate_cost(candidate)
-    return (-score, -(reliability if reliability is not None else -1.0), elapsed if elapsed is not None else 10**12, cost if cost is not None else 10**12, candidate.route.model, candidate.route.effort or "")
+    key: list[Any] = [-score]
+    for priority in requirements.priority_order:
+        if priority == "reliability":
+            reliability = candidate.reliability_rate if candidate.reliability_rate is not None else _candidate_reliability(candidate)
+            key.append(-(reliability if reliability is not None else -1.0))
+        elif priority == "latency":
+            elapsed = candidate.median_elapsed_ms if candidate.median_elapsed_ms is not None else _candidate_median_elapsed(candidate)
+            key.append(elapsed if elapsed is not None else 10**12)
+        elif priority == "cost":
+            cost = candidate.metered_cost if candidate.metered_cost is not None else _candidate_cost(candidate)
+            key.append(cost if cost is not None else 10**12)
+        elif priority == "intervention":
+            intervention = _candidate_intervention(candidate)
+            key.append(intervention if intervention is not None else 10**12)
+    key.extend((candidate.route.model, candidate.route.effort or ""))
+    return tuple(key)
 
 
 def _candidate_reliability(candidate: CandidateEvidence) -> float | None:
@@ -494,6 +592,13 @@ def _candidate_cost(candidate: CandidateEvidence) -> float | None:
     return sum(values) / len(values)
 
 
+def _candidate_intervention(candidate: CandidateEvidence) -> float | None:
+    runs = _all_runs(candidate)
+    if not runs:
+        return None
+    return sum(run.intervention_count for run in runs) / len(runs)
+
+
 def _all_runs(candidate: CandidateEvidence) -> tuple[RunObservation, ...]:
     return tuple(run for fixture in candidate.fixtures for run in fixture.runs)
 
@@ -506,12 +611,45 @@ def _compatible_fixture_scores(candidate: CandidateEvidence) -> dict[tuple[str, 
     }
 
 
+def _has_higher_mandatory_tier(challenger: CandidateEvidence, incumbent: CandidateEvidence) -> bool:
+    challenger_tier = _mandatory_tier(challenger)
+    incumbent_tier = _mandatory_tier(incumbent)
+    return challenger_tier > incumbent_tier and challenger_tier > 0
+
+
+def _mandatory_tier(candidate: CandidateEvidence) -> int:
+    scores = [fixture.role_score for fixture in candidate.fixtures if fixture.success and fixture.contract_success]
+    if not scores:
+        return 0
+    best = max(scores)
+    if best >= 0.90:
+        return 3
+    if best >= 0.80:
+        return 2
+    return 1
+
+
 def _has_material_quality_advantage(challenger: CandidateEvidence, incumbent: CandidateEvidence) -> bool:
     challenger_scores = _compatible_fixture_scores(challenger)
     incumbent_scores = _compatible_fixture_scores(incumbent)
     common = sorted(set(challenger_scores).intersection(incumbent_scores))
     improvements = [challenger_scores[key] - incumbent_scores[key] for key in common]
     return len(improvements) >= 2 and all(delta >= 0.10 for delta in improvements)
+
+
+def _needs_more_pairwise_evidence(challenger: CandidateEvidence, incumbent: CandidateEvidence) -> bool:
+    if _mandatory_tier(challenger) < _mandatory_tier(incumbent):
+        return False
+    challenger_scores = _compatible_fixture_scores(challenger)
+    incumbent_scores = _compatible_fixture_scores(incumbent)
+    if not challenger_scores or not incumbent_scores:
+        return True
+    common = set(challenger_scores).intersection(incumbent_scores)
+    if len(common) >= 2:
+        return False
+    challenger_best = max(challenger_scores.values())
+    incumbent_best = max(incumbent_scores.values())
+    return challenger_best >= incumbent_best - 0.01
 
 
 def _has_material_operational_advantage(requirements: RoleRequirements, challenger: CandidateEvidence, incumbent: CandidateEvidence) -> bool:
@@ -571,24 +709,18 @@ def _average_cost(runs: tuple[RunObservation, ...]) -> float | None:
     return sum(values) / len(values)
 
 
-def _compatible_fixture_count(candidates: Sequence[CandidateEvidence]) -> int:
-    fixture_sets = [set(_compatible_fixture_scores(candidate)) for candidate in candidates]
-    if not fixture_sets:
-        return 0
-    common = set.intersection(*fixture_sets) if len(fixture_sets) > 1 else fixture_sets[0]
-    return len(common)
-
-
-def _best_candidate_without_incumbent(candidates: Sequence[CandidateEvidence]) -> MappingDecision:
+def _best_candidate_without_incumbent(requirements: RoleRequirements, candidates: Sequence[CandidateEvidence]) -> MappingDecision:
     if not candidates:
         return MappingDecision("ABSTAIN", None, None, ("no_eligible_candidates",))
-    ordered = sorted(candidates, key=_shortlist_sort_key)
+    ordered = sorted(candidates, key=lambda candidate: _shortlist_sort_key(requirements, candidate))
+    top_scores = _compatible_fixture_scores(ordered[0])
+    if not top_scores:
+        return MappingDecision("NEEDS_MORE_EVIDENCE", ordered[0].route, None, ("no_conclusive_local_fixture",))
     if len(ordered) > 1:
-        top_scores = _compatible_fixture_scores(ordered[0])
         second_scores = _compatible_fixture_scores(ordered[1])
         common = set(top_scores).intersection(second_scores)
         if len(common) < 2 and all(abs(top_scores.get(key, -1) - second_scores.get(key, -2)) < 0.10 for key in common):
-            return MappingDecision("NEEDS_MORE_EVIDENCE", ordered[0].route, "additional_compatible_fixture", ("insufficient_separation",))
+            return MappingDecision("NEEDS_MORE_EVIDENCE", ordered[0].route, None, ("insufficient_separation",))
     return MappingDecision("CHANGE", ordered[0].route, None, ("best_eligible_candidate",))
 
 
@@ -712,6 +844,8 @@ def _indent_of(line: str) -> int:
 
 
 def _validate_key(key: str) -> None:
+    if key in {"inherit", "extends", "<<"}:
+        raise ValueError("agent_definition_ambiguous_inheritance")
     if not key or not re.fullmatch(r"[A-Za-z0-9_.*/-]+", key):
         raise ValueError(f"agent_definition_invalid_key:{key[:40]}")
     if key.startswith(("!", "&")):
@@ -838,8 +972,6 @@ def _normalize_permissions(value: Any) -> tuple[PermissionRule, ...]:
         for pattern, action in pattern_map.items():
             if not isinstance(pattern, str) or not isinstance(action, str):
                 raise ValueError("agent_definition_invalid_permissions")
-            if isinstance(action, Mapping):
-                raise ValueError("agent_definition_unsupported_nesting")
             _append_permission_rule(rules, seen, capability, pattern, action)
     return tuple(rules)
 
@@ -865,8 +997,11 @@ def _mutation_authority(tools: tuple[str, ...], permissions: tuple[PermissionRul
     mutating_tools = {"bash", "edit", "write", "patch"}
     if not mutating_tools.intersection(tools):
         return "denied"
-    if any(rule.action == "deny" and rule.capability in {"*", *mutating_tools} for rule in permissions):
+    relevant = [rule for rule in permissions if rule.capability in {"*", *mutating_tools}]
+    if any(rule.action in {"deny", "ask"} for rule in relevant):
         return "confined"
-    if any(rule.action == "ask" and rule.capability in mutating_tools for rule in permissions):
+    if any(rule.action == "allow" and rule.pattern == "*" for rule in relevant):
+        return "unrestricted"
+    if any(rule.action == "allow" for rule in relevant):
         return "confined"
     return "unknown"
