@@ -43,7 +43,7 @@ class PiAdapterTests(unittest.TestCase):
         self.context = RuntimeContext(home=self.root, cwd=self.root / "project", env={})
         self.context.cwd.mkdir()
         self._which_patch = patch("helper.evaluator.shutil.which", return_value="/fake/bwrap")
-        self._identity_patch = patch("helper.evaluator._executable_identity", return_value="bwrap:/fake/bwrap:1:2:3")
+        self._identity_patch = patch("helper.evaluator._executable_identity", return_value="bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64))
         self._which_patch.start()
         self._identity_patch.start()
 
@@ -510,7 +510,7 @@ ok-provider     ok-model    1K       2K       yes       no
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
         observed_at = datetime.now(timezone.utc).replace(microsecond=0)
-        executable_identity = "bwrap:/fake/bwrap:1:2:3"
+        executable_identity = "bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64)
         profile_identity = f"bwrap:{workspace_root.resolve()}:network=none:env=minimal"
         outside_probe = workspace_root.resolve().parent / ".model-optimizer-outside-token-pi.txt"
         probe_specs = (
@@ -555,7 +555,7 @@ ok-provider     ok-model    1K       2K       yes       no
             probe_observation_from_result(
                 probe_id=probe_id,
                 argv=(
-                    "bwrap",
+                    "/fake/bwrap",
                     "--unshare-net",
                     "--bind",
                     str(workspace_root.resolve()),

@@ -310,7 +310,7 @@ def write_policy_file(request: RoleEvalRequest) -> Path:
             {
                 "command_id": command.command_id,
                 "argv": list(command.argv),
-                "sandbox_argv": list(sandbox_argv(request.workspace.sandbox_backend, _resolved(request.workspace.root), command.argv)) if request.workspace.sandbox_backend else [],
+                "sandbox_argv": list(sandbox_argv(request.workspace.sandbox_attestation, _resolved(request.workspace.root), command.argv)) if request.workspace.sandbox_attestation else [],
             }
             for command in request.fixture.allowed_commands
         ],
@@ -545,12 +545,13 @@ def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace, *, now: da
             executable = shutil.which(backend)
             if executable is None:
                 continue
-            executable_identity = _executable_identity(executable, backend)
+            canonical_executable = str(Path(executable).resolve(strict=False))
+            executable_identity = _executable_identity(canonical_executable, backend)
             profile_identity = _sandbox_profile(backend, root)
             observations: list[ProbeObservation] = []
             failed = False
             for spec in probe_specs:
-                argv = sandbox_argv(backend, root, spec.command)
+                argv = sandbox_argv(backend, root, spec.command, executable_path=canonical_executable)
                 try:
                     result = runner.run(argv, timeout=5, cwd=workspace.root, env_replacement=_minimal_env(), stdout_limit=MAX_STDOUT_LIMIT_CHARS)
                 except Exception:
@@ -604,26 +605,34 @@ def run_manifest_commands(
         return ()
     if workspace.sandbox_attestation is not None and backend_name != workspace.sandbox_attestation.backend:
         raise ValueError("eval_sandbox_attestation_mismatch")
+    attested_backend = backend if isinstance(backend, SandboxAttestation) else workspace.sandbox_attestation
+    if attested_backend is not None:
+        _validate_sandbox_attestation(replace(workspace, sandbox_attestation=attested_backend))
     root = _resolved(workspace.root)
     audits: list[CommandAudit] = []
     if len(fixture.allowed_commands) > _MAX_AUDIT_ITEMS:
         raise ValueError("eval_audit_too_large")
     for command in fixture.allowed_commands:
-        argv = sandbox_argv(backend_name, root, command.argv)
+        argv = sandbox_argv(attested_backend or backend_name, root, command.argv)
         result = runner.run(argv, timeout=timeout, cwd=workspace.root, env_replacement=_scrubbed_env(env or {}), stdout_limit=MAX_STDOUT_LIMIT_CHARS)
         audit = validate_command_audit(CommandAudit(command.command_id, None if result.timed_out else result.returncode, result.elapsed_ms, backend_name))
         audits.append(audit)
     return tuple(audits)
 
 
-def sandbox_argv(backend: str | None, root: Path, command_argv: Sequence[str]) -> tuple[str, ...]:
+def sandbox_argv(backend: str | SandboxAttestation | None, root: Path, command_argv: Sequence[str], *, executable_path: str | None = None) -> tuple[str, ...]:
     command = tuple(command_argv)
-    if backend is None:
+    backend_name = _backend_name(backend)
+    if backend_name is None:
         raise ValueError("eval_sandbox_unavailable")
-    if backend == "bwrap":
-        return ("bwrap", "--unshare-net", "--bind", str(root), str(root), "--chdir", str(root), *command)
-    if backend == "sandbox-exec":
-        return ("sandbox-exec", "-p", _sandbox_profile("sandbox-exec", root), *command)
+    executable = executable_path
+    if isinstance(backend, SandboxAttestation):
+        executable = _executable_path_from_identity(backend.backend, backend.executable_identity)
+    executable = executable or backend_name
+    if backend_name == "bwrap":
+        return (executable, "--unshare-net", "--bind", str(root), str(root), "--chdir", str(root), *command)
+    if backend_name == "sandbox-exec":
+        return (executable, "-p", _sandbox_profile("sandbox-exec", root), *command)
     raise ValueError("eval_sandbox_unknown_backend")
 
 
@@ -1490,7 +1499,7 @@ def _validate_sandbox_attestation(workspace: PreparedWorkspace, *, now: datetime
         spec = probe_specs.get(observation.probe_id)
         if spec is None or observation.probe_id in probe_names:
             raise ValueError("eval_sandbox_attestation_incomplete")
-        expected_argv = sandbox_argv(attestation.backend, root, spec.command)
+        expected_argv = sandbox_argv(attestation, root, spec.command)
         if observation.argv != expected_argv:
             raise ValueError("eval_sandbox_attestation_mismatch")
         if observation.expected_outcome != spec.expected_outcome:
@@ -1553,13 +1562,23 @@ def _probe_status_from_observation(observation: ProbeObservation, expected_outco
 
 
 def _absolute_executable_identity(backend: str, identity: str) -> bool:
+    path_text = _executable_path_from_identity(backend, identity)
+    return path_text is not None and Path(path_text).is_absolute()
+
+
+def _executable_path_from_identity(backend: str, identity: str) -> str | None:
     prefix = f"{backend}:"
     if not isinstance(identity, str) or not identity.startswith(prefix):
-        return False
-    path_text = identity[len(prefix):].split(":", 1)[0]
-    if not path_text:
-        return False
-    return Path(path_text).is_absolute()
+        return None
+    remainder = identity[len(prefix):]
+    marker = ":sha256:"
+    if marker not in remainder:
+        return None
+    metadata, _digest = remainder.rsplit(marker, 1)
+    path_text, _sep, _stat_text = metadata.rpartition(":")
+    path_text, _sep, _mtime_text = path_text.rpartition(":")
+    path_text, _sep, _inode_text = path_text.rpartition(":")
+    return path_text or None
 
 
 def _parse_timestamp(value: str) -> datetime | None:

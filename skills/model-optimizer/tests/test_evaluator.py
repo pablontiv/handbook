@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import replace
@@ -141,6 +142,39 @@ class TrustedFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "eval_representative_path_escape"):
                 load_representative_fixture(temp_root, Path(td) / "outside", "token-abc")
 
+    def test_fixture_loader_rejects_manifest_project_size_limits_and_ambient_commands(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            fixture_root = root / "evals" / "oversized"
+            (fixture_root / "project").mkdir(parents=True)
+            (fixture_root / "project" / "slugify.py").write_text("", encoding="utf-8")
+            (fixture_root / "eval.json").write_text("{" + ("x" * (64 * 1024)) + "}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "eval_fixture_manifest_too_large"):
+                load_fixture(root, "oversized")
+
+            manifest = {
+                "schema": "model-optimizer.eval-fixture/v1",
+                "id": "oversized",
+                "version": "1",
+                "archetype": "mechanical",
+                "task": "Do it",
+                "grader": "mechanical-slugify-v1",
+                "allowed_changed_files": ["slugify.py"],
+                "allowed_commands": [{"id": "python-unittest", "argv": ["python3", "-m", "unittest", "discover", "-v"]}],
+                "requires_code_execution": True,
+            }
+            (fixture_root / "eval.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (fixture_root / "project" / "large.py").write_bytes(b"x" * (256 * 1024 + 1))
+            with self.assertRaisesRegex(ValueError, "eval_fixture_project_too_large"):
+                load_fixture(root, "oversized")
+
+            (fixture_root / "project" / "large.py").unlink()
+            ambient = dict(manifest)
+            ambient["allowed_commands"] = [{"id": "shell", "argv": ["sh", "-c", "pytest || true"]}]
+            (fixture_root / "eval.json").write_text(json.dumps(ambient), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "eval_fixture_ambient_command_forbidden"):
+                load_fixture(root, "oversized")
+
     def test_prepare_fixture_copies_project_to_disposable_workspace_and_baselines_are_red(self):
         expected_failures = {
             "mechanical-slugify": "FAILED",
@@ -198,7 +232,7 @@ class EvaluatorContractTests(unittest.TestCase):
         (self.workspace_root / "allowed").mkdir()
         (self.workspace_root / "src").mkdir()
         observed_at = datetime.now(timezone.utc).replace(microsecond=0)
-        executable_identity = "bwrap:/fake/bwrap:1:2:3"
+        executable_identity = "bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64)
         profile_identity = f"bwrap:{self.workspace_root.resolve()}:network=none:env=minimal"
         outside_probe = self.workspace_root.resolve().parent / ".model-optimizer-outside-token-123.txt"
         probe_specs = (
@@ -243,7 +277,7 @@ class EvaluatorContractTests(unittest.TestCase):
             probe_observation_from_result(
                 probe_id=probe_id,
                 argv=(
-                    "bwrap",
+                    "/fake/bwrap",
                     "--unshare-net",
                     "--bind",
                     str(self.workspace_root.resolve()),
@@ -730,6 +764,60 @@ class EvaluatorContractTests(unittest.TestCase):
             backend = select_sandbox_backend(runner, self.workspace)
         self.assertIsNone(backend)
         self.assertEqual(predictable.read_text(encoding="utf-8"), "owned-by-someone-else")
+
+    def test_select_sandbox_backend_uses_exclusive_concurrent_sentinel_ownership(self):
+        created: list[str] = []
+        lock = threading.Lock()
+        original = evaluator_module._create_owned_outside_sentinel
+
+        def tracked(root: Path, token: str):
+            temp_dir, sentinel = original(root, token)
+            with lock:
+                created.append(str(sentinel))
+            return temp_dir, sentinel
+
+        def worker(index: int) -> None:
+            workspace_root = self.root / f"concurrent-{index}"
+            workspace_root.mkdir()
+            workspace = PreparedWorkspace(workspace_root, self.workspace.token, None)
+            with patch("helper.evaluator.shutil.which", return_value=None):
+                self.assertIsNone(select_sandbox_backend(RecordingRunner(()), workspace))
+
+        threads = [threading.Thread(target=worker, args=(index,)) for index in range(8)]
+        with patch("helper.evaluator._create_owned_outside_sentinel", side_effect=tracked):
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(len(created), 8)
+        self.assertEqual(len(set(created)), 8)
+        self.assertTrue(all(not Path(path).exists() for path in created))
+
+    def test_sandbox_launch_argv_zero_is_attested_canonical_executable_and_replacement_is_rejected(self):
+        self._which_patch.stop()
+        self._identity_patch.stop()
+        try:
+            executable = self.root / "bin" / "bwrap"
+            executable.parent.mkdir()
+            executable.write_text("#!/bin/sh\necho bwrap-one\n", encoding="utf-8")
+            executable.chmod(0o755)
+            runner = RecordingRunner((_command("ok"), _command("denied"), _command("absent"), _command("denied"), _command("tests ok")))
+            with patch("helper.evaluator.shutil.which", side_effect=lambda name: str(executable) if name == "bwrap" else None):
+                attestation = select_sandbox_backend(runner, self.workspace)
+                self.assertIsNotNone(attestation)
+                self.assertTrue(all(argv[0] == str(executable.resolve()) for argv in runner.argv[:4]))
+                workspace = replace(self.workspace, sandbox_attestation=attestation)
+                prepare_workspace_marker(workspace, self.fixture)
+                audits = run_manifest_commands(runner, workspace, self.fixture, attestation, timeout=5)
+                self.assertEqual(audits, (CommandAudit("cmd-test", 0, 1, "bwrap"),))
+                self.assertEqual(runner.argv[-1][0], str(executable.resolve()))
+                validate_role_eval_request(replace(self.request, workspace=workspace))
+                executable.write_text("#!/bin/sh\necho bwrap-two\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "eval_sandbox_attestation_mismatch"):
+                    validate_role_eval_request(replace(self.request, workspace=workspace))
+        finally:
+            self._which_patch.start()
+            self._identity_patch.start()
 
     def test_executable_identity_binds_canonical_path_stat_and_hash(self):
         self._identity_patch.stop()

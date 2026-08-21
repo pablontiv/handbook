@@ -74,7 +74,7 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.context = RuntimeContext(home=self.root, cwd=self.root / "project", env={})
         self.context.cwd.mkdir()
         self._which_patch = patch("helper.evaluator.shutil.which", return_value="/fake/bwrap")
-        self._identity_patch = patch("helper.evaluator._executable_identity", return_value="bwrap:/fake/bwrap:1:2:3")
+        self._identity_patch = patch("helper.evaluator._executable_identity", return_value="bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64))
         self._which_patch.start()
         self._identity_patch.start()
 
@@ -916,7 +916,7 @@ openai/gpt-second
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
         observed_at = datetime.now(timezone.utc).replace(microsecond=0)
-        executable_identity = "bwrap:/fake/bwrap:1:2:3"
+        executable_identity = "bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64)
         profile_identity = f"bwrap:{workspace_root.resolve()}:network=none:env=minimal"
         outside_probe = workspace_root.resolve().parent / ".model-optimizer-outside-token-opencode.txt"
         probe_specs = (
@@ -961,7 +961,7 @@ openai/gpt-second
             probe_observation_from_result(
                 probe_id=probe_id,
                 argv=(
-                    "bwrap",
+                    "/fake/bwrap",
                     "--unshare-net",
                     "--bind",
                     str(workspace_root.resolve()),
@@ -1158,7 +1158,7 @@ openai/gpt-second
         config_path = Path(debug_env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json"
         self.assertFalse(config_path.exists(), "isolated config root should be cleaned after role_eval")
         self.assertEqual(result.audit.command_runs[-1].command_id, "cmd-test")
-        self.assertEqual(runner.argv[3][0], "bwrap")
+        self.assertEqual(runner.argv[3][0], "/fake/bwrap")
         self.assertIn("--unshare-net", runner.argv[3])
         self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"))
         self.assertNotIn(None, runner.stdout_limits)
