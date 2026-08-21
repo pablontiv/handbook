@@ -1,8 +1,8 @@
-import hashlib
 import json
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,7 +19,9 @@ from helper.evaluator import (
     PreparedWorkspace,
     RoleEvalRequest,
     SandboxAttestation,
+    canonical_fixture_digest,
     prepare_workspace_marker,
+    sandbox_attestation_digest,
 )
 from helper.models import HealthStatus, ModelRecord, ReadinessStatus, RuntimeKind
 from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
@@ -902,18 +904,27 @@ openai/gpt-second
         workspace_root = self.root / "eval-workspace"
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
+        probe_results = (
+            "workspace_write:PASS:sha256:" + "1" * 64,
+            "outside_read_denied:PASS:sha256:" + "2" * 64,
+            "secret_env_denied:PASS:sha256:" + "3" * 64,
+            "network_denied:PASS:sha256:" + "4" * 64,
+        )
+        executable_identity = "docker:/fake/docker:1:2:3"
         workspace = PreparedWorkspace(workspace_root, "token-opencode", SandboxAttestation(
             backend="docker",
             workspace_root=str(workspace_root.resolve()),
             workspace_token="token-opencode",
-            profile_digest="sha256:" + hashlib.sha256(f"docker:{workspace_root.resolve()}:network=none:env=minimal".encode("utf-8")).hexdigest(),
-            observed_at="2026-08-21T00:00:00Z",
+            profile_digest=sandbox_attestation_digest("docker", workspace_root, "token-opencode", executable_identity, probe_results),
+            observed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
+            probe_results=probe_results,
+            executable_identity=executable_identity,
         ))
-        fixture = FixturePolicy(
+        fixture_base = FixturePolicy(
             fixture_id="mechanical",
             fixture_version="v1",
-            manifest_digest="sha256:" + "2" * 64,
+            manifest_digest="",
             grader_id="grader@v1",
             allowed_read_paths=("src",),
             allowed_write_paths=("src",),
@@ -921,6 +932,7 @@ openai/gpt-second
             requires_code_execution=True,
             capability_attestations=(),
         )
+        fixture = replace(fixture_base, manifest_digest=canonical_fixture_digest(fixture_base))
         prepare_workspace_marker(workspace, fixture)
         model = ModelRecord("openai/gpt-5.6-terra", "openai", "gpt-5.6-terra", variants=("high",), tool_call=True)
         route = RouteKey(RuntimeKind.OPENCODE, "1.18.18", "openai/gpt-5.6-terra", "high")
@@ -982,11 +994,11 @@ openai/gpt-second
             _command(json.dumps(debug_payload)),
             _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'),
             _command("tests ok"),
-            _command("?? src/out.txt\n"),
+            _command("?? src/out.txt\x00"),
         ))
         original_env = {
             "OPENCODE_CONFIG_CONTENT": json.dumps({"plugin": ["ambient"], "permission": {"bash": "allow"}}),
-            "OPENCODE_TOKEN": "runtime-auth-token",
+            "OPENAI_API_KEY": "runtime-auth-token",
         }
         context = RuntimeContext(home=self.root, cwd=self.context.cwd, env=original_env)
         with patch("helper.adapters.opencode.secrets.token_hex", return_value="a" * 32), patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "docker" else None):
@@ -1005,20 +1017,44 @@ openai/gpt-second
         self.assertIn("XDG_DATA_HOME", debug_env)
         self.assertNotIn("OPENCODE_CONFIG_CONTENT", debug_env)
         self.assertNotIn("OPENCODE_PERMISSION", debug_env)
-        self.assertEqual(debug_env["OPENCODE_TOKEN"], "runtime-auth-token")
+        self.assertEqual(debug_env["OPENAI_API_KEY"], "runtime-auth-token")
+        self.assertNotIn("OPENCODE_TOKEN", debug_env)
         config_path = Path(debug_env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json"
         self.assertFalse(config_path.exists(), "isolated config root should be cleaned after role_eval")
         self.assertEqual(result.audit.command_runs[-1].command_id, "cmd-test")
         self.assertEqual(runner.argv[3][:4], ("docker", "run", "--rm", "--network"))
-        self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain", "--untracked-files=all"))
+        self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"))
+
+    def test_role_eval_cleans_isolated_roots_when_debug_raises(self):
+        request = self._role_eval_request()
+        class RaisingDebugRunner(EnvCapturingRunner):
+            def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None):
+                self.argv.append(tuple(argv))
+                self.stdout_limits.append(stdout_limit)
+                self.env_overlays.append(dict(env_overlay or {}))
+                self.env_replacements.append(dict(env_replacement) if env_replacement is not None else None)
+                self.cwd_values.append(Path(cwd))
+                if tuple(argv) == ("opencode", "debug", "config", "--pure"):
+                    raise OSError("debug failed")
+                return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement)
+        runner = RaisingDebugRunner((_command("1.18.18\n"),))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="c" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_opencode_runtime_exception", result.reason_codes)
+        debug_env = next(env for env in runner.env_replacements if env and "XDG_CONFIG_HOME" in env)
+        self.assertFalse((Path(debug_env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json").exists())
+        self.assertFalse(Path(debug_env["XDG_DATA_HOME"]).exists())
 
     def test_role_eval_rejects_hostile_effective_global_config_before_launch(self):
         request = self._role_eval_request()
         agent_name = "model-optimizer-eval-" + "b" * 32
         hostile = {"agent": {agent_name: {"prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"bash": "allow"}}}}
         runner = EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(hostile)),))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
         with patch("helper.adapters.opencode.secrets.token_hex", return_value="b" * 32):
-            result = OpenCodeAdapter(runner).role_eval(request, self.context)
+            result = OpenCodeAdapter(runner).role_eval(request, context)
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertIn("eval_opencode_effective_config_mismatch", result.reason_codes)
         self.assertEqual(runner.argv, [("opencode", "--version"), ("opencode", "debug", "config", "--pure")])

@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import tempfile
@@ -9,10 +8,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from helper.adapters import RuntimeContext
 from helper.evaluator import (
     AllowedCommand,
     CapabilityAttestation,
+    ChangedPathsResult,
     CommandAudit,
     FixturePolicy,
     PreparedWorkspace,
@@ -20,10 +19,15 @@ from helper.evaluator import (
     SandboxAttestation,
     RoleEvalResult,
     ToolAudit,
+    canonical_fixture_digest,
+    capability_probe_digest,
+    changed_paths_from_git_status,
+    essential_eval_selection_status,
     parse_opencode_eval_events,
     parse_pi_eval_events,
     prepare_workspace_marker,
     run_manifest_commands,
+    sandbox_attestation_digest,
     select_sandbox_backend,
     validate_role_eval_request,
 )
@@ -57,18 +61,27 @@ class EvaluatorContractTests(unittest.TestCase):
         self.workspace_root.mkdir()
         (self.workspace_root / "allowed").mkdir()
         (self.workspace_root / "src").mkdir()
+        probe_results = (
+            "workspace_write:PASS:sha256:" + "1" * 64,
+            "outside_read_denied:PASS:sha256:" + "2" * 64,
+            "secret_env_denied:PASS:sha256:" + "3" * 64,
+            "network_denied:PASS:sha256:" + "4" * 64,
+        )
+        executable_identity = "docker:/fake/docker:1:2:3"
         self.workspace = PreparedWorkspace(self.workspace_root, "token-123", SandboxAttestation(
             backend="docker",
             workspace_root=str(self.workspace_root.resolve()),
             workspace_token="token-123",
-            profile_digest="sha256:" + hashlib.sha256(f"docker:{self.workspace_root.resolve()}:network=none:env=minimal".encode("utf-8")).hexdigest(),
+            profile_digest=sandbox_attestation_digest("docker", self.workspace_root, "token-123", executable_identity, probe_results),
             observed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
+            probe_results=probe_results,
+            executable_identity=executable_identity,
         ))
-        self.fixture = FixturePolicy(
+        fixture_base = FixturePolicy(
             fixture_id="mechanical",
             fixture_version="v1",
-            manifest_digest="sha256:" + "a" * 64,
+            manifest_digest="",
             grader_id="grader/mechanical@v1",
             allowed_read_paths=("allowed",),
             allowed_write_paths=("src",),
@@ -76,6 +89,7 @@ class EvaluatorContractTests(unittest.TestCase):
             requires_code_execution=True,
             capability_attestations=(),
         )
+        self.fixture = replace(fixture_base, manifest_digest=canonical_fixture_digest(fixture_base))
         prepare_workspace_marker(self.workspace, self.fixture)
         self.route = RouteKey(RuntimeKind.PI, "0.84.2", "nan/qwen3.6", "high")
         self.model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("low", "high"), tool_call=True)
@@ -140,28 +154,43 @@ class EvaluatorContractTests(unittest.TestCase):
 
     def test_request_validation_rejects_marker_token_fixture_path_task_timeout_and_subagents(self):
         self.assert_invalid(replace(self.request, workspace=replace(self.workspace, token="wrong")), "eval_workspace_token_mismatch")
-        bad_fixture = replace(self.fixture, manifest_digest="sha256:" + "b" * 64)
+        fixture_changed = replace(self.fixture, fixture_version="v2", manifest_digest="")
+        bad_fixture = replace(fixture_changed, manifest_digest=canonical_fixture_digest(fixture_changed))
         self.assert_invalid(replace(self.request, fixture=bad_fixture), "eval_fixture_marker_mismatch")
-        escaped = replace(self.fixture, allowed_read_paths=("../outside",))
+        digest_tampered = replace(self.fixture, manifest_digest="sha256:" + "b" * 64)
+        self.assert_invalid(replace(self.request, fixture=digest_tampered), "eval_fixture_manifest_digest_mismatch")
+        escaped_base = replace(self.fixture, allowed_read_paths=("../outside",), manifest_digest="")
+        escaped = replace(escaped_base, manifest_digest=canonical_fixture_digest(escaped_base))
+        prepare_workspace_marker(self.workspace, escaped)
         self.assert_invalid(replace(self.request, fixture=escaped), "eval_policy_path_escape")
+        prepare_workspace_marker(self.workspace, self.fixture)
         self.assert_invalid(replace(self.request, task="   "), "eval_empty_task")
         self.assert_invalid(replace(self.request, timeout=0), "eval_invalid_timeout")
         subagent = replace(self.agent, tools=("read", "subagent_worker"))
         self.assert_invalid(replace(self.request, agent=subagent), "eval_subagent_tool_forbidden")
 
     def test_request_validation_rejects_unstable_commands_and_unproven_custom_tools(self):
-        bad_command = replace(self.fixture, allowed_commands=(AllowedCommand("cmd test", ("python3",)),))
+        bad_command_base = replace(self.fixture, allowed_commands=(AllowedCommand("cmd test", ("python3",)),), manifest_digest="")
+        bad_command = replace(bad_command_base, manifest_digest=canonical_fixture_digest(bad_command_base))
+        prepare_workspace_marker(self.workspace, bad_command)
         self.assert_invalid(replace(self.request, fixture=bad_command), "eval_unstable_command_id")
-        duplicate_id = replace(self.fixture, allowed_commands=(
+        prepare_workspace_marker(self.workspace, self.fixture)
+        duplicate_id_base = replace(self.fixture, allowed_commands=(
             AllowedCommand("cmd-test", ("python3", "-m", "unittest")),
             AllowedCommand("cmd-test", ("python3", "-m", "pytest")),
-        ))
+        ), manifest_digest="")
+        duplicate_id = replace(duplicate_id_base, manifest_digest=canonical_fixture_digest(duplicate_id_base))
+        prepare_workspace_marker(self.workspace, duplicate_id)
         self.assert_invalid(replace(self.request, fixture=duplicate_id), "eval_ambiguous_allowed_command")
-        duplicate_argv = replace(self.fixture, allowed_commands=(
+        prepare_workspace_marker(self.workspace, self.fixture)
+        duplicate_argv_base = replace(self.fixture, allowed_commands=(
             AllowedCommand("cmd-test", ("python3", "-m", "unittest")),
             AllowedCommand("cmd-test-2", ("python3", "-m", "unittest")),
-        ))
+        ), manifest_digest="")
+        duplicate_argv = replace(duplicate_argv_base, manifest_digest=canonical_fixture_digest(duplicate_argv_base))
+        prepare_workspace_marker(self.workspace, duplicate_argv)
         self.assert_invalid(replace(self.request, fixture=duplicate_argv), "eval_ambiguous_allowed_command")
+        prepare_workspace_marker(self.workspace, self.fixture)
         custom_reqs = replace(self.requirements, essential_custom_tools=("custom_safe",))
         self.assert_invalid(replace(self.request, requirements=custom_reqs), "eval_essential_custom_tool_unproven")
         stale = CapabilityAttestation("custom_safe", "probe-1", "PASS", "2000-01-01T00:00:00Z", self.fixture.manifest_digest)
@@ -175,10 +204,11 @@ class EvaluatorContractTests(unittest.TestCase):
             self.fixture.manifest_digest,
         )
         self.assert_invalid(replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(unknown_probe,))), "eval_essential_custom_tool_unproven")
+        probe_id = "capability:custom_safe"
         fresh = CapabilityAttestation(
-            "custom_safe", "capability:custom_safe", "PASS",
+            "custom_safe", probe_id, "PASS",
             datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            self.fixture.manifest_digest,
+            capability_probe_digest(self.request, "custom_safe", probe_id),
         )
         validate_role_eval_request(replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(fresh,))))
 
@@ -260,11 +290,16 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertIn("eval_rate_limited", quota.reason_codes)
 
     def test_sandbox_selection_self_tests_supported_fake_backend_and_scrubbed_manifest_runs(self):
-        runner = RecordingRunner((_command("self-test-ok"), _command("tests ok")))
-        with patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "docker" else None):
+        runner = RecordingRunner((_command("ok"), _command("denied"), _command("absent"), _command("denied"), _command("tests ok")))
+        with patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "docker" else None), patch("pathlib.Path.stat") as stat:
+            stat.return_value.st_ino = 1
+            stat.return_value.st_mtime_ns = 2
+            stat.return_value.st_size = 3
             backend = select_sandbox_backend(runner, self.workspace)
         self.assertIsNotNone(backend)
         self.assertEqual(backend.backend, "docker")
+        self.assertEqual({item.split(":", 1)[0] for item in backend.probe_results}, {"workspace_write", "outside_read_denied", "secret_env_denied", "network_denied"})
+        self.assertTrue(all(":PASS:" in item for item in backend.probe_results))
         audits = run_manifest_commands(runner, self.workspace, self.fixture, backend, timeout=5, env={"SECRET_SENTINEL": "must-not-leak", "PATH": os.environ.get("PATH", "")})
         self.assertEqual(audits, (CommandAudit("cmd-test", 0, 1, "docker"),))
         self.assertEqual(runner.cwd_values[-1], self.workspace_root)
@@ -279,6 +314,42 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertIsNone(backend)
         result = run_manifest_commands(runner, self.workspace, self.fixture, backend, timeout=5)
         self.assertEqual(result, ())
+
+    def test_changed_paths_collection_is_typed_and_fail_closed(self):
+        ok = changed_paths_from_git_status(_command("?? src/out.txt\x00"), self.workspace)
+        self.assertEqual(ok, ChangedPathsResult("PASS", ("src/out.txt",)))
+        failed = changed_paths_from_git_status(CompletedCommand((), 1, "", "fatal", 1, False), self.workspace)
+        self.assertEqual(failed.status, "INCONCLUSIVE")
+        self.assertIn("eval_changed_paths_unavailable", failed.reason_codes)
+        invalid = changed_paths_from_git_status(_command("?? src/out.txt\n"), self.workspace)
+        self.assertEqual(invalid.status, "INCONCLUSIVE")
+        overlong = changed_paths_from_git_status(_command("?? " + "x" * 241 + "\x00"), self.workspace)
+        self.assertEqual(overlong.status, "INCONCLUSIVE")
+
+    def test_eval_status_semantics_and_bounded_audit_fail_closed(self):
+        failed_command = "\n".join((
+            json.dumps({"type": "tool_execution_start", "toolCallId": "bash-1", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "bash-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 1, "elapsed_ms": 22, "sandbox_backend": "docker"}}}),
+        ))
+        parsed = parse_pi_eval_events(failed_command, self.workspace, self.fixture)
+        self.assertEqual(parsed.status, "FAIL")
+        oversized = "\n".join(
+            json.dumps({"type": "tool_execution_start", "toolCallId": f"c-{index}", "toolName": f"tool{index}"})
+            for index in range(129)
+        )
+        parsed = parse_pi_eval_events(oversized, self.workspace, self.fixture)
+        self.assertEqual(parsed.status, "INCONCLUSIVE")
+        self.assertEqual(len(parsed.audit.tool_names), 128)
+        self.assertNotIn("tool128", parsed.audit.tool_names)
+        self.assertIn("eval_audit_too_large", parsed.reason_codes)
+
+    def test_essential_eval_selection_policy_abstains_on_unsafe_infrastructure(self):
+        result = RoleEvalResult(
+            self.route, self.fixture.fixture_id, self.fixture.fixture_version, self.fixture.manifest_digest,
+            "INCONCLUSIVE", 1, "", ToolAudit((), (), (), 0, ()), 0, 0, 0, None,
+            ("eval_sandbox_unavailable",),
+        )
+        self.assertEqual(essential_eval_selection_status((result,)), ("ABSTAIN", ("eval_sandbox_unavailable",)))
 
     def test_real_command_runner_timeout_terminates_process_group_children(self):
         script = self.root / "spawn_child.py"
@@ -296,16 +367,16 @@ class EvaluatorContractTests(unittest.TestCase):
         deadline = time.monotonic() + 2
         while not marker.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
-        if marker.exists():
-            child_pid = int(marker.read_text(encoding="utf-8"))
-            time.sleep(0.2)
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
-                child_alive = False
-            else:
-                child_alive = True
-            self.assertFalse(child_alive, "timeout should terminate child process group")
+        self.assertTrue(marker.exists(), "child marker must be observed before cleanup assertion")
+        child_pid = int(marker.read_text(encoding="utf-8"))
+        time.sleep(0.2)
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            child_alive = False
+        else:
+            child_alive = True
+        self.assertFalse(child_alive, "timeout should terminate child process group")
 
 
 if __name__ == "__main__":

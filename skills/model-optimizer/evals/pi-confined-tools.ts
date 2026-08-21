@@ -65,17 +65,29 @@ function resolveExisting(root: string, raw: string): string {
 function resolveProspective(root: string, raw: string): string {
   const clean = raw.startsWith("@") ? raw.slice(1) : raw;
   const resolved = path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(root, clean);
-  const parent = path.dirname(resolved);
-  const realParent = fs.existsSync(parent) ? fs.realpathSync(parent) : path.resolve(parent);
-  if (!contains(root, realParent)) throw new Error("eval_path_outside_workspace");
-  const finalPath = path.join(realParent, path.basename(resolved));
-  if (fs.existsSync(finalPath)) {
-    const realFinal = fs.realpathSync(finalPath);
-    if (!contains(root, realFinal)) throw new Error("eval_path_outside_workspace");
-    return realFinal;
+  const relative = path.relative(root, resolved);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("eval_path_outside_workspace");
+  const parts = relative.split(path.sep).filter(Boolean);
+  let current = root;
+  for (let index = 0; index < parts.length; index += 1) {
+    const next = path.join(current, parts[index]);
+    const isFinal = index === parts.length - 1;
+    if (fs.existsSync(next)) {
+      const stat = fs.lstatSync(next);
+      if (stat.isSymbolicLink()) {
+        const real = fs.realpathSync(next);
+        if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
+        if (!isFinal) current = real;
+        else return real;
+      } else {
+        current = next;
+      }
+    } else {
+      current = next;
+    }
+    if (!contains(root, path.resolve(current))) throw new Error("eval_path_outside_workspace");
   }
-  if (!contains(root, finalPath)) throw new Error("eval_path_outside_workspace");
-  return finalPath;
+  return path.resolve(current);
 }
 
 function requireAllowed(target: string, allowed: string[], reason: string): void {
@@ -86,6 +98,19 @@ function scrubbedEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   if (process.env.PATH) env.PATH = process.env.PATH;
   return env;
+}
+
+function smokeIfRequested(root: string, requested: Set<string>, allowedRead: string[]): void {
+  const smokePath = process.env.PI_EVAL_SMOKE_FILE;
+  if (!smokePath) return;
+  const target = resolveProspective(root, smokePath);
+  let readProbe = "SKIP";
+  if (requested.has("read") && allowedRead.length > 0) {
+    const entries = fs.readdirSync(allowedRead[0]);
+    readProbe = Array.isArray(entries) ? "PASS" : "FAIL";
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, JSON.stringify({ factory: "PASS", registered_tools: [...requested].sort(), read_probe: readProbe }), "utf8");
 }
 
 function shellWords(command: string): string[] {
@@ -200,7 +225,8 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
       parameters: Type.Object({ command: Type.String(), timeout: Type.Optional(Type.Number()) }),
       async execute(_id, params) {
         const command = assertExactCommand(policy, params.command);
-        const details = await runSandboxed(root, command, params.timeout);
+        const timeoutMs = typeof params.timeout === "number" ? Math.max(0, params.timeout * 1000) : undefined;
+        const details = await runSandboxed(root, command, timeoutMs);
         return text(`Command exited with code ${details.exit_code}.`, details);
       },
     });
@@ -221,18 +247,63 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
     });
   }
 
-  for (const name of ["grep", "find"] as const) {
-    if (!requested.has(name)) continue;
+  if (requested.has("grep")) {
     pi.registerTool({
-      name,
-      label: `${name} (disabled confined)`,
-      description: `${name} is registered only when requested, but this evaluator fixture does not expose search execution.`,
-      parameters: Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }),
-      async execute() {
-        throw new Error(`eval_${name}_not_available`);
+      name: "grep",
+      label: "grep (confined)",
+      description: "Search allowed UTF-8 files below an allowed workspace path.",
+      parameters: Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()), ignoreCase: Type.Optional(Type.Boolean()), limit: Type.Optional(Type.Number()) }),
+      async execute(_id, params) {
+        const target = resolveExisting(root, params.path ?? ".");
+        requireAllowed(target, allowedRead, "eval_read_not_allowed");
+        const needle = params.ignoreCase ? params.pattern.toLowerCase() : params.pattern;
+        const output: string[] = [];
+        const max = Math.max(1, Math.min(params.limit ?? 100, 1000));
+        async function visit(item: string) {
+          if (output.length >= max) return;
+          const stat = await fsp.stat(item);
+          if (stat.isDirectory()) {
+            for (const entry of await fsp.readdir(item)) await visit(path.join(item, entry));
+            return;
+          }
+          const body = await fsp.readFile(item, "utf8").catch(() => "");
+          body.split("\n").forEach((line, index) => {
+            const haystack = params.ignoreCase ? line.toLowerCase() : line;
+            if (output.length < max && haystack.includes(needle)) output.push(`${path.relative(root, item)}:${index + 1}:${line}`);
+          });
+        }
+        await visit(target);
+        return text(output.join("\n"), { matches: output.length });
       },
     });
   }
 
-  pi.setActiveTools([...requested]);
+  if (requested.has("find")) {
+    pi.registerTool({
+      name: "find",
+      label: "find (confined)",
+      description: "List files below an allowed workspace path.",
+      parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }),
+      async execute(_id, params) {
+        const target = resolveExisting(root, params.path ?? ".");
+        requireAllowed(target, allowedRead, "eval_read_not_allowed");
+        const output: string[] = [];
+        const max = Math.max(1, Math.min(params.limit ?? 100, 1000));
+        async function visit(item: string) {
+          if (output.length >= max) return;
+          const stat = await fsp.stat(item);
+          if (stat.isDirectory()) {
+            for (const entry of await fsp.readdir(item)) await visit(path.join(item, entry));
+            return;
+          }
+          const rel = path.relative(root, item);
+          if (!params.pattern || rel.includes(params.pattern)) output.push(rel);
+        }
+        await visit(target);
+        return text(output.join("\n"), { matches: output.length });
+      },
+    });
+  }
+
+  smokeIfRequested(root, requested, allowedRead);
 }

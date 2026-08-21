@@ -575,14 +575,14 @@ class PiAdapter:
 
     def role_eval(self, request: Any, context: RuntimeContext) -> Any:
         from helper.evaluator import (
-            changed_paths_from_git_diff,
+            changed_paths_from_git_status,
             inconclusive_result,
             parse_pi_eval_events,
             pi_confined_extension_path,
             result_from_parsed,
             unsupported_custom_tools,
             validate_role_eval_request,
-            with_changed_paths,
+            with_changed_paths_result,
             write_policy_file,
         )
 
@@ -628,7 +628,13 @@ class PiAdapter:
             "-p",
             request.task,
         ))
-        env = {"PI_EVAL_POLICY": str(policy_path), **minimal_env}
+        pi_data_root = request.workspace.root / ".pi-eval-runtime"
+        env = {
+            "PI_EVAL_POLICY": str(policy_path),
+            "PI_CODING_AGENT_DIR": str(pi_data_root / "agent"),
+            "PI_SESSION_DIR": str(pi_data_root / "sessions"),
+            **minimal_env,
+        }
         result = self.runner.run(
             tuple(argv),
             timeout=request.timeout,
@@ -637,15 +643,16 @@ class PiAdapter:
             stdout_limit=MAX_STDOUT_LIMIT_CHARS,
         )
         if result.timed_out:
-            return inconclusive_result(request, "eval_timeout", elapsed_ms=result.elapsed_ms)
+            from dataclasses import replace
+            return replace(inconclusive_result(request, "eval_timeout", elapsed_ms=result.elapsed_ms), status="HANG")
         if result.stdout_truncated:
             return inconclusive_result(request, "eval_truncated_audit_stream", elapsed_ms=result.elapsed_ms)
         if result.returncode != 0:
             return inconclusive_result(request, "eval_runtime_nonzero", elapsed_ms=result.elapsed_ms)
         parsed = parse_pi_eval_events(result.stdout, request.workspace, request.fixture)
         role_result = result_from_parsed(request, parsed, result.elapsed_ms)
-        diff = self.runner.run(("git", "status", "--porcelain", "--untracked-files=all"), timeout=10, cwd=request.workspace.root, env_replacement=minimal_env, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
-        return with_changed_paths(role_result, changed_paths_from_git_diff(diff, request.workspace))
+        diff = self.runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=10, cwd=request.workspace.root, env_replacement=minimal_env, stdout_limit=None)
+        return with_changed_paths_result(role_result, changed_paths_from_git_status(diff, request.workspace))
 
     def reload_semantics(self, context: RuntimeContext) -> dict[str, Any]:
         return {

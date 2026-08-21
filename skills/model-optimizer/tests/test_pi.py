@@ -1,9 +1,9 @@
-import hashlib
 import json
 import math
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from helper.adapters import RuntimeContext
@@ -14,7 +14,9 @@ from helper.evaluator import (
     PreparedWorkspace,
     RoleEvalRequest,
     SandboxAttestation,
+    canonical_fixture_digest,
     prepare_workspace_marker,
+    sandbox_attestation_digest,
 )
 from helper.models import HealthStatus, ModelRecord, ProviderReadiness, ReadinessStatus, RuntimeKind
 from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
@@ -495,18 +497,27 @@ ok-provider     ok-model    1K       2K       yes       no
         workspace_root = self.root / "eval-workspace"
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
+        probe_results = (
+            "workspace_write:PASS:sha256:" + "1" * 64,
+            "outside_read_denied:PASS:sha256:" + "2" * 64,
+            "secret_env_denied:PASS:sha256:" + "3" * 64,
+            "network_denied:PASS:sha256:" + "4" * 64,
+        )
+        executable_identity = "docker:/fake/docker:1:2:3"
         workspace = PreparedWorkspace(workspace_root, "token-pi", SandboxAttestation(
             backend="docker",
             workspace_root=str(workspace_root.resolve()),
             workspace_token="token-pi",
-            profile_digest="sha256:" + hashlib.sha256(f"docker:{workspace_root.resolve()}:network=none:env=minimal".encode("utf-8")).hexdigest(),
-            observed_at="2026-08-21T00:00:00Z",
+            profile_digest=sandbox_attestation_digest("docker", workspace_root, "token-pi", executable_identity, probe_results),
+            observed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
+            probe_results=probe_results,
+            executable_identity=executable_identity,
         ))
-        fixture = FixturePolicy(
+        fixture_base = FixturePolicy(
             fixture_id="mechanical",
             fixture_version="v1",
-            manifest_digest="sha256:" + "1" * 64,
+            manifest_digest="",
             grader_id="grader@v1",
             allowed_read_paths=("src",),
             allowed_write_paths=("src",),
@@ -514,6 +525,7 @@ ok-provider     ok-model    1K       2K       yes       no
             requires_code_execution=True,
             capability_attestations=(),
         )
+        fixture = replace(fixture_base, manifest_digest=canonical_fixture_digest(fixture_base))
         prepare_workspace_marker(workspace, fixture)
         model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("high",), tool_call=True)
         route = RouteKey(RuntimeKind.PI, "0.84.2", "nan/qwen3.6", "high")
@@ -557,7 +569,7 @@ ok-provider     ok-model    1K       2K       yes       no
             json.dumps({"type": "tool_execution_start", "toolCallId": "call-2", "toolName": "write", "args": {"path": "src/out.txt"}}),
             json.dumps({"type": "tool_execution_end", "toolCallId": "call-2", "toolName": "write", "isError": False, "result": {"details": {}}}),
         ))
-        runner = FakeRunner((_command("0.84.2\n"), _command(events), _command("?? src/out.txt\n")))
+        runner = FakeRunner((_command("0.84.2\n"), _command(events), _command("?? src/out.txt\x00")))
         result = PiAdapter(runner).role_eval(request, self.context)
         argv = runner.argv[0]
         self.assertEqual(runner.argv[0], ("pi", "--version"))
@@ -573,7 +585,7 @@ ok-provider     ok-model    1K       2K       yes       no
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.audit.changed_paths, ("src/out.txt",))
         self.assertEqual(runner.stdout_limits[0], MAX_STDOUT_LIMIT_CHARS)
-        self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain", "--untracked-files=all"))
+        self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"))
 
     def test_role_eval_unsupported_custom_tool_fails_closed_without_ambient_extension(self):
         request = self._role_eval_request()
