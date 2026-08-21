@@ -222,6 +222,29 @@ confidence: high
         mutated = grade_fixture(fixture, prepared.root, self._result(fixture, status="FAIL", text=accepted, changed=("client.py",), command_exit=1))
         self.assertIn("fixture_unauthorized_change", mutated.reason_codes)
 
+    def test_regression_missing_single_required_field_reports_aggregate_specific_reason_and_score(self):
+        fixture = load_fixture(SKILL_ROOT, "regression-timeout")
+        prepared = prepare_fixture(fixture)
+        self.addCleanup(lambda root=prepared.root: shutil.rmtree(root, ignore_errors=True))
+        fields = {
+            "status": "diagnosed",
+            "root_cause": "client.py returns timeout_ms milliseconds without converting to seconds",
+            "evidence": "client.py:8 and test_service.py:7",
+            "proposed_fix": "divide timeout_ms by 1000 before returning seconds",
+            "confidence": "high",
+        }
+        semantic_evidence = "note: client.py returns timeout_ms milliseconds as seconds; client.py:8; divide by 1000\n"
+
+        for missing_field in fields:
+            with self.subTest(missing_field=missing_field):
+                text = "\n".join(f"{field}: {value}" for field, value in fields.items() if field != missing_field) + f"\n{semantic_evidence}"
+                result = grade_fixture(fixture, prepared.root, self._result(fixture, status="FAIL", text=text, command_exit=1))
+                self.assertEqual(result.status, "FAIL")
+                self.assertFalse(result.contract_success)
+                self.assertIn("fixture_missing_field", result.reason_codes)
+                self.assertIn(f"fixture_missing_field_{missing_field}", result.reason_codes)
+                self.assertAlmostEqual(result.role_score, 5 / 6)
+
 
 class EvaluatorContractTests(unittest.TestCase):
     def setUp(self):
@@ -766,32 +789,55 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertEqual(predictable.read_text(encoding="utf-8"), "owned-by-someone-else")
 
     def test_select_sandbox_backend_uses_exclusive_concurrent_sentinel_ownership(self):
-        created: list[str] = []
+        workspace_roots = tuple(self.root / f"concurrent-{index}" for index in range(8))
+        for workspace_root in workspace_roots:
+            workspace_root.mkdir()
+        expected_parent = self.root.resolve()
+        preexisting = expected_parent / f".model-optimizer-probe-{self.workspace.token}-preexisting"
+        preexisting.write_text("owned-by-someone-else", encoding="utf-8")
+        predictable = expected_parent / f".model-optimizer-outside-{self.workspace.token}.txt"
+        predictable.write_text("legacy-owned-by-someone-else", encoding="utf-8")
+        created: list[tuple[str, str]] = []
+        errors: list[BaseException] = []
         lock = threading.Lock()
+        start = threading.Barrier(len(workspace_roots))
         original = evaluator_module._create_owned_outside_sentinel
 
         def tracked(root: Path, token: str):
+            self.assertEqual(root.parent.resolve(), expected_parent)
             temp_dir, sentinel = original(root, token)
             with lock:
-                created.append(str(sentinel))
+                created.append((str(temp_dir), str(sentinel)))
             return temp_dir, sentinel
 
-        def worker(index: int) -> None:
-            workspace_root = self.root / f"concurrent-{index}"
-            workspace_root.mkdir()
-            workspace = PreparedWorkspace(workspace_root, self.workspace.token, None)
-            with patch("helper.evaluator.shutil.which", return_value=None):
+        def worker(workspace_root: Path) -> None:
+            try:
+                workspace = PreparedWorkspace(workspace_root, self.workspace.token, None)
+                start.wait(timeout=5)
                 self.assertIsNone(select_sandbox_backend(RecordingRunner(()), workspace))
+            except BaseException as exc:  # pragma: no cover - re-raised in the main test thread
+                with lock:
+                    errors.append(exc)
 
-        threads = [threading.Thread(target=worker, args=(index,)) for index in range(8)]
-        with patch("helper.evaluator._create_owned_outside_sentinel", side_effect=tracked):
+        threads = [threading.Thread(target=worker, args=(workspace_root,)) for workspace_root in workspace_roots]
+        with patch("helper.evaluator._create_owned_outside_sentinel", new=tracked), patch("helper.evaluator.shutil.which", return_value=None):
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join()
-        self.assertEqual(len(created), 8)
-        self.assertEqual(len(set(created)), 8)
-        self.assertTrue(all(not Path(path).exists() for path in created))
+        if errors:
+            raise errors[0]
+        self.assertEqual(len(created), len(workspace_roots))
+        sentinel_dirs = [Path(temp_dir) for temp_dir, _sentinel in created]
+        sentinel_paths = [Path(sentinel) for _temp_dir, sentinel in created]
+        self.assertEqual(len(set(sentinel_dirs)), len(workspace_roots))
+        self.assertEqual(len(set(sentinel_paths)), len(workspace_roots))
+        self.assertTrue(all(path.parent == directory for path, directory in zip(sentinel_paths, sentinel_dirs)))
+        self.assertTrue(all(directory.parent.resolve() == expected_parent for directory in sentinel_dirs))
+        self.assertTrue(all(not path.exists() for path in sentinel_paths))
+        self.assertTrue(all(not directory.exists() for directory in sentinel_dirs))
+        self.assertEqual(preexisting.read_text(encoding="utf-8"), "owned-by-someone-else")
+        self.assertEqual(predictable.read_text(encoding="utf-8"), "legacy-owned-by-someone-else")
 
     def test_sandbox_launch_argv_zero_is_attested_canonical_executable_and_replacement_is_rejected(self):
         self._which_patch.stop()

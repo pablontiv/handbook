@@ -45,6 +45,8 @@ _KNOWN_GRADERS = frozenset({
     "regression-timeout-v1",
     "regression-retry-delay-v1",
 })
+_REGRESSION_REQUIRED_FIELDS = ("status", "root_cause", "evidence", "proposed_fix", "confidence")
+_MISSING_FIELD_AGGREGATE_REASON = "fixture_missing_field"
 
 
 @dataclass(frozen=True)
@@ -412,7 +414,8 @@ def grade_fixture(fixture: EvalFixture, workspace: Path, result: RoleEvalResult)
         _append_unique(reasons, "fixture_unknown_grader")
     if not reasons:
         return GradeResult("PASS", 1.0, True, ())
-    return _grade_with_reasons(reasons, total=6)
+    scoring_reasons = tuple(reason for reason in reasons if reason != _MISSING_FIELD_AGGREGATE_REASON)
+    return _grade_with_reasons(reasons, total=6, scoring_reasons=scoring_reasons)
 
 
 def cited_lines(text: str, filename: str) -> set[int]:
@@ -1391,9 +1394,10 @@ def _safe_relative_project_path(value: Any) -> bool:
     return not path.is_absolute() and ".." not in path.parts
 
 
-def _grade_with_reasons(reasons: Sequence[str], *, total: int) -> GradeResult:
+def _grade_with_reasons(reasons: Sequence[str], *, total: int, scoring_reasons: Sequence[str] | None = None) -> GradeResult:
     unique = tuple(dict.fromkeys(reasons))
-    failed = len(unique)
+    scored_unique = tuple(dict.fromkeys(scoring_reasons if scoring_reasons is not None else unique))
+    failed = len(scored_unique)
     score = max(0.0, min(1.0, (total - failed) / total))
     if not math.isfinite(score):
         score = 0.0
@@ -1411,11 +1415,10 @@ def _grade_regression_text(
     reasons: list[str],
 ) -> None:
     lowered = (text or "").lower()
-    fields = ("status", "root_cause", "evidence", "proposed_fix", "confidence")
-    for field in fields:
+    for field in _REGRESSION_REQUIRED_FIELDS:
         if not re.search(rf"^\s*{field}\s*:", text or "", re.IGNORECASE | re.MULTILINE):
-            _append_unique(reasons, "fixture_missing_field")
-            break
+            _append_unique(reasons, _MISSING_FIELD_AGGREGATE_REASON)
+            _append_unique(reasons, f"fixture_missing_field_{field}")
     if any(term in lowered for term in reject_terms) or not all(term.lower() in lowered for term in cause_terms):
         _append_unique(reasons, "fixture_wrong_root_cause")
     if required_line not in cited_lines(text or "", filename):
