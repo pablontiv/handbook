@@ -18,6 +18,7 @@ from helper.artifacts import (
     load_inventory,
     write_health,
     write_inventory,
+    write_json_atomic,
 )
 from helper.models import (
     CurrentAssignment,
@@ -369,6 +370,67 @@ class ArtifactTests(unittest.TestCase):
                     list(executor.map(write_one, inventories))
 
             self.assertEqual(max_active, 1)
+
+    def test_write_json_atomic_creates_parents_and_writes_strict_sorted_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "nested" / "state.json"
+            write_json_atomic(path, {"b": 2, "a": 1})
+            self.assertEqual(path.read_text(encoding="utf-8"), '{\n  "a": 1,\n  "b": 2\n}\n')
+
+    def test_write_json_atomic_rejects_non_finite_numbers_without_creating_target_or_temp_debris(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "state.json"
+            with self.assertRaisesRegex(ValueError, "artifact_invalid_number") as caught:
+                write_json_atomic(path, {"bad": math.inf})
+            self.assertFalse(path.exists())
+            self.assertEqual(list(root.glob(".state.json.*.tmp")), [])
+            self.assertNotIn("inf", str(caught.exception).lower())
+
+    def test_write_json_atomic_replaces_hardlink_without_overwriting_original_inode(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = root / "settings.json"
+            output = root / "state.json"
+            config.write_bytes(b"original-config")
+            try:
+                os.link(config, output)
+            except (AttributeError, NotImplementedError, OSError) as exc:
+                self.skipTest(f"hardlinks unsupported: {exc}")
+            before_inode = config.stat().st_ino
+
+            write_json_atomic(output, {"schema": "model-optimizer.state/v1"})
+
+            self.assertEqual(config.read_bytes(), b"original-config")
+            self.assertEqual(config.stat().st_ino, before_inode)
+            self.assertNotEqual(output.stat().st_ino, before_inode)
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["schema"], "model-optimizer.state/v1")
+
+    def test_concurrent_write_json_atomic_writes_leave_one_valid_document_and_no_temp_debris(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "state.json"
+            values = [{"index": index, "items": list(range(index))} for index in range(12)]
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                list(executor.map(lambda value: write_json_atomic(output, value), values))
+
+            loaded = json.loads(output.read_text(encoding="utf-8"))
+            self.assertIn(loaded, values)
+            self.assertEqual(list(root.glob(".state.json.*.tmp")), [])
+
+    def test_write_json_atomic_reraises_bounded_replace_failure_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "state.json"
+            with mock.patch("helper.artifacts.os.replace", side_effect=PermissionError(5, "Access denied")) as replace_mock, \
+                    mock.patch("helper.artifacts.time.sleep") as sleep_mock:
+                with self.assertRaises(PermissionError):
+                    write_json_atomic(output, {"schema": "model-optimizer.state/v1"})
+
+            self.assertEqual(replace_mock.call_count, artifacts_module._REPLACE_RETRY_ATTEMPTS)
+            self.assertEqual(sleep_mock.call_count, artifacts_module._REPLACE_RETRY_ATTEMPTS - 1)
+            self.assertFalse(output.exists())
+            self.assertEqual(list(root.glob(".state.json.*.tmp")), [])
 
     def test_health_round_trip_preserves_schema_without_self_digest(self):
         health = HealthArtifact(

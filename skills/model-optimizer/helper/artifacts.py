@@ -54,6 +54,11 @@ def write_health(path: Path, health: HealthArtifact) -> None:
     _atomic_write_text(path, _json_dumps_strict(health.to_dict(), indent=2) + "\n")
 
 
+def write_json_atomic(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(path, _json_dumps_strict(value, sort_keys=True, indent=2) + "\n")
+
+
 def load_health(path: Path) -> HealthArtifact:
     value = _load_json_object(path)
     if value.get("schema") != "model-optimizer.health/v1":
