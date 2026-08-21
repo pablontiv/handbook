@@ -721,6 +721,7 @@ class OpenCodeAdapter:
         agent_name = f"model-optimizer-eval-{token}"
         xdg_config_home = request.workspace.root / f".opencode-eval-config-{token}"
         xdg_data_home = request.workspace.root / f".opencode-eval-data-{token}"
+
         def cleanup() -> str | None:
             failure = None
             for target in (xdg_config_home, xdg_data_home):
@@ -732,23 +733,28 @@ class OpenCodeAdapter:
                     failure = "eval_opencode_cleanup_failed"
             return failure
 
-        try:
-            config_dir = xdg_config_home / "opencode"
-            config_dir.mkdir(parents=True, exist_ok=True)
-            xdg_data_home.mkdir(parents=True, exist_ok=True)
-            expected_config = opencode_eval_config(request, agent_name)
-            config_path = config_dir / "opencode.json"
-            config_bytes = json.dumps(expected_config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            config_path.write_bytes(config_bytes)
-            env_replacement = isolated_opencode_env(context.env, xdg_config_home, xdg_data_home, request.model_record.provider)
-            if env_replacement is None:
-                reason = cleanup() or "eval_opencode_auth_unavailable"
-                return inconclusive_result(request, reason)
-        except OSError:
-            reason = cleanup() or "eval_opencode_config_write_failed"
-            return inconclusive_result(request, reason)
+        def with_cleanup_failure(final_result: Any, reason: str) -> Any:
+            return replace(
+                final_result,
+                status="INCONCLUSIVE",
+                reason_codes=tuple(dict.fromkeys((*final_result.reason_codes, reason))),
+            )
 
-        try:
+        def evaluate_once() -> Any:
+            try:
+                config_dir = xdg_config_home / "opencode"
+                config_dir.mkdir(parents=True, exist_ok=True)
+                xdg_data_home.mkdir(parents=True, exist_ok=True)
+                expected_config = opencode_eval_config(request, agent_name)
+                config_path = config_dir / "opencode.json"
+                config_bytes = json.dumps(expected_config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                config_path.write_bytes(config_bytes)
+                env_replacement = isolated_opencode_env(context.env, xdg_config_home, xdg_data_home, request.model_record.provider)
+                if env_replacement is None:
+                    return inconclusive_result(request, "eval_opencode_auth_unavailable")
+            except OSError:
+                return inconclusive_result(request, "eval_opencode_config_write_failed")
+
             debug = self.runner.run(
                 ("opencode", "debug", "config", "--pure"),
                 timeout=_DEFAULT_TIMEOUT_SECONDS,
@@ -757,16 +763,13 @@ class OpenCodeAdapter:
                 stdout_limit=MAX_STDOUT_LIMIT_CHARS,
             )
             if debug.timed_out or debug.returncode != 0 or debug.stdout_truncated:
-                reason = cleanup() or "eval_opencode_effective_config_mismatch"
-                return inconclusive_result(request, reason, elapsed_ms=debug.elapsed_ms)
+                return inconclusive_result(request, "eval_opencode_effective_config_mismatch", elapsed_ms=debug.elapsed_ms)
             try:
                 effective = json.loads(debug.stdout)
             except json.JSONDecodeError:
-                reason = cleanup() or "eval_opencode_effective_config_mismatch"
-                return inconclusive_result(request, reason, elapsed_ms=debug.elapsed_ms)
+                return inconclusive_result(request, "eval_opencode_effective_config_mismatch", elapsed_ms=debug.elapsed_ms)
             if not effective_config_matches(effective, expected_config, agent_name):
-                reason = cleanup() or "eval_opencode_effective_config_mismatch"
-                return inconclusive_result(request, reason, elapsed_ms=debug.elapsed_ms)
+                return inconclusive_result(request, "eval_opencode_effective_config_mismatch", elapsed_ms=debug.elapsed_ms)
 
             argv = [
                 "opencode",
@@ -782,16 +785,11 @@ class OpenCodeAdapter:
             argv.extend(("--agent", agent_name, "--dir", str(request.workspace.root), request.task))
             run = self.runner.run(tuple(argv), timeout=request.timeout, cwd=request.workspace.root, env_replacement=env_replacement, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
             if run.timed_out:
-                reason = cleanup() or "eval_timeout"
-                return replace(inconclusive_result(request, reason, elapsed_ms=run.elapsed_ms), status="HANG" if reason == "eval_timeout" else "INCONCLUSIVE")
+                return replace(inconclusive_result(request, "eval_timeout", elapsed_ms=run.elapsed_ms), status="HANG")
             if run.stdout_truncated:
-                reason = cleanup() or "eval_truncated_audit_stream"
-                return inconclusive_result(request, reason, elapsed_ms=run.elapsed_ms)
+                return inconclusive_result(request, "eval_truncated_audit_stream", elapsed_ms=run.elapsed_ms)
             if run.returncode != 0:
                 diagnostic = "\n".join(part for part in (run.stderr, run.stdout) if part)
-                cleanup_reason = cleanup()
-                if cleanup_reason:
-                    return inconclusive_result(request, cleanup_reason, elapsed_ms=run.elapsed_ms)
                 if re.search(r"rate.?limit|quota", diagnostic, re.IGNORECASE):
                     return inconclusive_result(request, "eval_rate_limited", elapsed_ms=run.elapsed_ms)
                 return inconclusive_result(request, "eval_runtime_nonzero", elapsed_ms=run.elapsed_ms)
@@ -800,34 +798,39 @@ class OpenCodeAdapter:
             parsed = parse_opencode_eval_events(run.stdout, request.workspace, parse_fixture)
             role_result = result_from_parsed(request, parsed, run.elapsed_ms)
             if role_result.status == "INCONCLUSIVE":
-                cleanup_reason = cleanup()
-                if cleanup_reason:
-                    return inconclusive_result(request, cleanup_reason, elapsed_ms=run.elapsed_ms)
                 return role_result
 
-            command_runs = run_manifest_commands(
-                self.runner,
-                request.workspace,
-                request.fixture,
-                request.workspace.sandbox_attestation,
-                timeout=request.timeout,
-                env={},
-            )
+            try:
+                command_runs = run_manifest_commands(
+                    self.runner,
+                    request.workspace,
+                    request.fixture,
+                    request.workspace.sandbox_attestation,
+                    timeout=request.timeout,
+                    env={},
+                )
+            except ValueError as exc:
+                return inconclusive_result(request, str(exc) or "eval_invalid_command_audit", elapsed_ms=run.elapsed_ms)
             required_ids = {command.command_id for command in request.fixture.allowed_commands}
             successful_ids = {audit.command_id for audit in command_runs if audit.exit_code == 0}
-            if required_ids and not required_ids.issubset(successful_ids):
+            timed_out_ids = {audit.command_id for audit in command_runs if audit.exit_code is None}
+            if timed_out_ids:
+                role_result = append_command_audits(role_result, command_runs, status="HANG", reason_codes=("eval_timeout",))
+            elif required_ids and not required_ids.issubset(successful_ids):
                 role_result = append_command_audits(role_result, command_runs, status="FAIL", reason_codes=("eval_required_command_failed",))
             else:
                 role_result = append_command_audits(role_result, command_runs, status="PASS", reason_codes=())
             diff = self.runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=10, cwd=request.workspace.root, env_replacement=minimal_env, stdout_limit=None)
-            role_result = with_changed_paths_result(role_result, changed_paths_from_git_status(diff, request.workspace))
-            cleanup_reason = cleanup()
-            if cleanup_reason:
-                return inconclusive_result(request, cleanup_reason, elapsed_ms=role_result.elapsed_ms)
-            return role_result
+            return with_changed_paths_result(role_result, changed_paths_from_git_status(diff, request.workspace))
+
+        try:
+            final_result = evaluate_once()
         except Exception:
-            reason = cleanup() or "eval_opencode_runtime_exception"
-            return inconclusive_result(request, reason)
+            final_result = inconclusive_result(request, "eval_opencode_runtime_exception")
+        cleanup_reason = cleanup()
+        if cleanup_reason:
+            final_result = with_cleanup_failure(final_result, cleanup_reason)
+        return final_result
 
     def reload_semantics(self, context: RuntimeContext) -> dict[str, Any]:
         return {

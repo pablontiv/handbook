@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -25,7 +26,10 @@ _STABLE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 _ALLOWED_BUILTIN_TOOLS = frozenset({"read", "write", "edit", "bash", "grep", "find", "ls"})
 _SECRET_ENV_RE = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|COOKIE|AUTHORIZATION|CREDENTIAL", re.IGNORECASE)
 _REQUIRED_SANDBOX_TESTS = frozenset({"workspace_write", "outside_read_denied", "secret_env_denied", "network_denied"})
-_KNOWN_CAPABILITY_PROBE_PREFIXES = ("capability:",)
+_SUPPORTED_SANDBOX_BACKENDS = frozenset({"sandbox-exec", "bwrap"})
+_CAPABILITY_PROBE_REGISTRY = {
+    "custom_safe": frozenset({"capability:custom_safe:confined-tool-v1"}),
+}
 _MAX_AUDIT_ITEMS = 128
 _MAX_AUDIT_TEXT = 240
 _MAX_ELAPSED_MS = 24 * 60 * 60 * 1000
@@ -293,10 +297,13 @@ def unsupported_custom_tools(agent: AgentContract) -> tuple[str, ...]:
 
 def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace) -> SandboxAttestation | None:
     root = _resolved(workspace.root)
+    outside: Path | None = None
     try:
         root.mkdir(parents=True, exist_ok=True)
-        outside = root.parent / f".model-optimizer-outside-{workspace.token}"
-        outside.write_text("outside-sentinel", encoding="utf-8")
+        fd, outside_name = tempfile.mkstemp(prefix=f".model-optimizer-outside-{workspace.token}-", dir=str(root.parent), text=True)
+        outside = Path(outside_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("outside-sentinel")
     except OSError:
         return None
     probe_scripts: tuple[tuple[str, tuple[str, ...], str], ...] = (
@@ -306,7 +313,7 @@ def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace) -> Sandbox
         ("network_denied", ("python3", "-c", "import socket; s=socket.socket();\ntry:\n s.bind(('127.0.0.1', 0)); raise SystemExit(9)\nexcept OSError:\n print('denied')"), "denied"),
     )
     try:
-        for backend in ("sandbox-exec", "bwrap", "docker"):
+        for backend in ("sandbox-exec", "bwrap"):
             executable = shutil.which(backend)
             if executable is None:
                 continue
@@ -320,7 +327,15 @@ def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace) -> Sandbox
                     failed = True
                     break
                 status = "PASS" if result.returncode == 0 and not result.timed_out and not result.stdout_truncated and expected in result.stdout else "FAIL"
-                probe_results.append(f"{name}:{status}:{_digest_text(result.stdout + result.stderr)}")
+                outcome = {
+                    "argv_digest": _digest_text(json.dumps(list(argv), sort_keys=True, separators=(",", ":"))),
+                    "exit_code": result.returncode,
+                    "timed_out": result.timed_out,
+                    "stdout_truncated": result.stdout_truncated,
+                    "stderr_truncated": result.stderr_truncated,
+                    "output_digest": _digest_text(result.stdout + result.stderr),
+                }
+                probe_results.append(f"{name}:{status}:{_digest_text(json.dumps(outcome, sort_keys=True, separators=(",", ":"), default=str))}")
                 if status != "PASS":
                     failed = True
                     break
@@ -339,10 +354,11 @@ def select_sandbox_backend(runner: Any, workspace: PreparedWorkspace) -> Sandbox
                 executable_identity=executable_identity,
             )
     finally:
-        try:
-            outside.unlink()
-        except FileNotFoundError:
-            pass
+        if outside is not None:
+            try:
+                outside.unlink()
+            except FileNotFoundError:
+                pass
     return None
 
 
@@ -360,10 +376,13 @@ def run_manifest_commands(
         return ()
     root = _resolved(workspace.root)
     audits: list[CommandAudit] = []
-    for command in fixture.allowed_commands[:_MAX_AUDIT_ITEMS]:
+    if len(fixture.allowed_commands) > _MAX_AUDIT_ITEMS:
+        raise ValueError("eval_audit_too_large")
+    for command in fixture.allowed_commands:
         argv = sandbox_argv(backend_name, root, command.argv)
         result = runner.run(argv, timeout=timeout, cwd=workspace.root, env_replacement=_scrubbed_env(env or {}), stdout_limit=MAX_STDOUT_LIMIT_CHARS)
-        audits.append(CommandAudit(command.command_id, result.returncode, min(result.elapsed_ms, _MAX_ELAPSED_MS), backend_name))
+        audit = validate_command_audit(CommandAudit(command.command_id, None if result.timed_out else result.returncode, result.elapsed_ms, backend_name))
+        audits.append(audit)
     return tuple(audits)
 
 
@@ -371,8 +390,6 @@ def sandbox_argv(backend: str | None, root: Path, command_argv: Sequence[str]) -
     command = tuple(command_argv)
     if backend is None:
         raise ValueError("eval_sandbox_unavailable")
-    if backend == "docker":
-        return ("docker", "run", "--rm", "--network", "none", "-v", f"{root}:/workspace", "-w", "/workspace", "python:3", *command)
     if backend == "bwrap":
         return ("bwrap", "--unshare-net", "--bind", str(root), str(root), "--chdir", str(root), *command)
     if backend == "sandbox-exec":
@@ -418,18 +435,20 @@ def changed_paths_from_git_status(result: CompletedCommand, workspace: PreparedW
         status = record[:2]
         candidate = record[3:]
         index += 1
-        if status[0] == "R" or status[1] == "R":
+        candidates = [candidate]
+        if status[0] in {"R", "C"} or status[1] in {"R", "C"}:
             if index >= len(fields):
                 return ChangedPathsResult("INCONCLUSIVE", (), ("eval_changed_paths_invalid",))
-            candidate = fields[index]
+            candidates.append(fields[index])
             index += 1
-        normalized = _normalize_workspace_path(workspace, candidate)
-        if normalized is None or not _bounded_audit_text(normalized):
-            return ChangedPathsResult("INCONCLUSIVE", (), ("eval_changed_paths_invalid",))
-        if normalized not in paths:
-            if len(paths) >= _MAX_AUDIT_ITEMS:
-                return ChangedPathsResult("INCONCLUSIVE", (), ("eval_changed_paths_too_large",))
-            paths.append(normalized)
+        for item in candidates:
+            normalized = _normalize_workspace_path(workspace, item)
+            if normalized is None or not _bounded_audit_text(normalized) or not _valid_utf8_text(normalized):
+                return ChangedPathsResult("INCONCLUSIVE", (), ("eval_changed_paths_invalid",))
+            if normalized not in paths:
+                if len(paths) >= _MAX_AUDIT_ITEMS:
+                    return ChangedPathsResult("INCONCLUSIVE", (), ("eval_changed_paths_too_large",))
+                paths.append(normalized)
     return ChangedPathsResult("PASS", tuple(paths))
 
 
@@ -438,8 +457,31 @@ def changed_paths_from_git_diff(result: CompletedCommand, workspace: PreparedWor
 
 
 def append_command_audits(result: RoleEvalResult, command_runs: tuple[CommandAudit, ...], status: str | None = None, reason_codes: tuple[str, ...] | None = None) -> RoleEvalResult:
-    audit = replace(result.audit, command_runs=result.audit.command_runs + command_runs)
+    try:
+        validated_existing = tuple(validate_command_audit(item) for item in result.audit.command_runs)
+        validated_new = tuple(validate_command_audit(item) for item in command_runs)
+        combined = validated_existing + validated_new
+        if len(combined) > _MAX_AUDIT_ITEMS:
+            raise ValueError("eval_audit_too_large")
+    except ValueError as exc:
+        reasons = tuple(dict.fromkeys((*result.reason_codes, str(exc) or "eval_invalid_command_audit")))
+        return replace(result, status="INCONCLUSIVE", reason_codes=reasons)
+    audit = replace(result.audit, command_runs=combined)
     return replace(result, audit=audit, status=status or result.status, reason_codes=reason_codes if reason_codes is not None else result.reason_codes)
+
+
+def validate_command_audit(audit: CommandAudit) -> CommandAudit:
+    if not isinstance(audit, CommandAudit):
+        raise ValueError("eval_invalid_command_audit")
+    if not isinstance(audit.command_id, str) or not _STABLE_ID_RE.fullmatch(audit.command_id) or not _bounded_audit_text(audit.command_id):
+        raise ValueError("eval_invalid_command_audit")
+    if audit.exit_code is not None and not (isinstance(audit.exit_code, int) and not isinstance(audit.exit_code, bool) and 0 <= audit.exit_code <= 255):
+        raise ValueError("eval_invalid_command_audit")
+    if not (isinstance(audit.elapsed_ms, int) and not isinstance(audit.elapsed_ms, bool) and 0 <= audit.elapsed_ms <= _MAX_ELAPSED_MS):
+        raise ValueError("eval_invalid_command_audit")
+    if not isinstance(audit.sandbox_backend, str) or not _STABLE_ID_RE.fullmatch(audit.sandbox_backend) or not _bounded_audit_text(audit.sandbox_backend):
+        raise ValueError("eval_invalid_command_audit")
+    return audit
 
 
 def canonical_fixture_digest(fixture: FixturePolicy) -> str:
@@ -514,6 +556,8 @@ def effective_config_matches(actual: Any, expected: Mapping[str, Any], agent_nam
     if not isinstance(actual, Mapping):
         return False
     expected_safe_defaults = {
+        "mode": {},
+        "username": "unknown",
         "plugin": [],
         "plugins": [],
         "instructions": [],
@@ -559,8 +603,7 @@ def isolated_opencode_env(context_env: Mapping[str, str], xdg_config_home: Path,
         if value:
             env[key] = value
             preserved = True
-    auth_file = Path(env["XDG_DATA_HOME"]) / "opencode" / "auth.json" if "XDG_DATA_HOME" in env else None
-    if not preserved and (auth_file is None or not auth_file.exists()):
+    if not preserved:
         return None
     if "PATH" in os.environ:
         env["PATH"] = os.environ["PATH"]
@@ -618,6 +661,9 @@ def _parse_eval_events(text: str, workspace: PreparedWorkspace, fixture: Fixture
         if event.get("truncated") is True:
             _append_unique(reason_codes, "eval_truncated_audit_stream")
         event_type = event.get("type")
+        if event_type == "timeout" or event.get("timed_out") is True:
+            _append_unique(reason_codes, "eval_timeout")
+            continue
         if event_type == "error":
             detail = json.dumps(event.get("error", event), sort_keys=True, default=str)
             _append_unique(reason_codes, "eval_rate_limited" if re.search(r"rate.?limit|quota", detail, re.IGNORECASE) else "eval_runtime_error")
@@ -717,7 +763,9 @@ def _parse_pi_runtime_event(
             _append_unique(reason_codes, "eval_audit_too_large")
             return
         command_runs.append(audit)
-        if audit.exit_code == 0:
+        if audit.exit_code is None:
+            _append_unique(reason_codes, "eval_timeout")
+        elif audit.exit_code == 0:
             saw_required_success.add(audit.command_id)
 
 
@@ -766,7 +814,9 @@ def _parse_opencode_runtime_event(
                 _append_unique(reason_codes, "eval_audit_too_large")
                 return outside
             command_runs.append(audit)
-            if audit.exit_code == 0:
+            if audit.exit_code is None:
+                _append_unique(reason_codes, "eval_timeout")
+            elif audit.exit_code == 0:
                 saw_required_success.add(audit.command_id)
         else:
             _append_unique(reason_codes, "eval_missing_required_command_audit")
@@ -790,16 +840,23 @@ def _command_audit_from_details(value: Any, default_backend: str | None) -> Comm
     if not isinstance(command_id, str) or not _STABLE_ID_RE.fullmatch(command_id) or not _bounded_audit_text(command_id):
         return None
     exit_code_value = value.get("exit_code")
-    if not (isinstance(exit_code_value, int) and not isinstance(exit_code_value, bool) and 0 <= exit_code_value <= 255):
+    timed_out = value.get("timed_out") is True
+    if exit_code_value is None and timed_out:
+        exit_code = None
+    elif isinstance(exit_code_value, int) and not isinstance(exit_code_value, bool) and 0 <= exit_code_value <= 255:
+        exit_code = exit_code_value
+    else:
         return None
     elapsed_value = value.get("elapsed_ms")
     if not (isinstance(elapsed_value, int) and not isinstance(elapsed_value, bool) and 0 <= elapsed_value <= _MAX_ELAPSED_MS):
         return None
     backend_value = value.get("sandbox_backend")
-    backend = backend_value if isinstance(backend_value, str) else (default_backend or "unknown")
-    if not _STABLE_ID_RE.fullmatch(backend) or not _bounded_audit_text(backend):
+    if not isinstance(backend_value, str):
         return None
-    return CommandAudit(command_id, exit_code_value, elapsed_value, backend)
+    try:
+        return validate_command_audit(CommandAudit(command_id, exit_code, elapsed_value, backend_value))
+    except ValueError:
+        return None
 
 
 def _validate_marker(workspace: PreparedWorkspace, fixture: FixturePolicy) -> None:
@@ -829,7 +886,7 @@ def _validate_sandbox_attestation(workspace: PreparedWorkspace) -> None:
     if attestation is None:
         raise ValueError("eval_sandbox_unavailable")
     root = str(_resolved(workspace.root))
-    if attestation.backend not in {"sandbox-exec", "bwrap", "docker"}:
+    if attestation.backend not in _SUPPORTED_SANDBOX_BACKENDS:
         raise ValueError("eval_sandbox_unknown_backend")
     if attestation.workspace_root != root or attestation.workspace_token != workspace.token:
         raise ValueError("eval_sandbox_attestation_mismatch")
@@ -872,7 +929,7 @@ def _has_fresh_pass_attestation(tool_name: str, request: RoleEvalRequest) -> boo
     for attestation in request.fixture.capability_attestations:
         if attestation.tool_name != tool_name or attestation.status != "PASS":
             continue
-        if not any(attestation.probe_id.startswith(prefix) for prefix in _KNOWN_CAPABILITY_PROBE_PREFIXES):
+        if attestation.probe_id not in _CAPABILITY_PROBE_REGISTRY.get(tool_name, frozenset()):
             continue
         if attestation.probe_digest != capability_probe_digest(request, tool_name, attestation.probe_id):
             continue
@@ -963,7 +1020,15 @@ def _utc_now_text() -> str:
 
 
 def _bounded_audit_text(value: str, limit: int = _MAX_AUDIT_TEXT) -> bool:
-    return isinstance(value, str) and 0 < len(value) <= limit and "\x00" not in value
+    return isinstance(value, str) and 0 < len(value) <= limit and "\x00" not in value and _valid_utf8_text(value)
+
+
+def _valid_utf8_text(value: str) -> bool:
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _executable_identity(executable: str, backend: str) -> str:

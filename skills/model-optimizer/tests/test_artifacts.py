@@ -11,6 +11,7 @@ from unittest import mock
 
 import helper.artifacts as artifacts_module
 from helper.artifacts import (
+    byte_inventory,
     canonical_bytes,
     digest_json,
     inventory_with_digest,
@@ -34,6 +35,22 @@ from tests.support import assert_test_path
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_byte_inventory_captures_before_after_config_boundaries(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_dir = root / ".config" / "opencode"
+            config_dir.mkdir(parents=True)
+            (config_dir / "opencode.json").write_text('{"permission":{"*":"deny"}}', encoding="utf-8")
+            missing = root / ".pi" / "agent"
+            before = byte_inventory((config_dir, missing))
+            after = byte_inventory((config_dir, missing))
+        self.assertEqual(before, after)
+        self.assertEqual(before[0]["kind"], "directory")
+        self.assertEqual(before[0]["file_count"], 1)
+        self.assertTrue(str(before[0]["digest"]).startswith("sha256:"))
+        self.assertEqual(before[1]["kind"], "missing")
+        self.assertIsNone(before[1]["digest"])
+
     def test_canonical_digest_ignores_mapping_insertion_order(self):
         self.assertEqual(canonical_bytes({"b": 2, "a": 1}), b'{"a":1,"b":2}')
         self.assertEqual(digest_json({"b": 2, "a": 1}), digest_json({"a": 1, "b": 2}))

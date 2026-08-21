@@ -108,6 +108,14 @@ class CandidateEvidence:
     median_elapsed_ms: int | None
     metered_cost: float | None
     incumbent: bool = False
+    infrastructure_status: str = "SAFE"
+    infrastructure_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.infrastructure_status not in {"SAFE", "UNSAFE", "UNAVAILABLE", "INCONCLUSIVE"}:
+            raise ValueError("candidate_infrastructure_status_invalid")
+        if len(self.infrastructure_reasons) > 16 or any(not isinstance(reason, str) or not _SAFE_NAME_RE.fullmatch(reason) for reason in self.infrastructure_reasons):
+            raise ValueError("candidate_infrastructure_reasons_invalid")
 
 
 @dataclass(frozen=True)
@@ -243,6 +251,9 @@ def choose_mapping(
     incumbent: RouteKey | None,
 ) -> MappingDecision:
     eligible = shortlist_candidates(requirements, candidates, incumbent, limit=len(candidates) or 1)
+    unsafe_infrastructure = _unsafe_infrastructure_reasons(eligible)
+    if unsafe_infrastructure:
+        return MappingDecision("ABSTAIN", None, None, unsafe_infrastructure)
     if not eligible:
         return MappingDecision("ABSTAIN", None, None, ("no_eligible_candidates",))
     incumbent_candidate = next((candidate for candidate in eligible if incumbent is not None and candidate.route == incumbent), None)
@@ -263,6 +274,17 @@ def choose_mapping(
     if needs_more_evidence:
         return MappingDecision("NEEDS_MORE_EVIDENCE", incumbent_candidate.route, None, ("one_fixture_tie",))
     return MappingDecision("NO_CHANGE", incumbent_candidate.route, None, ("incumbent_retained",))
+
+
+def _unsafe_infrastructure_reasons(candidates: Sequence[CandidateEvidence]) -> tuple[str, ...]:
+    reasons: list[str] = []
+    for candidate in candidates:
+        if candidate.infrastructure_status == "SAFE" and not candidate.infrastructure_reasons:
+            continue
+        for reason in candidate.infrastructure_reasons or (candidate.infrastructure_status.lower(),):
+            if reason not in reasons:
+                reasons.append(reason)
+    return tuple(reasons)
 
 
 def _discover_pi_agent_contracts(home: Path, cwd: Path, environ: Mapping[str, str]) -> tuple[AgentContract, ...]:

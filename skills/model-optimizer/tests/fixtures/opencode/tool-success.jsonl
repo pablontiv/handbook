@@ -1,0 +1,2 @@
+{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}
+{"type":"tool_use","part":{"type":"tool","tool":"bash","state":{"status":"completed","metadata":{"command_id":"cmd-test","exit_code":0,"elapsed_ms":12,"sandbox_backend":"bwrap"}}}}

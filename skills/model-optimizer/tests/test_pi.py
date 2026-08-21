@@ -503,12 +503,12 @@ ok-provider     ok-model    1K       2K       yes       no
             "secret_env_denied:PASS:sha256:" + "3" * 64,
             "network_denied:PASS:sha256:" + "4" * 64,
         )
-        executable_identity = "docker:/fake/docker:1:2:3"
+        executable_identity = "bwrap:/fake/bwrap:1:2:3"
         workspace = PreparedWorkspace(workspace_root, "token-pi", SandboxAttestation(
-            backend="docker",
+            backend="bwrap",
             workspace_root=str(workspace_root.resolve()),
             workspace_token="token-pi",
-            profile_digest=sandbox_attestation_digest("docker", workspace_root, "token-pi", executable_identity, probe_results),
+            profile_digest=sandbox_attestation_digest("bwrap", workspace_root, "token-pi", executable_identity, probe_results),
             observed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
             probe_results=probe_results,
@@ -561,11 +561,19 @@ ok-provider     ok-model    1K       2K       yes       no
         )
         return RoleEvalRequest(route, model, agent, requirements, workspace, fixture, "Fix the fixture", 30)
 
+    def test_confined_extension_uses_lstat_and_never_recurses_through_symlinks(self):
+        extension = (Path(__file__).parents[1] / "evals" / "pi-confined-tools.ts").read_text(encoding="utf-8")
+        self.assertIn("fs.lstatSync(resolved)", extension)
+        self.assertIn("eval_path_missing_or_dangling_symlink", extension)
+        self.assertIn("await fsp.lstat(item)", extension)
+        self.assertIn("if (stat.isSymbolicLink()) return", extension)
+        self.assertIn("requireAllowed(real, allowedRead", extension)
+
     def test_role_eval_constructs_confined_pi_command_and_parses_audit(self):
         request = self._role_eval_request()
         events = "\n".join((
             json.dumps({"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
-            json.dumps({"type": "tool_execution_end", "toolCallId": "call-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 10, "sandbox_backend": "docker"}}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "call-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 10, "sandbox_backend": "bwrap"}}}),
             json.dumps({"type": "tool_execution_start", "toolCallId": "call-2", "toolName": "write", "args": {"path": "src/out.txt"}}),
             json.dumps({"type": "tool_execution_end", "toolCallId": "call-2", "toolName": "write", "isError": False, "result": {"details": {}}}),
         ))
@@ -586,6 +594,14 @@ ok-provider     ok-model    1K       2K       yes       no
         self.assertEqual(result.audit.changed_paths, ("src/out.txt",))
         self.assertEqual(runner.stdout_limits[0], MAX_STDOUT_LIMIT_CHARS)
         self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"))
+
+    def test_role_eval_runtime_timeout_is_hang_boundary(self):
+        request = self._role_eval_request()
+        timeout = CompletedCommand((), None, "", "", 31, True, False, False)
+        runner = FakeRunner((_command("0.84.2\n"), timeout))
+        result = PiAdapter(runner).role_eval(request, self.context)
+        self.assertEqual(result.status, "HANG")
+        self.assertIn("eval_timeout", result.reason_codes)
 
     def test_role_eval_unsupported_custom_tool_fails_closed_without_ambient_extension(self):
         request = self._role_eval_request()

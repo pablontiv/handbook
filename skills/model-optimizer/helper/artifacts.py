@@ -69,6 +69,34 @@ def load_health(path: Path) -> HealthArtifact:
         raise ValueError("artifact_invalid_shape") from None
 
 
+def byte_inventory(paths: tuple[Path, ...]) -> tuple[dict[str, Any], ...]:
+    """Return a bounded before/after byte inventory for runtime config boundaries."""
+    records: list[dict[str, Any]] = []
+    for path in paths:
+        target = _resolved(path)
+        if target.is_dir():
+            digest = hashlib.sha256()
+            total = 0
+            count = 0
+            for child in sorted(item for item in target.rglob("*") if item.is_file() and not item.is_symlink()):
+                try:
+                    data = child.read_bytes()
+                except OSError:
+                    continue
+                digest.update(str(child.relative_to(target)).encode("utf-8", "surrogateescape"))
+                digest.update(b"\0")
+                digest.update(data)
+                total += len(data)
+                count += 1
+            records.append({"path": str(target), "exists": True, "kind": "directory", "file_count": count, "byte_count": total, "digest": "sha256:" + digest.hexdigest()})
+        elif target.exists() and not target.is_symlink():
+            data = target.read_bytes()
+            records.append({"path": str(target), "exists": True, "kind": "file", "file_count": 1, "byte_count": len(data), "digest": "sha256:" + hashlib.sha256(data).hexdigest()})
+        else:
+            records.append({"path": str(target), "exists": False, "kind": "missing", "file_count": 0, "byte_count": 0, "digest": None})
+    return tuple(records)
+
+
 def reject_runtime_config_output(path: Path, *, home: Path, cwd: Path, inventory_input: Path | None = None) -> None:
     output = _resolved(path)
     blocked_trees = (

@@ -21,6 +21,9 @@ from helper.evaluator import (
     SandboxAttestation,
     canonical_fixture_digest,
     prepare_workspace_marker,
+    effective_config_matches,
+    isolated_opencode_env,
+    opencode_eval_config,
     sandbox_attestation_digest,
 )
 from helper.models import HealthStatus, ModelRecord, ReadinessStatus, RuntimeKind
@@ -910,12 +913,12 @@ openai/gpt-second
             "secret_env_denied:PASS:sha256:" + "3" * 64,
             "network_denied:PASS:sha256:" + "4" * 64,
         )
-        executable_identity = "docker:/fake/docker:1:2:3"
+        executable_identity = "bwrap:/fake/bwrap:1:2:3"
         workspace = PreparedWorkspace(workspace_root, "token-opencode", SandboxAttestation(
-            backend="docker",
+            backend="bwrap",
             workspace_root=str(workspace_root.resolve()),
             workspace_token="token-opencode",
-            profile_digest=sandbox_attestation_digest("docker", workspace_root, "token-opencode", executable_identity, probe_results),
+            profile_digest=sandbox_attestation_digest("bwrap", workspace_root, "token-opencode", executable_identity, probe_results),
             observed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
             probe_results=probe_results,
@@ -968,6 +971,51 @@ openai/gpt-second
         )
         return RoleEvalRequest(route, model, agent, requirements, workspace, fixture, "Fix the fixture", 30)
 
+    def test_opencode_provider_auth_matrix_preserves_only_exact_route_provider_auth(self):
+        xdg_config = self.root / "xdg-config"
+        xdg_data = self.root / "xdg-data"
+        env = {
+            "OPENAI_API_KEY": "openai-token",
+            "OPENCODE_TOKEN": "opencode-token",
+            "NAN_API_KEY": "nan-token",
+            "MINIMAX_API_KEY": "minimax-token",
+            "ZAI_API_KEY": "zai-token",
+            "OPENCODE_CONFIG_CONTENT": "hostile",
+        }
+        openai = isolated_opencode_env(env, xdg_config, xdg_data, "openai")
+        self.assertEqual(openai.get("OPENAI_API_KEY"), "openai-token")
+        self.assertNotIn("OPENCODE_TOKEN", openai)
+        self.assertNotIn("OPENCODE_CONFIG_CONTENT", openai)
+        nan = isolated_opencode_env(env, xdg_config, xdg_data, "nan")
+        self.assertEqual(nan.get("OPENCODE_TOKEN"), "opencode-token")
+        self.assertEqual(nan.get("NAN_API_KEY"), "nan-token")
+        self.assertNotIn("OPENAI_API_KEY", nan)
+        self.assertIsNone(isolated_opencode_env(env, xdg_config, xdg_data, "unknown-provider"))
+        self.assertIsNone(isolated_opencode_env({}, xdg_config, xdg_data, "openai"))
+
+    def test_effective_config_matrix_rejects_execution_affecting_top_level_drift(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "d" * 32
+        expected = opencode_eval_config(request, agent_name)
+        safe = {**expected, "mode": {}, "username": "unknown", "plugin": [], "instructions": [], "tool": {}, "provider": {}, "model": {}, "share": "manual", "autoshare": False, "compaction": {}}
+        self.assertTrue(effective_config_matches(safe, expected, agent_name))
+        for key, value in {
+            "mode": {"build": True},
+            "username": "attacker",
+            "plugin": ["ambient"],
+            "instructions": ["do unsafe thing"],
+            "tool": {"bash": "allow"},
+            "provider": {"openai": {}},
+            "model": {"openai/gpt": {}},
+            "share": "auto",
+            "autoshare": True,
+            "compaction": {"enabled": True},
+        }.items():
+            with self.subTest(key=key):
+                hostile = dict(safe)
+                hostile[key] = value
+                self.assertFalse(effective_config_matches(hostile, expected, agent_name))
+
     def test_role_eval_uses_isolated_pure_config_and_trusted_manifest_tests(self):
         request = self._role_eval_request()
         agent_name = "model-optimizer-eval-" + "a" * 32
@@ -1001,7 +1049,7 @@ openai/gpt-second
             "OPENAI_API_KEY": "runtime-auth-token",
         }
         context = RuntimeContext(home=self.root, cwd=self.context.cwd, env=original_env)
-        with patch("helper.adapters.opencode.secrets.token_hex", return_value="a" * 32), patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "docker" else None):
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="a" * 32), patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "bwrap" else None):
             result = OpenCodeAdapter(runner).role_eval(request, context)
         self.assertEqual(result.status, "PASS")
         self.assertEqual(context.env, original_env)
@@ -1022,8 +1070,38 @@ openai/gpt-second
         config_path = Path(debug_env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json"
         self.assertFalse(config_path.exists(), "isolated config root should be cleaned after role_eval")
         self.assertEqual(result.audit.command_runs[-1].command_id, "cmd-test")
-        self.assertEqual(runner.argv[3][:4], ("docker", "run", "--rm", "--network"))
+        self.assertEqual(runner.argv[3][0], "bwrap")
+        self.assertIn("--unshare-net", runner.argv[3])
         self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"))
+
+    def test_role_eval_manifest_timeout_is_hang(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "e" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {agent_name: {"description": "isolated model optimizer evaluation", "prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"*": "deny", "external_directory": "deny", "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"}, "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"}, "bash": "deny"}}},
+        }
+        manifest_timeout = CompletedCommand((), None, "", "", 31, True, False, False)
+        runner = EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload)), _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'), manifest_timeout, _command("?? src/out.txt\x00")))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="e" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "HANG")
+        self.assertIn("eval_timeout", result.reason_codes)
+
+    def test_role_eval_cleanup_failure_is_explicit_inconclusive_reason(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "f" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {agent_name: {"description": "isolated model optimizer evaluation", "prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"*": "deny", "external_directory": "deny", "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"}, "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"}, "bash": "deny"}}},
+        }
+        runner = EnvCapturingRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload)), _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'), _command("tests ok"), _command("?? src/out.txt\x00")))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="f" * 32), patch("helper.adapters.opencode.shutil.rmtree", side_effect=OSError("cleanup failed")):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_opencode_cleanup_failed", result.reason_codes)
 
     def test_role_eval_cleans_isolated_roots_when_debug_raises(self):
         request = self._role_eval_request()

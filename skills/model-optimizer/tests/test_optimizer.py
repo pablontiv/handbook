@@ -178,6 +178,8 @@ class SelectionPolicyTests(unittest.TestCase):
             metrics.get("median_elapsed_ms"),
             metrics.get("metered_cost"),
             incumbent,
+            metrics.get("infrastructure_status", "SAFE"),
+            metrics.get("infrastructure_reasons", ()),
         )
 
     def test_gate_candidate_enforces_mandatory_model_health_and_role_requirements(self):
@@ -282,6 +284,33 @@ class SelectionPolicyTests(unittest.TestCase):
         self.assertEqual(decision.status, "CHANGE")
         self.assertEqual(decision.selected_route, material.route)
         self.assertEqual(decision.selected_route.effort, "high")
+
+    def test_choose_mapping_abstains_on_essential_unsafe_infrastructure_including_incumbent(self):
+        role = self._role()
+        current_route = self._route("nan/current", "medium")
+        unsafe_current = self._candidate(
+            current_route,
+            self._model("nan/current"),
+            [self._fixture("one", 0.90), self._fixture("two", 0.90)],
+            True,
+            infrastructure_status="UNAVAILABLE",
+            infrastructure_reasons=("eval_sandbox_unavailable",),
+        )
+        challenger = self._candidate(self._route("nan/challenger", "high"), self._model("nan/challenger"), [self._fixture("one", 0.95), self._fixture("two", 0.95)])
+        decision = choose_mapping(role, (unsafe_current, challenger), current_route)
+        self.assertEqual(decision.status, "ABSTAIN")
+        self.assertEqual(decision.reasons, ("eval_sandbox_unavailable",))
+
+        unsafe_challenger = self._candidate(
+            self._route("nan/unsafe", "high"),
+            self._model("nan/unsafe"),
+            [self._fixture("one", 0.95), self._fixture("two", 0.95)],
+            infrastructure_status="INCONCLUSIVE",
+            infrastructure_reasons=("eval_opencode_auth_unavailable",),
+        )
+        decision = choose_mapping(role, (challenger, unsafe_challenger), None)
+        self.assertEqual(decision.status, "ABSTAIN")
+        self.assertEqual(decision.reasons, ("eval_opencode_auth_unavailable",))
 
     def test_choose_mapping_ignores_unsupported_aggregate_advantage(self):
         role = self._role()

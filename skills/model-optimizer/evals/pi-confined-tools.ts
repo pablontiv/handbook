@@ -48,7 +48,13 @@ function contains(root: string, candidate: string): boolean {
 function policyPaths(root: string, values: string[]): string[] {
   return values.map((value) => {
     const candidate = path.isAbsolute(value) ? path.resolve(value) : path.resolve(root, value);
-    const real = fs.existsSync(candidate) ? fs.realpathSync(candidate) : path.resolve(candidate);
+    let real = path.resolve(candidate);
+    try {
+      fs.lstatSync(candidate);
+      real = fs.realpathSync(candidate);
+    } catch (err: any) {
+      if (err && err.code !== "ENOENT") throw err;
+    }
     if (!contains(root, real)) throw new Error("eval_policy_path_escape");
     return real;
   });
@@ -57,6 +63,12 @@ function policyPaths(root: string, values: string[]): string[] {
 function resolveExisting(root: string, raw: string): string {
   const clean = raw.startsWith("@") ? raw.slice(1) : raw;
   const resolved = path.isAbsolute(clean) ? path.resolve(clean) : path.resolve(root, clean);
+  try {
+    fs.lstatSync(resolved);
+  } catch (err: any) {
+    if (err && err.code === "ENOENT") throw new Error("eval_path_missing_or_dangling_symlink");
+    throw err;
+  }
   const real = fs.realpathSync(resolved);
   if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
   return real;
@@ -72,17 +84,23 @@ function resolveProspective(root: string, raw: string): string {
   for (let index = 0; index < parts.length; index += 1) {
     const next = path.join(current, parts[index]);
     const isFinal = index === parts.length - 1;
-    if (fs.existsSync(next)) {
+    try {
       const stat = fs.lstatSync(next);
       if (stat.isSymbolicLink()) {
-        const real = fs.realpathSync(next);
+        let real: string;
+        try {
+          real = fs.realpathSync(next);
+        } catch {
+          throw new Error("eval_path_missing_or_dangling_symlink");
+        }
         if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
         if (!isFinal) current = real;
         else return real;
       } else {
         current = next;
       }
-    } else {
+    } catch (err: any) {
+      if (err && err.code !== "ENOENT") throw err;
       current = next;
     }
     if (!contains(root, path.resolve(current))) throw new Error("eval_path_outside_workspace");
@@ -100,17 +118,19 @@ function scrubbedEnv(): Record<string, string> {
   return env;
 }
 
-function smokeIfRequested(root: string, requested: Set<string>, allowedRead: string[]): void {
+function smokeEvidence(root: string, requested: Set<string>, allowedRead: string[], pi: ExtensionAPI, phase: string): void {
   const smokePath = process.env.PI_EVAL_SMOKE_FILE;
   if (!smokePath) return;
   const target = resolveProspective(root, smokePath);
-  let readProbe = "SKIP";
+  let helperProbe = "SKIP";
   if (requested.has("read") && allowedRead.length > 0) {
     const entries = fs.readdirSync(allowedRead[0]);
-    readProbe = Array.isArray(entries) ? "PASS" : "FAIL";
+    helperProbe = Array.isArray(entries) ? "PASS" : "FAIL";
   }
+  const activeTools = pi.getActiveTools().slice().sort();
+  const allTools = pi.getAllTools().map((tool) => tool.name).filter((name) => requested.has(name)).sort();
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, JSON.stringify({ factory: "PASS", registered_tools: [...requested].sort(), read_probe: readProbe }), "utf8");
+  fs.writeFileSync(target, JSON.stringify({ phase, active_tools: activeTools, extension_tools: allTools, helper_probe: helperProbe }), "utf8");
 }
 
 function shellWords(command: string): string[] {
@@ -163,6 +183,16 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
   for (const tool of requested) {
     if (!SUPPORTED_TOOLS.has(tool)) throw new Error(`eval_unsupported_tool:${tool}`);
   }
+
+  pi.registerCommand("model_optimizer_eval_smoke", {
+    description: "Record model-optimizer eval extension runtime smoke evidence",
+    async handler() {
+      smokeEvidence(root, requested, allowedRead, pi, "command");
+    },
+  });
+  pi.on("session_start", () => {
+    smokeEvidence(root, requested, allowedRead, pi, "session_start");
+  });
 
   if (requested.has("read")) {
     pi.registerTool({
@@ -261,15 +291,19 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
         const max = Math.max(1, Math.min(params.limit ?? 100, 1000));
         async function visit(item: string) {
           if (output.length >= max) return;
-          const stat = await fsp.stat(item);
+          const stat = await fsp.lstat(item);
+          if (stat.isSymbolicLink()) return;
+          const real = await fsp.realpath(item);
+          if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
+          requireAllowed(real, allowedRead, "eval_read_not_allowed");
           if (stat.isDirectory()) {
-            for (const entry of await fsp.readdir(item)) await visit(path.join(item, entry));
+            for (const entry of await fsp.readdir(real)) await visit(path.join(real, entry));
             return;
           }
-          const body = await fsp.readFile(item, "utf8").catch(() => "");
+          const body = await fsp.readFile(real, "utf8").catch(() => "");
           body.split("\n").forEach((line, index) => {
             const haystack = params.ignoreCase ? line.toLowerCase() : line;
-            if (output.length < max && haystack.includes(needle)) output.push(`${path.relative(root, item)}:${index + 1}:${line}`);
+            if (output.length < max && haystack.includes(needle)) output.push(`${path.relative(root, real)}:${index + 1}:${line}`);
           });
         }
         await visit(target);
@@ -291,12 +325,16 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
         const max = Math.max(1, Math.min(params.limit ?? 100, 1000));
         async function visit(item: string) {
           if (output.length >= max) return;
-          const stat = await fsp.stat(item);
+          const stat = await fsp.lstat(item);
+          if (stat.isSymbolicLink()) return;
+          const real = await fsp.realpath(item);
+          if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
+          requireAllowed(real, allowedRead, "eval_read_not_allowed");
           if (stat.isDirectory()) {
-            for (const entry of await fsp.readdir(item)) await visit(path.join(item, entry));
+            for (const entry of await fsp.readdir(real)) await visit(path.join(real, entry));
             return;
           }
-          const rel = path.relative(root, item);
+          const rel = path.relative(root, real);
           if (!params.pattern || rel.includes(params.pattern)) output.push(rel);
         }
         await visit(target);
@@ -304,6 +342,4 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
       },
     });
   }
-
-  smokeIfRequested(root, requested, allowedRead);
 }

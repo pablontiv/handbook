@@ -34,7 +34,7 @@ from helper.evaluator import (
 from helper.models import ModelRecord, RuntimeKind
 from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
 from helper.runner import CompletedCommand, CommandRunner
-from tests.support import FakeRunner, _command
+from tests.support import FakeRunner, _command, fixture_text
 
 
 class RecordingRunner(FakeRunner):
@@ -67,12 +67,12 @@ class EvaluatorContractTests(unittest.TestCase):
             "secret_env_denied:PASS:sha256:" + "3" * 64,
             "network_denied:PASS:sha256:" + "4" * 64,
         )
-        executable_identity = "docker:/fake/docker:1:2:3"
+        executable_identity = "bwrap:/fake/bwrap:1:2:3"
         self.workspace = PreparedWorkspace(self.workspace_root, "token-123", SandboxAttestation(
-            backend="docker",
+            backend="bwrap",
             workspace_root=str(self.workspace_root.resolve()),
             workspace_token="token-123",
-            profile_digest=sandbox_attestation_digest("docker", self.workspace_root, "token-123", executable_identity, probe_results),
+            profile_digest=sandbox_attestation_digest("bwrap", self.workspace_root, "token-123", executable_identity, probe_results),
             observed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
             self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
             probe_results=probe_results,
@@ -193,10 +193,13 @@ class EvaluatorContractTests(unittest.TestCase):
         prepare_workspace_marker(self.workspace, self.fixture)
         custom_reqs = replace(self.requirements, essential_custom_tools=("custom_safe",))
         self.assert_invalid(replace(self.request, requirements=custom_reqs), "eval_essential_custom_tool_unproven")
-        stale = CapabilityAttestation("custom_safe", "probe-1", "PASS", "2000-01-01T00:00:00Z", self.fixture.manifest_digest)
+        registered_probe = "capability:custom_safe:confined-tool-v1"
+        stale_time = (datetime.now(timezone.utc) - timedelta(days=2)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        stale = CapabilityAttestation("custom_safe", registered_probe, "PASS", stale_time, self.fixture.manifest_digest)
         stale_fixture = replace(self.fixture, capability_attestations=(stale,))
         self.assert_invalid(replace(self.request, requirements=custom_reqs, fixture=stale_fixture), "eval_essential_custom_tool_unproven")
-        future = CapabilityAttestation("custom_safe", "probe-1", "PASS", "2999-01-01T00:00:00Z", self.fixture.manifest_digest)
+        future_time = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        future = CapabilityAttestation("custom_safe", registered_probe, "PASS", future_time, self.fixture.manifest_digest)
         self.assert_invalid(replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(future,))), "eval_essential_custom_tool_unproven")
         unknown_probe = CapabilityAttestation(
             "custom_safe", "unknown-probe", "PASS",
@@ -204,7 +207,13 @@ class EvaluatorContractTests(unittest.TestCase):
             self.fixture.manifest_digest,
         )
         self.assert_invalid(replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(unknown_probe,))), "eval_essential_custom_tool_unproven")
-        probe_id = "capability:custom_safe"
+        arbitrary_prefix = CapabilityAttestation(
+            "custom_safe", "capability:custom_safe:attacker", "PASS",
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            capability_probe_digest(self.request, "custom_safe", "capability:custom_safe:attacker"),
+        )
+        self.assert_invalid(replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(arbitrary_prefix,))), "eval_essential_custom_tool_unproven")
+        probe_id = registered_probe
         fresh = CapabilityAttestation(
             "custom_safe", probe_id, "PASS",
             datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
@@ -230,33 +239,36 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertIn("eval_missing_required_command_audit", parsed.reason_codes)
         correlated = "\n".join((
             json.dumps({"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
-            json.dumps({"type": "tool_execution_end", "toolCallId": "call-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 22, "sandbox_backend": "docker"}}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "call-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 22, "sandbox_backend": "bwrap"}}}),
             json.dumps({"type": "tool_execution_start", "toolCallId": "call-2", "toolName": "write", "args": {"path": "src/out.txt"}}),
             json.dumps({"type": "tool_execution_end", "toolCallId": "call-2", "toolName": "write", "isError": False, "result": {"details": {}}}),
         ))
         parsed = parse_pi_eval_events(correlated, self.workspace, self.fixture)
         self.assertEqual(parsed.status, "PASS")
-        self.assertEqual(parsed.audit.command_runs, (CommandAudit("cmd-test", 0, 22, "docker"),))
+        self.assertEqual(parsed.audit.command_runs, (CommandAudit("cmd-test", 0, 22, "bwrap"),))
         self.assertEqual(parsed.audit.changed_paths, ("src/out.txt",))
 
     def test_parse_opencode_runtime_permission_and_tool_use_events(self):
-        permission = parse_opencode_eval_events(json.dumps({"type": "permission.asked", "permission": "bash"}), self.workspace, self.fixture)
-        self.assertEqual(permission.status, "INCONCLUSIVE")
-        self.assertIn("eval_permission_ask", permission.reason_codes)
-        events = "\n".join((
-            json.dumps({"type": "tool_use", "part": {"type": "tool", "tool": "edit", "state": {"status": "completed", "input": {"path": "src/out.txt"}}}}),
-            json.dumps({"type": "tool_use", "part": {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": "ok", "metadata": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 3, "sandbox_backend": "docker"}}}}),
-        ))
-        parsed = parse_opencode_eval_events(events, self.workspace, self.fixture)
+        for fixture_name in ("permission-asked.jsonl", "permission-v2-asked.jsonl"):
+            with self.subTest(fixture=fixture_name):
+                permission = parse_opencode_eval_events(fixture_text(f"opencode/{fixture_name}"), self.workspace, self.fixture)
+                self.assertEqual(permission.status, "INCONCLUSIVE")
+                self.assertIn("eval_permission_ask", permission.reason_codes)
+        parsed = parse_opencode_eval_events(fixture_text("opencode/tool-success.jsonl"), self.workspace, self.fixture)
         self.assertEqual(parsed.status, "PASS")
         self.assertEqual(parsed.audit.changed_paths, ("src/out.txt",))
+        failed = parse_opencode_eval_events(fixture_text("opencode/tool-failure.jsonl"), self.workspace, self.fixture)
+        self.assertEqual(failed.status, "FAIL")
+        rejected = parse_opencode_eval_events(fixture_text("opencode/cli-rejection.jsonl"), self.workspace, self.fixture)
+        self.assertEqual(rejected.status, "INCONCLUSIVE")
+        self.assertIn("eval_runtime_error", rejected.reason_codes)
 
     def test_parse_pi_eval_events_derives_audit_from_allowed_command_ids_not_boolean(self):
         text = "\n".join((
             json.dumps({"type": "tool_execution_start", "toolCallId": "read-1", "toolName": "read", "args": {"path": "allowed/input.txt"}}),
             json.dumps({"type": "tool_execution_end", "toolCallId": "read-1", "toolName": "read", "isError": False, "result": {"details": {}}}),
             json.dumps({"type": "tool_execution_start", "toolCallId": "bash-1", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
-            json.dumps({"type": "tool_execution_end", "toolCallId": "bash-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 22, "sandbox_backend": "docker"}}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "bash-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 22, "sandbox_backend": "bwrap"}}}),
             json.dumps({"type": "tool_execution_start", "toolCallId": "write-1", "toolName": "write", "args": {"path": "src/out.txt"}}),
             json.dumps({"type": "tool_execution_end", "toolCallId": "write-1", "toolName": "write", "isError": False, "result": {"details": {}}}),
             json.dumps({"type": "message_end", "message": {"role": "assistant", "content": "done", "tests_passed": False}}),
@@ -264,7 +276,7 @@ class EvaluatorContractTests(unittest.TestCase):
         parsed = parse_pi_eval_events(text, self.workspace, self.fixture)
         self.assertEqual(parsed.status, "PASS")
         self.assertEqual(parsed.audit.tool_names, ("bash", "read", "write"))
-        self.assertEqual(parsed.audit.command_runs, (CommandAudit("cmd-test", 0, 22, "docker"),))
+        self.assertEqual(parsed.audit.command_runs, (CommandAudit("cmd-test", 0, 22, "bwrap"),))
         self.assertEqual(parsed.audit.changed_paths, ("src/out.txt",))
         self.assertEqual(parsed.final_text, "")
 
@@ -277,7 +289,7 @@ class EvaluatorContractTests(unittest.TestCase):
         escaped = parse_pi_eval_events(json.dumps({"type": "tool_execution_start", "toolCallId": "read-escape", "toolName": "write", "args": {"path": "../secret"}}), self.workspace, self.fixture)
         self.assertEqual(escaped.audit.outside_workspace_attempts, 1)
         self.assertEqual(escaped.status, "INCONCLUSIVE")
-        truncated = parse_pi_eval_events(json.dumps({"type": "tool_execution_end", "toolCallId": "call", "toolName": "bash", "truncated": True, "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 1, "sandbox_backend": "docker"}}}), self.workspace, self.fixture)
+        truncated = parse_pi_eval_events(json.dumps({"type": "tool_execution_end", "toolCallId": "call", "toolName": "bash", "truncated": True, "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 1, "sandbox_backend": "bwrap"}}}), self.workspace, self.fixture)
         self.assertEqual(truncated.status, "INCONCLUSIVE")
         self.assertIn("eval_truncated_audit_stream", truncated.reason_codes)
 
@@ -291,21 +303,21 @@ class EvaluatorContractTests(unittest.TestCase):
 
     def test_sandbox_selection_self_tests_supported_fake_backend_and_scrubbed_manifest_runs(self):
         runner = RecordingRunner((_command("ok"), _command("denied"), _command("absent"), _command("denied"), _command("tests ok")))
-        with patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "docker" else None), patch("pathlib.Path.stat") as stat:
+        with patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "bwrap" else None), patch("pathlib.Path.stat") as stat:
             stat.return_value.st_ino = 1
             stat.return_value.st_mtime_ns = 2
             stat.return_value.st_size = 3
             backend = select_sandbox_backend(runner, self.workspace)
         self.assertIsNotNone(backend)
-        self.assertEqual(backend.backend, "docker")
+        self.assertEqual(backend.backend, "bwrap")
         self.assertEqual({item.split(":", 1)[0] for item in backend.probe_results}, {"workspace_write", "outside_read_denied", "secret_env_denied", "network_denied"})
         self.assertTrue(all(":PASS:" in item for item in backend.probe_results))
         audits = run_manifest_commands(runner, self.workspace, self.fixture, backend, timeout=5, env={"SECRET_SENTINEL": "must-not-leak", "PATH": os.environ.get("PATH", "")})
-        self.assertEqual(audits, (CommandAudit("cmd-test", 0, 1, "docker"),))
+        self.assertEqual(audits, (CommandAudit("cmd-test", 0, 1, "bwrap"),))
         self.assertEqual(runner.cwd_values[-1], self.workspace_root)
         self.assertNotIn("SECRET_SENTINEL", runner.env_replacements[-1])
-        self.assertIn("--network", runner.argv[-1])
-        self.assertIn("none", runner.argv[-1])
+        self.assertIn("--unshare-net", runner.argv[-1])
+        self.assertIn("--chdir", runner.argv[-1])
 
     def test_sandbox_unavailable_is_fail_closed_for_code_execution_fixture(self):
         runner = RecordingRunner(())
@@ -321,15 +333,40 @@ class EvaluatorContractTests(unittest.TestCase):
         failed = changed_paths_from_git_status(CompletedCommand((), 1, "", "fatal", 1, False), self.workspace)
         self.assertEqual(failed.status, "INCONCLUSIVE")
         self.assertIn("eval_changed_paths_unavailable", failed.reason_codes)
+        rename = changed_paths_from_git_status(_command("R  src/new.txt\x00src/old.txt\x00"), self.workspace)
+        self.assertEqual(rename, ChangedPathsResult("PASS", ("src/new.txt", "src/old.txt")))
+        copy = changed_paths_from_git_status(_command("C  src/copy.txt\x00src/original.txt\x00"), self.workspace)
+        self.assertEqual(copy, ChangedPathsResult("PASS", ("src/copy.txt", "src/original.txt")))
         invalid = changed_paths_from_git_status(_command("?? src/out.txt\n"), self.workspace)
         self.assertEqual(invalid.status, "INCONCLUSIVE")
+        invalid_utf8 = changed_paths_from_git_status(_command("?? src/\udcff.txt\x00"), self.workspace)
+        self.assertEqual(invalid_utf8.status, "INCONCLUSIVE")
         overlong = changed_paths_from_git_status(_command("?? " + "x" * 241 + "\x00"), self.workspace)
         self.assertEqual(overlong.status, "INCONCLUSIVE")
+
+    def test_parser_status_matrix_pass_fail_hang_inconclusive(self):
+        success = parse_pi_eval_events("\n".join((
+            json.dumps({"type": "tool_execution_start", "toolCallId": "ok", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "ok", "toolName": "bash", "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 1, "sandbox_backend": "bwrap"}}}),
+        )), self.workspace, self.fixture)
+        self.assertEqual(success.status, "PASS")
+        failure = parse_pi_eval_events("\n".join((
+            json.dumps({"type": "tool_execution_start", "toolCallId": "fail", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "fail", "toolName": "bash", "result": {"details": {"command_id": "cmd-test", "exit_code": 1, "elapsed_ms": 1, "sandbox_backend": "bwrap"}}}),
+        )), self.workspace, self.fixture)
+        self.assertEqual(failure.status, "FAIL")
+        hang = parse_pi_eval_events("\n".join((
+            json.dumps({"type": "tool_execution_start", "toolCallId": "hang", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "hang", "toolName": "bash", "result": {"details": {"command_id": "cmd-test", "exit_code": None, "timed_out": True, "elapsed_ms": 1, "sandbox_backend": "bwrap"}}}),
+        )), self.workspace, self.fixture)
+        self.assertEqual(hang.status, "HANG")
+        inconclusive = parse_pi_eval_events("{not-json", self.workspace, self.fixture)
+        self.assertEqual(inconclusive.status, "INCONCLUSIVE")
 
     def test_eval_status_semantics_and_bounded_audit_fail_closed(self):
         failed_command = "\n".join((
             json.dumps({"type": "tool_execution_start", "toolCallId": "bash-1", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
-            json.dumps({"type": "tool_execution_end", "toolCallId": "bash-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 1, "elapsed_ms": 22, "sandbox_backend": "docker"}}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "bash-1", "toolName": "bash", "isError": False, "result": {"details": {"command_id": "cmd-test", "exit_code": 1, "elapsed_ms": 22, "sandbox_backend": "bwrap"}}}),
         ))
         parsed = parse_pi_eval_events(failed_command, self.workspace, self.fixture)
         self.assertEqual(parsed.status, "FAIL")
@@ -342,6 +379,19 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertEqual(len(parsed.audit.tool_names), 128)
         self.assertNotIn("tool128", parsed.audit.tool_names)
         self.assertIn("eval_audit_too_large", parsed.reason_codes)
+
+    def test_append_command_audits_revalidates_total_without_clamping(self):
+        base = RoleEvalResult(
+            self.route, self.fixture.fixture_id, self.fixture.fixture_version, self.fixture.manifest_digest,
+            "PASS", 1, "", ToolAudit((), tuple(CommandAudit(f"cmd-{index}", 0, 1, "bwrap") for index in range(128)), (), 0, ()), 0, 0, 0, None, (),
+        )
+        from helper.evaluator import append_command_audits
+        too_many = append_command_audits(base, (CommandAudit("cmd-extra", 0, 1, "bwrap"),))
+        self.assertEqual(too_many.status, "INCONCLUSIVE")
+        self.assertIn("eval_audit_too_large", too_many.reason_codes)
+        invalid = append_command_audits(replace(base, audit=ToolAudit((), (), (), 0, ())), (CommandAudit("cmd-invalid", 999, 1, "bwrap"),))
+        self.assertEqual(invalid.status, "INCONCLUSIVE")
+        self.assertIn("eval_invalid_command_audit", invalid.reason_codes)
 
     def test_essential_eval_selection_policy_abstains_on_unsafe_infrastructure(self):
         result = RoleEvalResult(
