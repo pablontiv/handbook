@@ -42,6 +42,7 @@ class PiAdapterTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.context = RuntimeContext(home=self.root, cwd=self.root / "project", env={})
         self.context.cwd.mkdir()
+        self.real_pi_path = shutil.which("pi")
         self._which_patch = patch("helper.evaluator.shutil.which", return_value="/fake/bwrap")
         self._identity_patch = patch("helper.evaluator._executable_identity", return_value="bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64))
         self._which_patch.start()
@@ -630,7 +631,7 @@ ok-provider     ok-model    1K       2K       yes       no
         return RoleEvalRequest(route, model, agent, requirements, workspace, fixture, "Fix the fixture", 30)
 
     def _run_real_pi_smoke(self, workspace_root: Path, policy: dict[str, object], *, smoke_mode: str, smoke_read_path: str, tools: str = "read,grep,find") -> dict[str, object]:
-        if shutil.which("pi") is None:
+        if self.real_pi_path is None:
             self.skipTest("pi runtime is not available")
         extension_path = (Path(__file__).parents[1] / "evals" / "pi-confined-tools.ts").resolve()
         policy_path = workspace_root / ".model-optimizer-policy.json"
@@ -652,7 +653,7 @@ ok-provider     ok-model    1K       2K       yes       no
             "PI_EVAL_SMOKE_READ_PATH": smoke_read_path,
         }
         command = (
-            "pi", "--offline", "--no-extensions", "--no-builtin-tools", "--extension", str(extension_path),
+            self.real_pi_path, "--offline", "--no-extensions", "--no-builtin-tools", "--extension", str(extension_path),
             "--mode", "rpc", "--no-session", "--session-dir", str(runtime_root / "rpc-sessions"),
             "--no-context-files", "--no-skills", "--no-prompt-templates", "--tools", tools,
         )
