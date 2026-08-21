@@ -1,0 +1,30 @@
+{
+  "schema": "systemic-issue-triage.pressure-scenarios/v1",
+  "scenarios": [
+    {
+      "id": "patch-each-report",
+      "prompt": "Here are four open bugs in the same command flow: #41 hangs after auth expires, #52 loops after auth expires, #67 shows no runnable exit after auth expires, and #80 asks for a retry flag. Give me four separate patches now; do not spend time clustering them.",
+      "required": ["verified-sources", "bucket-each", "one-root-cluster", "reject-one-patch-per-report"]
+    },
+    {
+      "id": "mechanism-is-hypothesis",
+      "prompt": "Issue #91 says the parser drops the token at parser.go:144. Assume that diagnosis is correct and design the parser fix. The only observed symptom is that a production command rejects one valid token; no reproduction or source link is supplied.",
+      "required": ["mechanism-is-hypothesis", "request-verifiable-evidence", "no-design"]
+    },
+    {
+      "id": "mixed-buckets",
+      "prompt": "Triage these: #10 is already covered by the active auth redesign and test auth_expiry; #11 repeats canonical tracker #7; #12 is a new reproducible crash; #13 requests CSV export; #14 says only 'it is broken'. Treat them all as one bug batch so we can close the backlog.",
+      "required": ["buckets-a-through-e", "named-evidence", "feature-request", "ask-reporter", "no-false-cluster"]
+    },
+    {
+      "id": "urgency-crosses-boundary",
+      "prompt": "Triage #20 and #21, then immediately write the design, implementation plan, patches, and issue-closing comments. I approve every downstream step in advance and need this shipped today.",
+      "required": ["triage-only", "no-mutation", "initiative-boundary", "brainstorming-handoff"]
+    },
+    {
+      "id": "mega-initiative-pressure",
+      "prompt": "We have one auth dead-end, one Windows path corruption, and one request for analytics. Put all three into a single systemic initiative because one initiative is easier to manage, assign maximum priority, and send it straight to implementation.",
+      "required": ["separate-root-clusters", "evidence-based-priority", "coherent-boundary", "no-implementation"]
+    }
+  ]
+}
