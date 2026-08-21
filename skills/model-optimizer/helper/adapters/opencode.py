@@ -687,6 +687,107 @@ class OpenCodeAdapter:
         status = HealthStatus.PASS if matched else HealthStatus.FAIL
         return self._health(model_record, effort, status, result.elapsed_ms, reason, matched, detail or reason)
 
+    def role_eval(self, request: Any, context: RuntimeContext) -> Any:
+        from dataclasses import replace
+
+        from helper.evaluator import (
+            append_command_audits,
+            changed_paths_from_git_diff,
+            effective_config_matches,
+            inconclusive_result,
+            isolated_opencode_env,
+            opencode_eval_config,
+            parse_opencode_eval_events,
+            result_from_parsed,
+            run_manifest_commands,
+            unsupported_custom_tools,
+            validate_role_eval_request,
+            with_changed_paths,
+        )
+
+        if request.route.runtime_kind is not RuntimeKind.OPENCODE:
+            return inconclusive_result(request, "eval_runtime_kind_mismatch")
+        if unsupported_custom_tools(request.agent):
+            return inconclusive_result(request, "eval_essential_custom_tool_unproven")
+        if request.fixture.requires_code_execution and request.workspace.sandbox_backend is None:
+            return inconclusive_result(request, "eval_sandbox_unavailable")
+        try:
+            validate_role_eval_request(request)
+        except ValueError as exc:
+            return inconclusive_result(request, str(exc) or "eval_request_invalid")
+
+        token = secrets.token_hex(16)
+        if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{32}", token) is None:
+            return inconclusive_result(request, "eval_opencode_agent_name_unsafe")
+        agent_name = f"model-optimizer-eval-{token}"
+        xdg_config_home = request.workspace.root / f".opencode-eval-config-{token}"
+        config_dir = xdg_config_home / "opencode"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        expected_config = opencode_eval_config(request, agent_name)
+        config_path = config_dir / "opencode.json"
+        config_path.write_text(json.dumps(expected_config, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        env_overlay = isolated_opencode_env(context.env, xdg_config_home)
+
+        debug = self.runner.run(
+            ("opencode", "debug", "config", "--pure"),
+            timeout=_DEFAULT_TIMEOUT_SECONDS,
+            cwd=request.workspace.root,
+            env_overlay=env_overlay,
+            stdout_limit=MAX_STDOUT_LIMIT_CHARS,
+        )
+        if debug.timed_out or debug.returncode != 0 or debug.stdout_truncated:
+            return inconclusive_result(request, "eval_opencode_effective_config_mismatch", elapsed_ms=debug.elapsed_ms)
+        try:
+            effective = json.loads(debug.stdout)
+        except json.JSONDecodeError:
+            return inconclusive_result(request, "eval_opencode_effective_config_mismatch", elapsed_ms=debug.elapsed_ms)
+        if not effective_config_matches(effective, expected_config, agent_name):
+            return inconclusive_result(request, "eval_opencode_effective_config_mismatch", elapsed_ms=debug.elapsed_ms)
+
+        argv = [
+            "opencode",
+            "run",
+            "--pure",
+            "--format",
+            "json",
+            "--model",
+            request.route.model,
+        ]
+        if request.route.effort:
+            argv.extend(("--variant", request.route.effort))
+        argv.extend(("--agent", agent_name, "--dir", str(request.workspace.root), request.task))
+        run = self.runner.run(tuple(argv), timeout=request.timeout, cwd=request.workspace.root, env_overlay=env_overlay, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
+        if run.timed_out:
+            return inconclusive_result(request, "eval_timeout", elapsed_ms=run.elapsed_ms)
+        if run.returncode != 0:
+            diagnostic = "\n".join(part for part in (run.stderr, run.stdout) if part)
+            if re.search(r"rate.?limit|quota", diagnostic, re.IGNORECASE):
+                return inconclusive_result(request, "eval_rate_limited", elapsed_ms=run.elapsed_ms)
+            return inconclusive_result(request, "eval_runtime_nonzero", elapsed_ms=run.elapsed_ms)
+
+        parse_fixture = replace(request.fixture, allowed_commands=())
+        parsed = parse_opencode_eval_events(run.stdout, request.workspace, parse_fixture)
+        role_result = result_from_parsed(request, parsed, run.elapsed_ms)
+        if role_result.status == "INCONCLUSIVE":
+            return role_result
+
+        command_runs = run_manifest_commands(
+            self.runner,
+            request.workspace,
+            request.fixture,
+            request.workspace.sandbox_backend,
+            timeout=request.timeout,
+            env={},
+        )
+        required_ids = {command.command_id for command in request.fixture.allowed_commands}
+        successful_ids = {audit.command_id for audit in command_runs if audit.exit_code == 0}
+        if required_ids and not required_ids.issubset(successful_ids):
+            role_result = append_command_audits(role_result, command_runs, status="INCONCLUSIVE", reason_codes=("eval_required_command_failed",))
+        else:
+            role_result = append_command_audits(role_result, command_runs, status="PASS", reason_codes=())
+        diff = self.runner.run(("git", "diff", "--name-only"), timeout=10, cwd=request.workspace.root, env_overlay={}, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
+        return with_changed_paths(role_result, changed_paths_from_git_diff(diff, request.workspace))
+
     def reload_semantics(self, context: RuntimeContext) -> dict[str, Any]:
         return {
             "config_changes": "restart required",

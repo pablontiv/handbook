@@ -572,6 +572,72 @@ class PiAdapter:
             detail=detail,
         )
 
+    def role_eval(self, request: Any, context: RuntimeContext) -> Any:
+        from helper.evaluator import (
+            changed_paths_from_git_diff,
+            inconclusive_result,
+            parse_pi_eval_events,
+            pi_confined_extension_path,
+            result_from_parsed,
+            unsupported_custom_tools,
+            validate_role_eval_request,
+            with_changed_paths,
+            write_policy_file,
+        )
+
+        if request.route.runtime_kind is not RuntimeKind.PI:
+            return inconclusive_result(request, "eval_runtime_kind_mismatch")
+        if unsupported_custom_tools(request.agent):
+            return inconclusive_result(request, "eval_essential_custom_tool_unproven")
+        if request.fixture.requires_code_execution and request.workspace.sandbox_backend is None:
+            return inconclusive_result(request, "eval_sandbox_unavailable")
+        try:
+            validate_role_eval_request(request)
+            policy_path = write_policy_file(request)
+        except ValueError as exc:
+            return inconclusive_result(request, str(exc) or "eval_request_invalid")
+
+        extension_path = pi_confined_extension_path()
+        argv = [
+            "pi",
+            "--no-extensions",
+            "--no-builtin-tools",
+            "--extension",
+            str(extension_path),
+            "--no-session",
+            "--no-context-files",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--model",
+            request.route.model,
+        ]
+        if request.route.effort:
+            argv.extend(("--thinking", request.route.effort))
+        argv.extend((
+            "--tools",
+            ",".join(request.agent.tools),
+            "--system-prompt",
+            request.agent.body,
+            "-p",
+            request.task,
+        ))
+        env_overlay = {"PI_EVAL_POLICY": str(policy_path)}
+        result = self.runner.run(
+            tuple(argv),
+            timeout=request.timeout,
+            cwd=request.workspace.root,
+            env_overlay=env_overlay,
+            stdout_limit=MAX_STDOUT_LIMIT_CHARS,
+        )
+        if result.timed_out:
+            return inconclusive_result(request, "eval_timeout", elapsed_ms=result.elapsed_ms)
+        if result.returncode != 0:
+            return inconclusive_result(request, "eval_runtime_nonzero", elapsed_ms=result.elapsed_ms)
+        parsed = parse_pi_eval_events(result.stdout, request.workspace, request.fixture)
+        role_result = result_from_parsed(request, parsed, result.elapsed_ms)
+        diff = self.runner.run(("git", "diff", "--name-only"), timeout=10, cwd=request.workspace.root, env_overlay={}, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
+        return with_changed_paths(role_result, changed_paths_from_git_diff(diff, request.workspace))
+
     def reload_semantics(self, context: RuntimeContext) -> dict[str, Any]:
         return {
             "profile_changes": "/reload or restart",

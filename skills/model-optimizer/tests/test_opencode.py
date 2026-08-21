@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,7 +12,15 @@ from helper.adapters.opencode import (
     parse_opencode_live_events,
     parse_opencode_models_verbose,
 )
-from helper.models import HealthStatus, ModelRecord, ReadinessStatus
+from helper.evaluator import (
+    AllowedCommand,
+    FixturePolicy,
+    PreparedWorkspace,
+    RoleEvalRequest,
+    prepare_workspace_marker,
+)
+from helper.models import HealthStatus, ModelRecord, ReadinessStatus, RuntimeKind
+from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
 from helper.runner import MAX_STDOUT_LIMIT_CHARS, CompletedCommand
 from tests.support import FakeRunner, _command, assert_test_path, fixture_text
 
@@ -20,9 +29,11 @@ class EnvCapturingRunner(FakeRunner):
     def __init__(self, responses):
         super().__init__(responses)
         self.env_overlays = []
+        self.cwd_values = []
 
     def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None):
         self.env_overlays.append(dict(env_overlay or {}))
+        self.cwd_values.append(Path(cwd))
         return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit)
 
 
@@ -879,6 +890,120 @@ openai/gpt-second
         self.assertNotIn("auth.json", serialized)
         self.assertNotIn("sk-do-not-leak", serialized)
         self.assertNotIn("~/.local/share/opencode", serialized)
+
+    def _role_eval_request(self):
+        workspace_root = self.root / "eval-workspace"
+        workspace_root.mkdir()
+        (workspace_root / "src").mkdir()
+        workspace = PreparedWorkspace(workspace_root, "token-opencode", "docker")
+        fixture = FixturePolicy(
+            fixture_id="mechanical",
+            fixture_version="v1",
+            manifest_digest="sha256:" + "2" * 64,
+            grader_id="grader@v1",
+            allowed_read_paths=("src",),
+            allowed_write_paths=("src",),
+            allowed_commands=(AllowedCommand("cmd-test", ("python3", "-m", "unittest")),),
+            requires_code_execution=True,
+            capability_attestations=(),
+        )
+        prepare_workspace_marker(workspace, fixture)
+        model = ModelRecord("openai/gpt-5.6-terra", "openai", "gpt-5.6-terra", variants=("high",), tool_call=True)
+        route = RouteKey(RuntimeKind.OPENCODE, "1.18.18", "openai/gpt-5.6-terra", "high")
+        agent = AgentContract(
+            name="worker",
+            description="",
+            mode=None,
+            model="openai/gpt-5.6-terra",
+            effort="high",
+            tools=("read", "edit"),
+            permissions=(PermissionRule("edit", "src/**", "allow"),),
+            mutation_authority="confined",
+            body="Worker prompt",
+            scope="project",
+            definition_source="test",
+            assignment_source="test",
+            inheritance_sources=(),
+            apply_target=None,
+            digest="sha256:agent",
+        )
+        requirements = RoleRequirements(
+            archetype="mechanical",
+            required_tools=("read", "edit"),
+            essential_custom_tools=(),
+            requires_vision=False,
+            requires_mutation=True,
+            min_context=None,
+            min_output=None,
+            allowed_efforts=("high",),
+            structured_output=False,
+            adversarial_against_family=None,
+            priority_order=("quality",),
+        )
+        return RoleEvalRequest(route, model, agent, requirements, workspace, fixture, "Fix the fixture", 30)
+
+    def test_role_eval_uses_isolated_pure_config_and_trusted_manifest_tests(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "a" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {
+                agent_name: {
+                    "description": "isolated model optimizer evaluation",
+                    "prompt": request.agent.body,
+                    "model": request.route.model,
+                    "variant": request.route.effort,
+                    "permission": {
+                        "*": "deny",
+                        "external_directory": "deny",
+                        "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"},
+                        "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"},
+                        "bash": "deny",
+                    },
+                }
+            },
+        }
+        runner = EnvCapturingRunner((
+            _command(json.dumps(debug_payload)),
+            _command('{"type":"text","part":{"text":"done"}}\n'),
+            _command("tests ok"),
+            _command("src/out.txt\n"),
+        ))
+        original_env = {
+            "OPENCODE_CONFIG_CONTENT": json.dumps({"plugin": ["ambient"], "permission": {"bash": "allow"}}),
+            "OPENCODE_TOKEN": "runtime-auth-token",
+        }
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env=original_env)
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="a" * 32), patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "docker" else None):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(context.env, original_env)
+        self.assertEqual(runner.argv[0], ("opencode", "debug", "config", "--pure"))
+        self.assertEqual(runner.argv[1], (
+            "opencode", "run", "--pure", "--format", "json", "--model", request.route.model,
+            "--variant", request.route.effort, "--agent", agent_name, "--dir", str(request.workspace.root), request.task,
+        ))
+        debug_env = runner.env_overlays[0]
+        self.assertIn("XDG_CONFIG_HOME", debug_env)
+        self.assertNotIn("OPENCODE_CONFIG_CONTENT", debug_env)
+        self.assertEqual(debug_env["OPENCODE_TOKEN"], "runtime-auth-token")
+        config_path = Path(debug_env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(config, debug_payload)
+        self.assertEqual(result.audit.command_runs[-1].command_id, "cmd-test")
+        self.assertEqual(runner.argv[2][:4], ("docker", "run", "--rm", "--network"))
+        self.assertEqual(runner.argv[-1], ("git", "diff", "--name-only"))
+
+    def test_role_eval_rejects_hostile_effective_global_config_before_launch(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "b" * 32
+        hostile = {"agent": {agent_name: {"prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"bash": "allow"}}}}
+        runner = EnvCapturingRunner((_command(json.dumps(hostile)),))
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="b" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, self.context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_opencode_effective_config_mismatch", result.reason_codes)
+        self.assertEqual(runner.argv, [("opencode", "debug", "config", "--pure")])
 
     def test_reload_semantics_reports_restart_required_for_config_changes(self):
         semantics = OpenCodeAdapter(FakeRunner.stdout("1.18.18\n")).reload_semantics(self.context)

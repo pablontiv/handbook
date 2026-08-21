@@ -2,11 +2,20 @@ import json
 import math
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from helper.adapters import RuntimeContext
 from helper.adapters.pi import PiAdapter, parse_pi_auth, parse_pi_model_listing, _find_model_metadata
-from helper.models import HealthStatus, ModelRecord, ProviderReadiness, ReadinessStatus
+from helper.evaluator import (
+    AllowedCommand,
+    FixturePolicy,
+    PreparedWorkspace,
+    RoleEvalRequest,
+    prepare_workspace_marker,
+)
+from helper.models import HealthStatus, ModelRecord, ProviderReadiness, ReadinessStatus, RuntimeKind
+from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
 from helper.runner import CompletedCommand, MAX_STDOUT_LIMIT_CHARS
 from tests.support import (
     FakeRunner,
@@ -479,6 +488,87 @@ ok-provider     ok-model    1K       2K       yes       no
             ("pi", "auth", "check", "--provider", "nan-builders", "--json", "--no-refresh"),
             ("pi", "auth", "check", "--provider", "openai-codex", "--json", "--no-refresh"),
         ])
+
+    def _role_eval_request(self):
+        workspace_root = self.root / "eval-workspace"
+        workspace_root.mkdir()
+        (workspace_root / "src").mkdir()
+        workspace = PreparedWorkspace(workspace_root, "token-pi", "docker")
+        fixture = FixturePolicy(
+            fixture_id="mechanical",
+            fixture_version="v1",
+            manifest_digest="sha256:" + "1" * 64,
+            grader_id="grader@v1",
+            allowed_read_paths=("src",),
+            allowed_write_paths=("src",),
+            allowed_commands=(AllowedCommand("cmd-test", ("python3", "-m", "unittest")),),
+            requires_code_execution=True,
+            capability_attestations=(),
+        )
+        prepare_workspace_marker(workspace, fixture)
+        model = ModelRecord("nan/qwen3.6", "nan", "qwen3.6", variants=("high",), tool_call=True)
+        route = RouteKey(RuntimeKind.PI, "0.84.2", "nan/qwen3.6", "high")
+        agent = AgentContract(
+            name="worker",
+            description="",
+            mode=None,
+            model="nan/qwen3.6",
+            effort="high",
+            tools=("read", "edit", "bash"),
+            permissions=(PermissionRule("edit", "src/**", "allow"),),
+            mutation_authority="confined",
+            body="Worker prompt",
+            scope="project",
+            definition_source="test",
+            assignment_source="test",
+            inheritance_sources=(),
+            apply_target=None,
+            digest="sha256:agent",
+        )
+        requirements = RoleRequirements(
+            archetype="mechanical",
+            required_tools=("read", "edit", "bash"),
+            essential_custom_tools=(),
+            requires_vision=False,
+            requires_mutation=True,
+            min_context=None,
+            min_output=None,
+            allowed_efforts=("high",),
+            structured_output=False,
+            adversarial_against_family=None,
+            priority_order=("quality",),
+        )
+        return RoleEvalRequest(route, model, agent, requirements, workspace, fixture, "Fix the fixture", 30)
+
+    def test_role_eval_constructs_confined_pi_command_and_parses_audit(self):
+        request = self._role_eval_request()
+        events = "\n".join((
+            json.dumps({"type": "tool", "tool": "bash", "argv": ["python3", "-m", "unittest"], "exit_code": 0, "elapsed_ms": 10, "sandbox_backend": "docker"}),
+            json.dumps({"type": "tool", "tool": "write", "path": "src/out.txt"}),
+        ))
+        runner = FakeRunner((_command(events), _command("src/out.txt\n")))
+        result = PiAdapter(runner).role_eval(request, self.context)
+        argv = runner.argv[0]
+        for flag in ("--no-extensions", "--no-builtin-tools", "--extension", "--no-session", "--no-context-files", "--no-skills", "--no-prompt-templates", "--tools", "--system-prompt"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--model") + 1], request.route.model)
+        self.assertEqual(argv[argv.index("--thinking") + 1], request.route.effort)
+        self.assertEqual(argv[argv.index("--tools") + 1], ",".join(request.agent.tools))
+        extension_path = Path(argv[argv.index("--extension") + 1])
+        self.assertTrue(extension_path.is_absolute())
+        self.assertEqual(extension_path.name, "pi-confined-tools.ts")
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.audit.changed_paths, ("src/out.txt",))
+        self.assertEqual(runner.stdout_limits[0], MAX_STDOUT_LIMIT_CHARS)
+        self.assertEqual(runner.argv[-1], ("git", "diff", "--name-only"))
+
+    def test_role_eval_unsupported_custom_tool_fails_closed_without_ambient_extension(self):
+        request = self._role_eval_request()
+        custom_agent = replace(request.agent, tools=("read", "custom_prod_tool"))
+        custom_requirements = replace(request.requirements, required_tools=("read",), essential_custom_tools=("custom_prod_tool",), requires_mutation=False)
+        result = PiAdapter(FakeRunner(())).role_eval(replace(request, agent=custom_agent, requirements=custom_requirements), self.context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_essential_custom_tool_unproven", result.reason_codes)
 
     def test_reload_semantics_reports_reload_or_restart(self):
         semantics = PiAdapter(FakeRunner.stdout("0.84.2\n")).reload_semantics(self.context)
