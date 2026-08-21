@@ -26,6 +26,7 @@ class FakeRunner:
         self.env_overlays: list[dict[str, str]] = []
         self.env_replacements: list[dict[str, str] | None] = []
         self.cwd_values: list[Path] = []
+        self.stdin_payloads: list[str | None] = []
 
     @classmethod
     def stdout(cls, text: str, returncode: int = 0) -> "FakeRunner":
@@ -34,12 +35,13 @@ class FakeRunner:
             elapsed_ms=1, timed_out=False,
         ),))
 
-    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None):
+    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None, stdin_text=None):
         self.argv.append(tuple(argv))
         self.stdout_limits.append(stdout_limit)
         self.env_overlays.append(dict(env_overlay or {}))
         self.env_replacements.append(dict(env_replacement) if env_replacement is not None else None)
         self.cwd_values.append(Path(cwd))
+        self.stdin_payloads.append(stdin_text)
         if not self.responses:
             raise AssertionError(f"unexpected command: {tuple(argv)!r}")
         result = self.responses.popleft()
@@ -49,6 +51,8 @@ class FakeRunner:
             elapsed_ms=result.elapsed_ms, timed_out=result.timed_out,
             stdout_truncated=result.stdout_truncated,
             stderr_truncated=result.stderr_truncated,
+            stdout_decode_replaced=result.stdout_decode_replaced,
+            stderr_decode_replaced=result.stderr_decode_replaced,
         )
 
 

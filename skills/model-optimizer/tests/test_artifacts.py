@@ -45,11 +45,34 @@ class ArtifactTests(unittest.TestCase):
             before = byte_inventory((config_dir, missing))
             after = byte_inventory((config_dir, missing))
         self.assertEqual(before, after)
-        self.assertEqual(before[0]["kind"], "directory")
-        self.assertEqual(before[0]["file_count"], 1)
-        self.assertTrue(str(before[0]["digest"]).startswith("sha256:"))
-        self.assertEqual(before[1]["kind"], "missing")
-        self.assertIsNone(before[1]["digest"])
+        self.assertEqual(before.status, "PASS")
+        self.assertEqual(before.records[0]["kind"], "directory")
+        self.assertEqual(before.records[0]["file_count"], 1)
+        self.assertTrue(str(before.records[0]["digest"]).startswith("sha256:"))
+        self.assertEqual(before.records[1]["kind"], "missing")
+        self.assertIsNone(before.records[1]["digest"])
+
+    def test_byte_inventory_is_inconclusive_on_read_or_stat_errors(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            target = root / "file.txt"
+            target.write_text("ok", encoding="utf-8")
+            with mock.patch.object(Path, "read_bytes", side_effect=OSError("boom")):
+                result = byte_inventory((target,))
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason_codes, ("inventory_read_failed",))
+
+    def test_byte_inventory_enforces_bounded_cardinality(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            directory = root / "many"
+            directory.mkdir()
+            for index in range(5):
+                (directory / f"file-{index}.txt").write_text("x", encoding="utf-8")
+            with mock.patch.object(artifacts_module, "_MAX_INVENTORY_FILES", 2):
+                result = byte_inventory((directory,))
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertEqual(result.reason_codes, ("inventory_too_many_files",))
 
     def test_canonical_digest_ignores_mapping_insertion_order(self):
         self.assertEqual(canonical_bytes({"b": 2, "a": 1}), b'{"a":1,"b":2}')

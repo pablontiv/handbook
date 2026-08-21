@@ -17,6 +17,7 @@ from helper.evaluator import (
     AllowedCommand,
     FixturePolicy,
     PreparedWorkspace,
+    ProbeObservation,
     RoleEvalRequest,
     SandboxAttestation,
     canonical_fixture_digest,
@@ -24,6 +25,7 @@ from helper.evaluator import (
     effective_config_matches,
     isolated_opencode_env,
     opencode_eval_config,
+    probe_observation_from_result,
     sandbox_attestation_digest,
 )
 from helper.models import HealthStatus, ModelRecord, ReadinessStatus, RuntimeKind
@@ -38,10 +40,10 @@ class EnvCapturingRunner(FakeRunner):
         self.env_overlays = []
         self.cwd_values = []
 
-    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None):
+    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None, stdin_text=None):
         self.env_overlays.append(dict(env_overlay or {}))
         self.cwd_values.append(Path(cwd))
-        return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement)
+        return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement, stdin_text=stdin_text)
 
 
 def _probe_agent_name(token: str) -> str:
@@ -71,8 +73,14 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.context = RuntimeContext(home=self.root, cwd=self.root / "project", env={})
         self.context.cwd.mkdir()
+        self._which_patch = patch("helper.evaluator.shutil.which", return_value="/fake/bwrap")
+        self._identity_patch = patch("helper.evaluator._executable_identity", return_value="bwrap:/fake/bwrap:1:2:3")
+        self._which_patch.start()
+        self._identity_patch.start()
 
     def tearDown(self):
+        self._identity_patch.stop()
+        self._which_patch.stop()
         self.temp.cleanup()
 
     def _write_project_config(self, text: str | None = None) -> Path:
@@ -907,21 +915,35 @@ openai/gpt-second
         workspace_root = self.root / "eval-workspace"
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
-        probe_results = (
-            "workspace_write:PASS:sha256:" + "1" * 64,
-            "outside_read_denied:PASS:sha256:" + "2" * 64,
-            "secret_env_denied:PASS:sha256:" + "3" * 64,
-            "network_denied:PASS:sha256:" + "4" * 64,
-        )
+        observed_at = datetime.now(timezone.utc).replace(microsecond=0)
         executable_identity = "bwrap:/fake/bwrap:1:2:3"
+        profile_identity = f"bwrap:{workspace_root.resolve()}:network=none:env=minimal"
+        observations: tuple[ProbeObservation, ...] = tuple(
+            probe_observation_from_result(
+                probe_id=probe_id,
+                argv=("bwrap", "--unshare-net", "--bind", str(workspace_root.resolve()), str(workspace_root.resolve()), "--chdir", str(workspace_root.resolve()), "python3", "-c", "print('ok')"),
+                executable_identity=executable_identity,
+                profile_identity=profile_identity,
+                expected_outcome=expected,
+                status="PASS",
+                result=CompletedCommand((), 0, expected, "", 1, False),
+                observed_at=observed_at,
+            )
+            for probe_id, expected in (
+                ("workspace_write", "ok"),
+                ("outside_read_denied", "denied"),
+                ("secret_env_denied", "absent"),
+                ("network_denied", "denied"),
+            )
+        )
         workspace = PreparedWorkspace(workspace_root, "token-opencode", SandboxAttestation(
             backend="bwrap",
             workspace_root=str(workspace_root.resolve()),
             workspace_token="token-opencode",
-            profile_digest=sandbox_attestation_digest("bwrap", workspace_root, "token-opencode", executable_identity, probe_results),
-            observed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
-            probe_results=probe_results,
+            profile_identity=profile_identity,
+            profile_digest=sandbox_attestation_digest("bwrap", workspace_root, "token-opencode", executable_identity, profile_identity, observations),
+            observed_at=observed_at.isoformat().replace("+00:00", "Z"),
+            probe_observations=observations,
             executable_identity=executable_identity,
         ))
         fixture_base = FixturePolicy(
@@ -990,6 +1012,12 @@ openai/gpt-second
         self.assertEqual(nan.get("OPENCODE_TOKEN"), "opencode-token")
         self.assertEqual(nan.get("NAN_API_KEY"), "nan-token")
         self.assertNotIn("OPENAI_API_KEY", nan)
+        minimax = isolated_opencode_env(env, xdg_config, xdg_data, "minimax-coding-plan")
+        self.assertEqual(minimax.get("MINIMAX_API_KEY"), "minimax-token")
+        self.assertNotIn("OPENAI_API_KEY", minimax)
+        zai = isolated_opencode_env(env, xdg_config, xdg_data, "zai-coding-plan")
+        self.assertEqual(zai.get("ZAI_API_KEY"), "zai-token")
+        self.assertNotIn("OPENAI_API_KEY", zai)
         self.assertIsNone(isolated_opencode_env(env, xdg_config, xdg_data, "unknown-provider"))
         self.assertIsNone(isolated_opencode_env({}, xdg_config, xdg_data, "openai"))
 
@@ -997,14 +1025,32 @@ openai/gpt-second
         request = self._role_eval_request()
         agent_name = "model-optimizer-eval-" + "d" * 32
         expected = opencode_eval_config(request, agent_name)
-        safe = {**expected, "mode": {}, "username": "unknown", "plugin": [], "instructions": [], "tool": {}, "provider": {}, "model": {}, "share": "manual", "autoshare": False, "compaction": {}}
+        safe = {
+            **expected,
+            "mode": {},
+            "username": "unknown",
+            "plugin": [],
+            "plugins": [],
+            "instructions": [],
+            "mcp": {},
+            "tool": {},
+            "tools": {},
+            "provider": {},
+            "model": {},
+            "share": "manual",
+            "autoshare": False,
+            "compaction": {},
+        }
         self.assertTrue(effective_config_matches(safe, expected, agent_name))
         for key, value in {
             "mode": {"build": True},
             "username": "attacker",
             "plugin": ["ambient"],
+            "plugins": ["ambient"],
             "instructions": ["do unsafe thing"],
+            "mcp": {"server": "ambient"},
             "tool": {"bash": "allow"},
+            "tools": {"bash": "allow"},
             "provider": {"openai": {}},
             "model": {"openai/gpt": {}},
             "share": "auto",
@@ -1073,6 +1119,7 @@ openai/gpt-second
         self.assertEqual(runner.argv[3][0], "bwrap")
         self.assertIn("--unshare-net", runner.argv[3])
         self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"))
+        self.assertNotIn(None, runner.stdout_limits)
 
     def test_role_eval_manifest_timeout_is_hang(self):
         request = self._role_eval_request()
@@ -1106,7 +1153,7 @@ openai/gpt-second
     def test_role_eval_cleans_isolated_roots_when_debug_raises(self):
         request = self._role_eval_request()
         class RaisingDebugRunner(EnvCapturingRunner):
-            def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None):
+            def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None, stdin_text=None):
                 self.argv.append(tuple(argv))
                 self.stdout_limits.append(stdout_limit)
                 self.env_overlays.append(dict(env_overlay or {}))
@@ -1114,7 +1161,7 @@ openai/gpt-second
                 self.cwd_values.append(Path(cwd))
                 if tuple(argv) == ("opencode", "debug", "config", "--pure"):
                     raise OSError("debug failed")
-                return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement)
+                return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement, stdin_text=stdin_text)
         runner = RaisingDebugRunner((_command("1.18.18\n"),))
         context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
         with patch("helper.adapters.opencode.secrets.token_hex", return_value="c" * 32):
@@ -1136,6 +1183,27 @@ openai/gpt-second
         self.assertEqual(result.status, "INCONCLUSIVE")
         self.assertIn("eval_opencode_effective_config_mismatch", result.reason_codes)
         self.assertEqual(runner.argv, [("opencode", "--version"), ("opencode", "debug", "config", "--pure")])
+
+    def test_role_eval_status_collection_exception_preserves_runtime_exception_reason(self):
+        request = self._role_eval_request()
+        agent_name = "model-optimizer-eval-" + "9" * 32
+        debug_payload = {
+            "permission": {"*": "deny", "external_directory": "deny"},
+            "agent": {agent_name: {"description": "isolated model optimizer evaluation", "prompt": request.agent.body, "model": request.route.model, "variant": request.route.effort, "permission": {"*": "deny", "external_directory": "deny", "read": {"*": "deny", f"{request.workspace.root.resolve()}/**": "allow"}, "edit": {"*": "deny", f"{(request.workspace.root / 'src').resolve()}/**": "allow"}, "bash": "deny"}}},
+        }
+
+        class StatusErrorRunner(EnvCapturingRunner):
+            def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None, stdin_text=None):
+                if tuple(argv) == ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"):
+                    raise OSError("status failed")
+                return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement, stdin_text=stdin_text)
+
+        runner = StatusErrorRunner((_command("1.18.18\n"), _command(json.dumps(debug_payload)), _command('{"type":"tool_use","part":{"type":"tool","tool":"edit","state":{"status":"completed","input":{"path":"src/out.txt"}}}}\n'), _command("tests ok")))
+        context = RuntimeContext(home=self.root, cwd=self.context.cwd, env={"OPENAI_API_KEY": "runtime-auth-token"})
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="9" * 32):
+            result = OpenCodeAdapter(runner).role_eval(request, context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_opencode_runtime_exception", result.reason_codes)
 
     def test_reload_semantics_reports_restart_required_for_config_changes(self):
         semantics = OpenCodeAdapter(FakeRunner.stdout("1.18.18\n")).reload_semantics(self.context)

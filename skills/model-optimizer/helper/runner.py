@@ -27,6 +27,8 @@ class CompletedCommand:
     timed_out: bool
     stdout_truncated: bool = False
     stderr_truncated: bool = False
+    stdout_decode_replaced: bool = False
+    stderr_decode_replaced: bool = False
 
 
 def _is_windows() -> bool:
@@ -67,12 +69,15 @@ def _validate_stdout_limit(stdout_limit: object) -> int:
     return stdout_limit
 
 
-def _decode_stream(raw: bytes | str | None) -> str:
+def _decode_stream(raw: bytes | str | None) -> tuple[str, bool]:
     if raw is None:
-        return ""
+        return "", False
     if isinstance(raw, str):
-        return raw
-    return raw.decode("utf-8", errors="replace")
+        return raw, False
+    try:
+        return raw.decode("utf-8", errors="strict"), False
+    except UnicodeDecodeError:
+        return raw.decode("utf-8", errors="replace"), True
 
 
 def redact_text(text: str, sensitive_values: Sequence[str] = ()) -> str:
@@ -102,6 +107,7 @@ class CommandRunner:
         *,
         stdout_limit: int = MAX_STREAM_CHARS,
         env_replacement: Mapping[str, str] | None = None,
+        stdin_text: str | None = None,
     ) -> CompletedCommand:
         command = _validate_argv(argv)
         bounded_stdout_limit = _validate_stdout_limit(stdout_limit)
@@ -129,20 +135,26 @@ class CommandRunner:
         else:
             popen_kwargs["start_new_session"] = True
 
-        process = subprocess.Popen(command, **popen_kwargs)
+        process = subprocess.Popen(command, stdin=subprocess.PIPE if stdin_text is not None else None, **popen_kwargs)
+        stdin_payload = stdin_text.encode("utf-8") if stdin_text is not None else None
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            if stdin_payload is None:
+                stdout, stderr = process.communicate(timeout=timeout)
+            else:
+                stdout, stderr = process.communicate(input=stdin_payload, timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
             stdout, stderr = self._terminate_after_timeout(process)
 
         elapsed_ms = max(0, int((time.monotonic() - start) * 1000))
+        stdout_decoded, stdout_decode_replaced = _decode_stream(stdout)
+        stderr_decoded, stderr_decode_replaced = _decode_stream(stderr)
         stdout_text, stdout_truncated = _truncate_tail(
-            redact_text(_decode_stream(stdout), sensitive_values),
+            redact_text(stdout_decoded, sensitive_values),
             bounded_stdout_limit,
         )
         stderr_text, stderr_truncated = _truncate_tail(
-            redact_text(_decode_stream(stderr), sensitive_values),
+            redact_text(stderr_decoded, sensitive_values),
             MAX_STREAM_CHARS,
         )
         return CompletedCommand(
@@ -154,6 +166,8 @@ class CommandRunner:
             timed_out=timed_out,
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
+            stdout_decode_replaced=stdout_decode_replaced,
+            stderr_decode_replaced=stderr_decode_replaced,
         )
 
     def _terminate_after_timeout(self, process: subprocess.Popen[bytes]) -> tuple[bytes | str | None, bytes | str | None]:

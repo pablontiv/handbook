@@ -7,6 +7,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const MAX_POLICY_BYTES = 64 * 1024;
 const SHELL_OPERATOR_RE = /[|&;<>()`$\\\n]/;
@@ -69,7 +70,13 @@ function resolveExisting(root: string, raw: string): string {
     if (err && err.code === "ENOENT") throw new Error("eval_path_missing_or_dangling_symlink");
     throw err;
   }
-  const real = fs.realpathSync(resolved);
+  let real: string;
+  try {
+    real = fs.realpathSync(resolved);
+  } catch (err: any) {
+    if (err && err.code === "ENOENT") throw new Error("eval_path_missing_or_dangling_symlink");
+    throw err;
+  }
   if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
   return real;
 }
@@ -112,25 +119,115 @@ function requireAllowed(target: string, allowed: string[], reason: string): void
   if (!allowed.some((base) => contains(base, target))) throw new Error(reason);
 }
 
+async function confinedReadHelper(root: string, allowedRead: string[], rawPath: string, offset?: number, limit?: number): Promise<string> {
+  const target = resolveExisting(root, rawPath);
+  requireAllowed(target, allowedRead, "eval_read_not_allowed");
+  const lines = (await fsp.readFile(target, "utf8")).split("\n");
+  const start = offset ? Math.max(0, offset - 1) : 0;
+  const end = limit ? start + limit : lines.length;
+  return lines.slice(start, end).join("\n");
+}
+
+async function confinedGrepHelper(root: string, allowedRead: string[], rawPath: string, pattern: string, ignoreCase = false, limit = 100): Promise<string[]> {
+  const target = resolveExisting(root, rawPath);
+  requireAllowed(target, allowedRead, "eval_read_not_allowed");
+  const needle = ignoreCase ? pattern.toLowerCase() : pattern;
+  const output: string[] = [];
+  const max = Math.max(1, Math.min(limit, 1000));
+
+  async function visit(item: string): Promise<void> {
+    if (output.length >= max) return;
+    const stat = await fsp.lstat(item);
+    if (stat.isSymbolicLink()) return;
+    const real = await fsp.realpath(item);
+    if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
+    requireAllowed(real, allowedRead, "eval_read_not_allowed");
+    if (stat.isDirectory()) {
+      for (const entry of await fsp.readdir(real)) {
+        await visit(path.join(real, entry));
+      }
+      return;
+    }
+    const body = await fsp.readFile(real, "utf8").catch(() => "");
+    body.split("\n").forEach((line, index) => {
+      const haystack = ignoreCase ? line.toLowerCase() : line;
+      if (output.length < max && haystack.includes(needle)) {
+        output.push(`${path.relative(root, real)}:${index + 1}:${line}`);
+      }
+    });
+  }
+
+  await visit(target);
+  return output;
+}
+
+async function confinedFindHelper(root: string, allowedRead: string[], rawPath: string, pattern: string | undefined, limit = 100): Promise<string[]> {
+  const target = resolveExisting(root, rawPath);
+  requireAllowed(target, allowedRead, "eval_read_not_allowed");
+  const output: string[] = [];
+  const max = Math.max(1, Math.min(limit, 1000));
+
+  async function visit(item: string): Promise<void> {
+    if (output.length >= max) return;
+    const stat = await fsp.lstat(item);
+    if (stat.isSymbolicLink()) return;
+    const real = await fsp.realpath(item);
+    if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
+    requireAllowed(real, allowedRead, "eval_read_not_allowed");
+    if (stat.isDirectory()) {
+      for (const entry of await fsp.readdir(real)) {
+        await visit(path.join(real, entry));
+      }
+      return;
+    }
+    const rel = path.relative(root, real);
+    if (!pattern || rel.includes(pattern)) {
+      output.push(rel);
+    }
+  }
+
+  await visit(target);
+  return output;
+}
+
 function scrubbedEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   if (process.env.PATH) env.PATH = process.env.PATH;
   return env;
 }
 
-function smokeEvidence(root: string, requested: Set<string>, allowedRead: string[], pi: ExtensionAPI, phase: string): void {
+async function smokeEvidence(root: string, requested: Set<string>, allowedRead: string[], pi: ExtensionAPI, phase: string): Promise<void> {
   const smokePath = process.env.PI_EVAL_SMOKE_FILE;
   if (!smokePath) return;
   const target = resolveProspective(root, smokePath);
   let helperProbe = "SKIP";
-  if (requested.has("read") && allowedRead.length > 0) {
-    const entries = fs.readdirSync(allowedRead[0]);
-    helperProbe = Array.isArray(entries) ? "PASS" : "FAIL";
+  let helperDigest = "";
+  if (allowedRead.length > 0) {
+    const mode = process.env.PI_EVAL_SMOKE_MODE ?? "read";
+    const probePath = process.env.PI_EVAL_SMOKE_READ_PATH ?? allowedRead[0];
+    try {
+      if (mode === "grep") {
+        const pattern = process.env.PI_EVAL_SMOKE_PATTERN ?? "sentinel";
+        const matches = await confinedGrepHelper(root, allowedRead, probePath, pattern, false, 32);
+        helperProbe = "PASS";
+        helperDigest = `sha256:${createHash("sha256").update(matches.join("\n"), "utf8").digest("hex")}`;
+      } else if (mode === "find") {
+        const matches = await confinedFindHelper(root, allowedRead, probePath, process.env.PI_EVAL_SMOKE_PATTERN, 32);
+        helperProbe = "PASS";
+        helperDigest = `sha256:${createHash("sha256").update(matches.join("\n"), "utf8").digest("hex")}`;
+      } else if (requested.has("read")) {
+        const body = await confinedReadHelper(root, allowedRead, probePath, 1, 32);
+        helperProbe = "PASS";
+        helperDigest = `sha256:${createHash("sha256").update(body, "utf8").digest("hex")}`;
+      }
+    } catch (error: any) {
+      helperProbe = `FAIL:${String(error?.message ?? error)}`;
+    }
   }
   const activeTools = pi.getActiveTools().slice().sort();
   const allTools = pi.getAllTools().map((tool) => tool.name).filter((name) => requested.has(name)).sort();
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, JSON.stringify({ phase, active_tools: activeTools, extension_tools: allTools, helper_probe: helperProbe }), "utf8");
+  fs.writeFileSync(target, JSON.stringify({ phase, active_tools: activeTools, extension_tools: allTools, helper_probe: helperProbe, helper_digest: helperDigest }), "utf8");
 }
 
 function shellWords(command: string): string[] {
@@ -148,7 +245,7 @@ function assertExactCommand(policy: Policy, command: string): AllowedCommand {
 }
 
 async function runSandboxed(root: string, command: AllowedCommand, timeoutMs?: number) {
-  return await new Promise<{ command_id: string; exit_code: number | null; elapsed_ms: number; sandbox_backend: string }>((resolve, reject) => {
+  return await new Promise<{ command_id: string; exit_code: number | null; elapsed_ms: number; sandbox_backend: string; timed_out: boolean }>((resolve, reject) => {
     const started = Date.now();
     const child = spawn(command.sandbox_argv[0], command.sandbox_argv.slice(1), {
       cwd: root,
@@ -158,8 +255,10 @@ async function runSandboxed(root: string, command: AllowedCommand, timeoutMs?: n
       detached: process.platform !== "win32",
     });
     let settled = false;
+    let timedOut = false;
     const timer = timeoutMs && timeoutMs > 0 ? setTimeout(() => {
       if (settled) return;
+      timedOut = true;
       try {
         if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
         else child.kill("SIGKILL");
@@ -169,7 +268,14 @@ async function runSandboxed(root: string, command: AllowedCommand, timeoutMs?: n
     child.on("close", (code) => {
       settled = true;
       if (timer) clearTimeout(timer);
-      resolve({ command_id: command.command_id, exit_code: code, elapsed_ms: Date.now() - started, sandbox_backend: "policy-runner" });
+      const backendName = path.basename(command.sandbox_argv[0] || "unknown") || "unknown";
+      resolve({
+        command_id: command.command_id,
+        exit_code: timedOut ? null : code,
+        elapsed_ms: Date.now() - started,
+        sandbox_backend: backendName,
+        timed_out: timedOut,
+      });
     });
   });
 }
@@ -187,11 +293,11 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
   pi.registerCommand("model_optimizer_eval_smoke", {
     description: "Record model-optimizer eval extension runtime smoke evidence",
     async handler() {
-      smokeEvidence(root, requested, allowedRead, pi, "command");
+      await smokeEvidence(root, requested, allowedRead, pi, "command");
     },
   });
-  pi.on("session_start", () => {
-    smokeEvidence(root, requested, allowedRead, pi, "session_start");
+  pi.on("session_start", async () => {
+    await smokeEvidence(root, requested, allowedRead, pi, "session_start");
   });
 
   if (requested.has("read")) {
@@ -201,12 +307,8 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
       description: "Read UTF-8 text files allowed by the evaluation fixture policy.",
       parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }),
       async execute(_id, params) {
-        const target = resolveExisting(root, params.path);
-        requireAllowed(target, allowedRead, "eval_read_not_allowed");
-        const lines = (await fsp.readFile(target, "utf8")).split("\n");
-        const start = params.offset ? Math.max(0, params.offset - 1) : 0;
-        const end = params.limit ? start + params.limit : lines.length;
-        return text(lines.slice(start, end).join("\n"), {});
+        const body = await confinedReadHelper(root, allowedRead, params.path, params.offset, params.limit);
+        return text(body, {});
       },
     });
   }
@@ -284,30 +386,8 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
       description: "Search allowed UTF-8 files below an allowed workspace path.",
       parameters: Type.Object({ pattern: Type.String(), path: Type.Optional(Type.String()), ignoreCase: Type.Optional(Type.Boolean()), limit: Type.Optional(Type.Number()) }),
       async execute(_id, params) {
-        const target = resolveExisting(root, params.path ?? ".");
-        requireAllowed(target, allowedRead, "eval_read_not_allowed");
-        const needle = params.ignoreCase ? params.pattern.toLowerCase() : params.pattern;
-        const output: string[] = [];
-        const max = Math.max(1, Math.min(params.limit ?? 100, 1000));
-        async function visit(item: string) {
-          if (output.length >= max) return;
-          const stat = await fsp.lstat(item);
-          if (stat.isSymbolicLink()) return;
-          const real = await fsp.realpath(item);
-          if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
-          requireAllowed(real, allowedRead, "eval_read_not_allowed");
-          if (stat.isDirectory()) {
-            for (const entry of await fsp.readdir(real)) await visit(path.join(real, entry));
-            return;
-          }
-          const body = await fsp.readFile(real, "utf8").catch(() => "");
-          body.split("\n").forEach((line, index) => {
-            const haystack = params.ignoreCase ? line.toLowerCase() : line;
-            if (output.length < max && haystack.includes(needle)) output.push(`${path.relative(root, real)}:${index + 1}:${line}`);
-          });
-        }
-        await visit(target);
-        return text(output.join("\n"), { matches: output.length });
+        const matches = await confinedGrepHelper(root, allowedRead, params.path ?? ".", params.pattern, params.ignoreCase, params.limit ?? 100);
+        return text(matches.join("\n"), { matches: matches.length });
       },
     });
   }
@@ -319,26 +399,8 @@ export default function modelOptimizerConfinedTools(pi: ExtensionAPI) {
       description: "List files below an allowed workspace path.",
       parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.Optional(Type.String()), limit: Type.Optional(Type.Number()) }),
       async execute(_id, params) {
-        const target = resolveExisting(root, params.path ?? ".");
-        requireAllowed(target, allowedRead, "eval_read_not_allowed");
-        const output: string[] = [];
-        const max = Math.max(1, Math.min(params.limit ?? 100, 1000));
-        async function visit(item: string) {
-          if (output.length >= max) return;
-          const stat = await fsp.lstat(item);
-          if (stat.isSymbolicLink()) return;
-          const real = await fsp.realpath(item);
-          if (!contains(root, real)) throw new Error("eval_path_outside_workspace");
-          requireAllowed(real, allowedRead, "eval_read_not_allowed");
-          if (stat.isDirectory()) {
-            for (const entry of await fsp.readdir(real)) await visit(path.join(real, entry));
-            return;
-          }
-          const rel = path.relative(root, real);
-          if (!params.pattern || rel.includes(params.pattern)) output.push(rel);
-        }
-        await visit(target);
-        return text(output.join("\n"), { matches: output.length });
+        const matches = await confinedFindHelper(root, allowedRead, params.path ?? ".", params.pattern, params.limit ?? 100);
+        return text(matches.join("\n"), { matches: matches.length });
       },
     });
   }

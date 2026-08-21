@@ -590,12 +590,15 @@ class PiAdapter:
             return inconclusive_result(request, "eval_runtime_kind_mismatch")
         if unsupported_custom_tools(request.agent):
             return inconclusive_result(request, "eval_essential_custom_tool_unproven")
-        minimal_env = {"PATH": context.env.get("PATH") or os.environ.get("PATH", "")}
+
+        path_value = context.env.get("PATH") or os.environ.get("PATH", "")
+        minimal_env = {"PATH": path_value}
         version = self.runner.run(("pi", "--version"), timeout=10, cwd=context.cwd, env_replacement=minimal_env, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
         if version.timed_out or version.returncode != 0 or version.stdout.strip() != request.route.runtime_version:
             return inconclusive_result(request, "eval_runtime_version_mismatch", elapsed_ms=version.elapsed_ms)
         if request.fixture.requires_code_execution and request.workspace.sandbox_attestation is None:
             return inconclusive_result(request, "eval_sandbox_unavailable")
+
         try:
             validate_role_eval_request(request)
             policy_path = write_policy_file(request)
@@ -603,6 +606,69 @@ class PiAdapter:
             return inconclusive_result(request, str(exc) or "eval_request_invalid")
 
         extension_path = pi_confined_extension_path()
+        pi_data_root = request.workspace.root / ".pi-eval-runtime"
+        pi_home = pi_data_root / "home"
+        env = {
+            "PATH": path_value,
+            "HOME": str(pi_home),
+            "XDG_CONFIG_HOME": str(pi_data_root / "xdg-config"),
+            "XDG_DATA_HOME": str(pi_data_root / "xdg-data"),
+            "XDG_CACHE_HOME": str(pi_data_root / "xdg-cache"),
+            "NPM_CONFIG_USERCONFIG": str(pi_data_root / "npmrc"),
+            "PI_EVAL_POLICY": str(policy_path),
+            "PI_CODING_AGENT_DIR": str(pi_data_root / "agent"),
+            "PI_SESSION_DIR": str(pi_data_root / "sessions"),
+        }
+
+        preflight_argv = (
+            "pi",
+            "--offline",
+            "--no-extensions",
+            "--no-builtin-tools",
+            "--extension",
+            str(extension_path),
+            "--mode",
+            "rpc",
+            "--no-session",
+            "--session-dir",
+            str(pi_data_root / "rpc-sessions"),
+            "--no-context-files",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--tools",
+            ",".join(request.agent.tools),
+        )
+        preflight_stdin = json.dumps({"id": "commands-1", "type": "get_commands"}) + "\n"
+        preflight = self.runner.run(
+            preflight_argv,
+            timeout=10,
+            cwd=request.workspace.root,
+            env_replacement=env,
+            stdout_limit=MAX_STDOUT_LIMIT_CHARS,
+            stdin_text=preflight_stdin,
+        )
+        if preflight.timed_out or preflight.returncode != 0 or preflight.stdout_truncated or preflight.stdout_decode_replaced:
+            return inconclusive_result(request, "eval_pi_isolation_unverified", elapsed_ms=preflight.elapsed_ms)
+        try:
+            responses = [json.loads(line) for line in preflight.stdout.splitlines() if line.strip()]
+        except json.JSONDecodeError:
+            return inconclusive_result(request, "eval_pi_isolation_unverified", elapsed_ms=preflight.elapsed_ms)
+        command_response = next((item for item in responses if isinstance(item, Mapping) and item.get("type") == "response" and item.get("command") == "get_commands"), None)
+        if not isinstance(command_response, Mapping) or command_response.get("success") is not True:
+            return inconclusive_result(request, "eval_pi_isolation_unverified", elapsed_ms=preflight.elapsed_ms)
+        payload = command_response.get("data")
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("commands"), Sequence):
+            return inconclusive_result(request, "eval_pi_isolation_unverified", elapsed_ms=preflight.elapsed_ms)
+        command_names = []
+        for item in payload.get("commands", ()):  # type: ignore[arg-type]
+            if not isinstance(item, Mapping):
+                return inconclusive_result(request, "eval_pi_isolation_unverified", elapsed_ms=preflight.elapsed_ms)
+            name = item.get("name")
+            if isinstance(name, str):
+                command_names.append(name)
+        if command_names != ["model_optimizer_eval_smoke"]:
+            return inconclusive_result(request, "eval_pi_isolation_unavailable", elapsed_ms=preflight.elapsed_ms)
+
         argv = [
             "pi",
             "--no-extensions",
@@ -628,13 +694,7 @@ class PiAdapter:
             "-p",
             request.task,
         ))
-        pi_data_root = request.workspace.root / ".pi-eval-runtime"
-        env = {
-            "PI_EVAL_POLICY": str(policy_path),
-            "PI_CODING_AGENT_DIR": str(pi_data_root / "agent"),
-            "PI_SESSION_DIR": str(pi_data_root / "sessions"),
-            **minimal_env,
-        }
+
         result = self.runner.run(
             tuple(argv),
             timeout=request.timeout,
@@ -644,14 +704,22 @@ class PiAdapter:
         )
         if result.timed_out:
             from dataclasses import replace
+
             return replace(inconclusive_result(request, "eval_timeout", elapsed_ms=result.elapsed_ms), status="HANG")
         if result.stdout_truncated:
             return inconclusive_result(request, "eval_truncated_audit_stream", elapsed_ms=result.elapsed_ms)
         if result.returncode != 0:
             return inconclusive_result(request, "eval_runtime_nonzero", elapsed_ms=result.elapsed_ms)
+
         parsed = parse_pi_eval_events(result.stdout, request.workspace, request.fixture)
         role_result = result_from_parsed(request, parsed, result.elapsed_ms)
-        diff = self.runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=10, cwd=request.workspace.root, env_replacement=minimal_env, stdout_limit=None)
+        diff = self.runner.run(
+            ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+            timeout=10,
+            cwd=request.workspace.root,
+            env_replacement=minimal_env,
+            stdout_limit=MAX_STDOUT_LIMIT_CHARS,
+        )
         return with_changed_paths_result(role_result, changed_paths_from_git_status(diff, request.workspace))
 
     def reload_semantics(self, context: RuntimeContext) -> dict[str, Any]:

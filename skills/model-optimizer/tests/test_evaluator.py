@@ -15,6 +15,7 @@ from helper.evaluator import (
     CommandAudit,
     FixturePolicy,
     PreparedWorkspace,
+    ProbeObservation,
     RoleEvalRequest,
     SandboxAttestation,
     RoleEvalResult,
@@ -29,6 +30,7 @@ from helper.evaluator import (
     run_manifest_commands,
     sandbox_attestation_digest,
     select_sandbox_backend,
+    probe_observation_from_result,
     validate_role_eval_request,
 )
 from helper.models import ModelRecord, RuntimeKind
@@ -45,12 +47,12 @@ class RecordingRunner(FakeRunner):
         self.cwd_values = []
         self.timeout_values = []
 
-    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None):
+    def run(self, argv, timeout, cwd, env_overlay=None, *, stdout_limit=None, env_replacement=None, stdin_text=None):
         self.env_overlays.append(dict(env_overlay or {}))
         self.env_replacements.append(dict(env_replacement) if env_replacement is not None else None)
         self.cwd_values.append(Path(cwd))
         self.timeout_values.append(timeout)
-        return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement)
+        return super().run(argv, timeout, cwd, env_overlay=env_overlay, stdout_limit=stdout_limit, env_replacement=env_replacement, stdin_text=stdin_text)
 
 
 class EvaluatorContractTests(unittest.TestCase):
@@ -61,21 +63,35 @@ class EvaluatorContractTests(unittest.TestCase):
         self.workspace_root.mkdir()
         (self.workspace_root / "allowed").mkdir()
         (self.workspace_root / "src").mkdir()
-        probe_results = (
-            "workspace_write:PASS:sha256:" + "1" * 64,
-            "outside_read_denied:PASS:sha256:" + "2" * 64,
-            "secret_env_denied:PASS:sha256:" + "3" * 64,
-            "network_denied:PASS:sha256:" + "4" * 64,
-        )
+        observed_at = datetime.now(timezone.utc).replace(microsecond=0)
         executable_identity = "bwrap:/fake/bwrap:1:2:3"
+        profile_identity = f"bwrap:{self.workspace_root.resolve()}:network=none:env=minimal"
+        observations: tuple[ProbeObservation, ...] = tuple(
+            probe_observation_from_result(
+                probe_id=probe_id,
+                argv=("bwrap", "--unshare-net", "--bind", str(self.workspace_root.resolve()), str(self.workspace_root.resolve()), "--chdir", str(self.workspace_root.resolve()), "python3", "-c", "print('ok')"),
+                executable_identity=executable_identity,
+                profile_identity=profile_identity,
+                expected_outcome=expected,
+                status="PASS",
+                result=CompletedCommand((), 0, expected, "", 1, False),
+                observed_at=observed_at,
+            )
+            for probe_id, expected in (
+                ("workspace_write", "ok"),
+                ("outside_read_denied", "denied"),
+                ("secret_env_denied", "absent"),
+                ("network_denied", "denied"),
+            )
+        )
         self.workspace = PreparedWorkspace(self.workspace_root, "token-123", SandboxAttestation(
             backend="bwrap",
             workspace_root=str(self.workspace_root.resolve()),
             workspace_token="token-123",
-            profile_digest=sandbox_attestation_digest("bwrap", self.workspace_root, "token-123", executable_identity, probe_results),
-            observed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
-            probe_results=probe_results,
+            profile_identity=profile_identity,
+            profile_digest=sandbox_attestation_digest("bwrap", self.workspace_root, "token-123", executable_identity, profile_identity, observations),
+            observed_at=observed_at.isoformat().replace("+00:00", "Z"),
+            probe_observations=observations,
             executable_identity=executable_identity,
         ))
         fixture_base = FixturePolicy(
@@ -133,8 +149,14 @@ class EvaluatorContractTests(unittest.TestCase):
             task="Make tests pass",
             timeout=30,
         )
+        self._which_patch = patch("helper.evaluator.shutil.which", return_value="/fake/bwrap")
+        self._identity_patch = patch("helper.evaluator._executable_identity", return_value=executable_identity)
+        self._which_patch.start()
+        self._identity_patch.start()
 
     def tearDown(self):
+        self._identity_patch.stop()
+        self._which_patch.stop()
         self.temp.cleanup()
 
     def assert_invalid(self, request, reason):
@@ -207,26 +229,119 @@ class EvaluatorContractTests(unittest.TestCase):
             self.fixture.manifest_digest,
         )
         self.assert_invalid(replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(unknown_probe,))), "eval_essential_custom_tool_unproven")
+        arbitrary_time = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         arbitrary_prefix = CapabilityAttestation(
             "custom_safe", "capability:custom_safe:attacker", "PASS",
-            datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            capability_probe_digest(self.request, "custom_safe", "capability:custom_safe:attacker"),
+            arbitrary_time,
+            capability_probe_digest(
+                self.request,
+                "custom_safe",
+                "capability:custom_safe:attacker",
+                status="PASS",
+                observed_at=arbitrary_time,
+            ),
         )
         self.assert_invalid(replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(arbitrary_prefix,))), "eval_essential_custom_tool_unproven")
         probe_id = registered_probe
+        fresh_time = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         fresh = CapabilityAttestation(
             "custom_safe", probe_id, "PASS",
-            datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            capability_probe_digest(self.request, "custom_safe", probe_id),
+            fresh_time,
+            capability_probe_digest(
+                self.request,
+                "custom_safe",
+                probe_id,
+                status="PASS",
+                observed_at=fresh_time,
+            ),
         )
         validate_role_eval_request(replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(fresh,))))
 
+    def test_capability_attestation_boundaries_use_injected_clock(self):
+        custom_reqs = replace(self.requirements, essential_custom_tools=("custom_safe",))
+        probe_id = "capability:custom_safe:confined-tool-v1"
+        base_now = datetime.now(timezone.utc).replace(microsecond=0)
+        fresh_at = (base_now - timedelta(seconds=(24 * 60 * 60))).isoformat().replace("+00:00", "Z")
+        fresh = CapabilityAttestation(
+            "custom_safe",
+            probe_id,
+            "PASS",
+            fresh_at,
+            capability_probe_digest(self.request, "custom_safe", probe_id, status="PASS", observed_at=fresh_at),
+        )
+        validate_role_eval_request(
+            replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(fresh,))),
+            now=base_now,
+        )
+
+        stale_at = (base_now - timedelta(seconds=(24 * 60 * 60) + 1)).isoformat().replace("+00:00", "Z")
+        stale = CapabilityAttestation(
+            "custom_safe",
+            probe_id,
+            "PASS",
+            stale_at,
+            capability_probe_digest(self.request, "custom_safe", probe_id, status="PASS", observed_at=stale_at),
+        )
+        with self.assertRaisesRegex(ValueError, "eval_essential_custom_tool_unproven"):
+            validate_role_eval_request(
+                replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(stale,))),
+                now=base_now,
+            )
+
+        future_at = (base_now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+        future = CapabilityAttestation(
+            "custom_safe",
+            probe_id,
+            "PASS",
+            future_at,
+            capability_probe_digest(self.request, "custom_safe", probe_id, status="PASS", observed_at=future_at),
+        )
+        with self.assertRaisesRegex(ValueError, "eval_essential_custom_tool_unproven"):
+            validate_role_eval_request(
+                replace(self.request, requirements=custom_reqs, fixture=replace(self.fixture, capability_attestations=(future,))),
+                now=base_now,
+            )
+
     def test_request_validation_requires_verified_sandbox_attestation(self):
-        stale_attestation = replace(self.workspace.sandbox_attestation, observed_at="2000-01-01T00:00:00Z")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        stale_at = (now - timedelta(seconds=(24 * 60 * 60) + 1)).isoformat().replace("+00:00", "Z")
+        stale_observations = tuple(replace(item, observed_at=stale_at) for item in self.workspace.sandbox_attestation.probe_observations)
+        stale_digest = sandbox_attestation_digest(
+            self.workspace.sandbox_attestation.backend,
+            self.workspace_root,
+            self.workspace.token,
+            self.workspace.sandbox_attestation.executable_identity,
+            self.workspace.sandbox_attestation.profile_identity,
+            stale_observations,
+        )
+        stale_attestation = replace(self.workspace.sandbox_attestation, observed_at=stale_at, probe_observations=stale_observations, profile_digest=stale_digest)
         self.assert_invalid(replace(self.request, workspace=replace(self.workspace, sandbox_attestation=stale_attestation)), "eval_sandbox_attestation_stale")
+
+        future_at = (now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+        future_observations = tuple(replace(item, observed_at=future_at) for item in self.workspace.sandbox_attestation.probe_observations)
+        future_digest = sandbox_attestation_digest(
+            self.workspace.sandbox_attestation.backend,
+            self.workspace_root,
+            self.workspace.token,
+            self.workspace.sandbox_attestation.executable_identity,
+            self.workspace.sandbox_attestation.profile_identity,
+            future_observations,
+        )
+        future_attestation = replace(self.workspace.sandbox_attestation, observed_at=future_at, probe_observations=future_observations, profile_digest=future_digest)
+        self.assert_invalid(replace(self.request, workspace=replace(self.workspace, sandbox_attestation=future_attestation)), "eval_sandbox_attestation_stale")
+
         wrong_root = replace(self.workspace.sandbox_attestation, workspace_root=str((self.root / "other").resolve()))
         self.assert_invalid(replace(self.request, workspace=replace(self.workspace, sandbox_attestation=wrong_root)), "eval_sandbox_attestation_mismatch")
-        missing_probe = replace(self.workspace.sandbox_attestation, self_tests=("workspace_write:PASS", "outside_read_denied:PASS"))
+        incomplete_observations = self.workspace.sandbox_attestation.probe_observations[:2]
+        incomplete_digest = sandbox_attestation_digest(
+            self.workspace.sandbox_attestation.backend,
+            self.workspace_root,
+            self.workspace.token,
+            self.workspace.sandbox_attestation.executable_identity,
+            self.workspace.sandbox_attestation.profile_identity,
+            incomplete_observations,
+        )
+        missing_probe = replace(self.workspace.sandbox_attestation, probe_observations=incomplete_observations, profile_digest=incomplete_digest)
         self.assert_invalid(replace(self.request, workspace=replace(self.workspace, sandbox_attestation=missing_probe)), "eval_sandbox_attestation_incomplete")
 
     def test_parse_pi_requires_correlated_runtime_tool_execution_events(self):
@@ -303,15 +418,12 @@ class EvaluatorContractTests(unittest.TestCase):
 
     def test_sandbox_selection_self_tests_supported_fake_backend_and_scrubbed_manifest_runs(self):
         runner = RecordingRunner((_command("ok"), _command("denied"), _command("absent"), _command("denied"), _command("tests ok")))
-        with patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "bwrap" else None), patch("pathlib.Path.stat") as stat:
-            stat.return_value.st_ino = 1
-            stat.return_value.st_mtime_ns = 2
-            stat.return_value.st_size = 3
+        with patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "bwrap" else None):
             backend = select_sandbox_backend(runner, self.workspace)
         self.assertIsNotNone(backend)
         self.assertEqual(backend.backend, "bwrap")
-        self.assertEqual({item.split(":", 1)[0] for item in backend.probe_results}, {"workspace_write", "outside_read_denied", "secret_env_denied", "network_denied"})
-        self.assertTrue(all(":PASS:" in item for item in backend.probe_results))
+        self.assertEqual({item.probe_id for item in backend.probe_observations}, {"workspace_write", "outside_read_denied", "secret_env_denied", "network_denied"})
+        self.assertTrue(all(item.status == "PASS" for item in backend.probe_observations))
         audits = run_manifest_commands(runner, self.workspace, self.fixture, backend, timeout=5, env={"SECRET_SENTINEL": "must-not-leak", "PATH": os.environ.get("PATH", "")})
         self.assertEqual(audits, (CommandAudit("cmd-test", 0, 1, "bwrap"),))
         self.assertEqual(runner.cwd_values[-1], self.workspace_root)
@@ -341,8 +453,14 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertEqual(invalid.status, "INCONCLUSIVE")
         invalid_utf8 = changed_paths_from_git_status(_command("?? src/\udcff.txt\x00"), self.workspace)
         self.assertEqual(invalid_utf8.status, "INCONCLUSIVE")
+        decode_replaced = changed_paths_from_git_status(CompletedCommand((), 0, "?? src/out.txt\x00", "", 1, False, False, False, True, False), self.workspace)
+        self.assertEqual(decode_replaced.status, "INCONCLUSIVE")
         overlong = changed_paths_from_git_status(_command("?? " + "x" * 241 + "\x00"), self.workspace)
         self.assertEqual(overlong.status, "INCONCLUSIVE")
+        too_many_stream = "".join(f"?? src/file-{index}.txt\x00" for index in range(130))
+        too_many = changed_paths_from_git_status(_command(too_many_stream), self.workspace)
+        self.assertEqual(too_many.status, "INCONCLUSIVE")
+        self.assertIn("eval_changed_paths_too_large", too_many.reason_codes)
 
     def test_parser_status_matrix_pass_fail_hang_inconclusive(self):
         success = parse_pi_eval_events("\n".join((
@@ -362,6 +480,15 @@ class EvaluatorContractTests(unittest.TestCase):
         self.assertEqual(hang.status, "HANG")
         inconclusive = parse_pi_eval_events("{not-json", self.workspace, self.fixture)
         self.assertEqual(inconclusive.status, "INCONCLUSIVE")
+
+    def test_parser_rejects_candidate_command_backend_mismatch(self):
+        mismatch = "\n".join((
+            json.dumps({"type": "tool_execution_start", "toolCallId": "bash-1", "toolName": "bash", "args": {"command": "python3 -m unittest"}}),
+            json.dumps({"type": "tool_execution_end", "toolCallId": "bash-1", "toolName": "bash", "result": {"details": {"command_id": "cmd-test", "exit_code": 0, "elapsed_ms": 1, "sandbox_backend": "sandbox-exec"}}}),
+        ))
+        parsed = parse_pi_eval_events(mismatch, self.workspace, self.fixture)
+        self.assertEqual(parsed.status, "INCONCLUSIVE")
+        self.assertIn("eval_missing_required_command_audit", parsed.reason_codes)
 
     def test_eval_status_semantics_and_bounded_audit_fail_closed(self):
         failed_command = "\n".join((

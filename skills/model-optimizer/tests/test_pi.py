@@ -1,8 +1,12 @@
 import json
 import math
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,10 +16,12 @@ from helper.evaluator import (
     AllowedCommand,
     FixturePolicy,
     PreparedWorkspace,
+    ProbeObservation,
     RoleEvalRequest,
     SandboxAttestation,
     canonical_fixture_digest,
     prepare_workspace_marker,
+    probe_observation_from_result,
     sandbox_attestation_digest,
 )
 from helper.models import HealthStatus, ModelRecord, ProviderReadiness, ReadinessStatus, RuntimeKind
@@ -36,8 +42,14 @@ class PiAdapterTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.context = RuntimeContext(home=self.root, cwd=self.root / "project", env={})
         self.context.cwd.mkdir()
+        self._which_patch = patch("helper.evaluator.shutil.which", return_value="/fake/bwrap")
+        self._identity_patch = patch("helper.evaluator._executable_identity", return_value="bwrap:/fake/bwrap:1:2:3")
+        self._which_patch.start()
+        self._identity_patch.start()
 
     def tearDown(self):
+        self._identity_patch.stop()
+        self._which_patch.stop()
         self.temp.cleanup()
 
     def test_runtime_context_defensively_copies_env(self):
@@ -497,21 +509,35 @@ ok-provider     ok-model    1K       2K       yes       no
         workspace_root = self.root / "eval-workspace"
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
-        probe_results = (
-            "workspace_write:PASS:sha256:" + "1" * 64,
-            "outside_read_denied:PASS:sha256:" + "2" * 64,
-            "secret_env_denied:PASS:sha256:" + "3" * 64,
-            "network_denied:PASS:sha256:" + "4" * 64,
-        )
+        observed_at = datetime.now(timezone.utc).replace(microsecond=0)
         executable_identity = "bwrap:/fake/bwrap:1:2:3"
+        profile_identity = f"bwrap:{workspace_root.resolve()}:network=none:env=minimal"
+        observations: tuple[ProbeObservation, ...] = tuple(
+            probe_observation_from_result(
+                probe_id=probe_id,
+                argv=("bwrap", "--unshare-net", "--bind", str(workspace_root.resolve()), str(workspace_root.resolve()), "--chdir", str(workspace_root.resolve()), "python3", "-c", "print('ok')"),
+                executable_identity=executable_identity,
+                profile_identity=profile_identity,
+                expected_outcome=expected,
+                status="PASS",
+                result=CompletedCommand((), 0, expected, "", 1, False),
+                observed_at=observed_at,
+            )
+            for probe_id, expected in (
+                ("workspace_write", "ok"),
+                ("outside_read_denied", "denied"),
+                ("secret_env_denied", "absent"),
+                ("network_denied", "denied"),
+            )
+        )
         workspace = PreparedWorkspace(workspace_root, "token-pi", SandboxAttestation(
             backend="bwrap",
             workspace_root=str(workspace_root.resolve()),
             workspace_token="token-pi",
-            profile_digest=sandbox_attestation_digest("bwrap", workspace_root, "token-pi", executable_identity, probe_results),
-            observed_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            self_tests=("workspace_write:PASS", "outside_read_denied:PASS", "secret_env_denied:PASS", "network_denied:PASS"),
-            probe_results=probe_results,
+            profile_identity=profile_identity,
+            profile_digest=sandbox_attestation_digest("bwrap", workspace_root, "token-pi", executable_identity, profile_identity, observations),
+            observed_at=observed_at.isoformat().replace("+00:00", "Z"),
+            probe_observations=observations,
             executable_identity=executable_identity,
         ))
         fixture_base = FixturePolicy(
@@ -561,6 +587,51 @@ ok-provider     ok-model    1K       2K       yes       no
         )
         return RoleEvalRequest(route, model, agent, requirements, workspace, fixture, "Fix the fixture", 30)
 
+    def _run_real_pi_smoke(self, workspace_root: Path, policy: dict[str, object], *, smoke_mode: str, smoke_read_path: str, tools: str = "read,grep,find") -> dict[str, object]:
+        if shutil.which("pi") is None:
+            self.skipTest("pi runtime is not available")
+        extension_path = (Path(__file__).parents[1] / "evals" / "pi-confined-tools.ts").resolve()
+        policy_path = workspace_root / ".model-optimizer-policy.json"
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        smoke_path = workspace_root / "smoke.json"
+        runtime_root = workspace_root / ".runtime"
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(runtime_root / "home"),
+            "XDG_CONFIG_HOME": str(runtime_root / "xdg-config"),
+            "XDG_DATA_HOME": str(runtime_root / "xdg-data"),
+            "XDG_CACHE_HOME": str(runtime_root / "xdg-cache"),
+            "NPM_CONFIG_USERCONFIG": str(runtime_root / "npmrc"),
+            "PI_CODING_AGENT_DIR": str(runtime_root / "agent"),
+            "PI_SESSION_DIR": str(runtime_root / "sessions"),
+            "PI_EVAL_POLICY": str(policy_path.resolve()),
+            "PI_EVAL_SMOKE_FILE": str(smoke_path.resolve()),
+            "PI_EVAL_SMOKE_MODE": smoke_mode,
+            "PI_EVAL_SMOKE_READ_PATH": smoke_read_path,
+        }
+        command = (
+            "pi", "--offline", "--no-extensions", "--no-builtin-tools", "--extension", str(extension_path),
+            "--mode", "rpc", "--no-session", "--session-dir", str(runtime_root / "rpc-sessions"),
+            "--no-context-files", "--no-skills", "--no-prompt-templates", "--tools", tools,
+        )
+        payload = "\n".join((
+            json.dumps({"id": "commands-1", "type": "get_commands"}),
+            json.dumps({"id": "smoke-1", "type": "prompt", "message": "/model_optimizer_eval_smoke"}),
+        )) + "\n"
+        process = subprocess.run(
+            command,
+            cwd=workspace_root,
+            env=env,
+            input=payload,
+            text=True,
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertTrue(smoke_path.exists(), "smoke evidence file should be produced")
+        return json.loads(smoke_path.read_text(encoding="utf-8"))
+
     def test_confined_extension_uses_lstat_and_never_recurses_through_symlinks(self):
         extension = (Path(__file__).parents[1] / "evals" / "pi-confined-tools.ts").read_text(encoding="utf-8")
         self.assertIn("fs.lstatSync(resolved)", extension)
@@ -568,6 +639,54 @@ ok-provider     ok-model    1K       2K       yes       no
         self.assertIn("await fsp.lstat(item)", extension)
         self.assertIn("if (stat.isSymbolicLink()) return", extension)
         self.assertIn("requireAllowed(real, allowedRead", extension)
+
+    def test_real_runtime_smoke_rejects_symlink_escapes_for_read_grep_and_find(self):
+        if not hasattr(os, "symlink"):
+            self.skipTest("symlink support unavailable")
+        workspace = self.root / "smoke-workspace"
+        workspace.mkdir()
+        (workspace / "src").mkdir()
+        outside_dir = self.root / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("sentinel", encoding="utf-8")
+
+        existing_escape = workspace / "src" / "existing-out"
+        dangling_escape = workspace / "src" / "dangling"
+        nested_parent = workspace / "src" / "nested"
+        recursive_escape = workspace / "src" / "recursive"
+        existing_escape.symlink_to(outside_dir / "secret.txt")
+        dangling_escape.symlink_to(outside_dir / "missing.txt")
+        nested_parent.symlink_to(outside_dir)
+        recursive_escape.symlink_to(outside_dir)
+
+        policy = {
+            "workspace_root": str(workspace.resolve()),
+            "token": "token-smoke",
+            "tools": ["read", "grep", "find"],
+            "allowed_read_paths": ["src"],
+            "allowed_write_paths": ["src"],
+            "allowed_commands": [],
+        }
+
+        read_existing = self._run_real_pi_smoke(workspace, policy, smoke_mode="read", smoke_read_path="src/existing-out")
+        self.assertTrue(str(read_existing["helper_probe"]).startswith("FAIL:"))
+        self.assertIn("eval_path_outside_workspace", str(read_existing["helper_probe"]))
+
+        read_dangling = self._run_real_pi_smoke(workspace, policy, smoke_mode="read", smoke_read_path="src/dangling")
+        self.assertTrue(str(read_dangling["helper_probe"]).startswith("FAIL:"))
+        self.assertIn("eval_path_missing_or_dangling_symlink", str(read_dangling["helper_probe"]))
+
+        read_nested = self._run_real_pi_smoke(workspace, policy, smoke_mode="read", smoke_read_path="src/nested/secret.txt")
+        self.assertTrue(str(read_nested["helper_probe"]).startswith("FAIL:"))
+        self.assertIn("eval_path_outside_workspace", str(read_nested["helper_probe"]))
+
+        grep_recursive = self._run_real_pi_smoke(workspace, policy, smoke_mode="grep", smoke_read_path="src/recursive")
+        self.assertTrue(str(grep_recursive["helper_probe"]).startswith("FAIL:"))
+        self.assertIn("eval_path_outside_workspace", str(grep_recursive["helper_probe"]))
+
+        find_recursive = self._run_real_pi_smoke(workspace, policy, smoke_mode="find", smoke_read_path="src/recursive")
+        self.assertTrue(str(find_recursive["helper_probe"]).startswith("FAIL:"))
+        self.assertIn("eval_path_outside_workspace", str(find_recursive["helper_probe"]))
 
     def test_role_eval_constructs_confined_pi_command_and_parses_audit(self):
         request = self._role_eval_request()
@@ -577,11 +696,23 @@ ok-provider     ok-model    1K       2K       yes       no
             json.dumps({"type": "tool_execution_start", "toolCallId": "call-2", "toolName": "write", "args": {"path": "src/out.txt"}}),
             json.dumps({"type": "tool_execution_end", "toolCallId": "call-2", "toolName": "write", "isError": False, "result": {"details": {}}}),
         ))
-        runner = FakeRunner((_command("0.84.2\n"), _command(events), _command("?? src/out.txt\x00")))
+        preflight = json.dumps({
+            "id": "commands-1",
+            "type": "response",
+            "command": "get_commands",
+            "success": True,
+            "data": {"commands": [{"name": "model_optimizer_eval_smoke", "source": "extension"}]},
+        })
+        runner = FakeRunner((_command("0.84.2\n"), _command(preflight + "\n"), _command(events), _command("?? src/out.txt\x00")))
         result = PiAdapter(runner).role_eval(request, self.context)
-        argv = runner.argv[0]
         self.assertEqual(runner.argv[0], ("pi", "--version"))
-        argv = runner.argv[1]
+
+        preflight_argv = runner.argv[1]
+        for flag in ("--offline", "--mode", "rpc", "--no-extensions", "--no-builtin-tools", "--extension", "--no-session", "--session-dir", "--no-context-files", "--no-skills", "--no-prompt-templates", "--tools"):
+            self.assertIn(flag, preflight_argv)
+        self.assertEqual(preflight_argv[preflight_argv.index("--tools") + 1], ",".join(request.agent.tools))
+
+        argv = runner.argv[2]
         for flag in ("--no-extensions", "--no-builtin-tools", "--extension", "--mode", "json", "--no-session", "--no-context-files", "--no-skills", "--no-prompt-templates", "--tools", "--system-prompt"):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index("--model") + 1], request.route.model)
@@ -590,15 +721,40 @@ ok-provider     ok-model    1K       2K       yes       no
         extension_path = Path(argv[argv.index("--extension") + 1])
         self.assertTrue(extension_path.is_absolute())
         self.assertEqual(extension_path.name, "pi-confined-tools.ts")
+
+        preflight_env = runner.env_replacements[1]
+        self.assertIsNotNone(preflight_env)
+        self.assertIn("HOME", preflight_env)
+        self.assertIn("PI_CODING_AGENT_DIR", preflight_env)
+        self.assertIn("PI_SESSION_DIR", preflight_env)
+        self.assertIn("XDG_CONFIG_HOME", preflight_env)
+        self.assertIn("XDG_DATA_HOME", preflight_env)
+
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.audit.changed_paths, ("src/out.txt",))
         self.assertEqual(runner.stdout_limits[0], MAX_STDOUT_LIMIT_CHARS)
+        self.assertNotIn(None, runner.stdout_limits)
         self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"))
+
+    def test_role_eval_fails_closed_when_rpc_commands_include_ambient_extension(self):
+        request = self._role_eval_request()
+        preflight = _command(json.dumps({
+            "id": "commands-1",
+            "type": "response",
+            "command": "get_commands",
+            "success": True,
+            "data": {"commands": [{"name": "model_optimizer_eval_smoke"}, {"name": "llama"}]},
+        }) + "\n")
+        runner = FakeRunner((_command("0.84.2\n"), preflight))
+        result = PiAdapter(runner).role_eval(request, self.context)
+        self.assertEqual(result.status, "INCONCLUSIVE")
+        self.assertIn("eval_pi_isolation_unavailable", result.reason_codes)
 
     def test_role_eval_runtime_timeout_is_hang_boundary(self):
         request = self._role_eval_request()
         timeout = CompletedCommand((), None, "", "", 31, True, False, False)
-        runner = FakeRunner((_command("0.84.2\n"), timeout))
+        preflight = _command(json.dumps({"id": "commands-1", "type": "response", "command": "get_commands", "success": True, "data": {"commands": [{"name": "model_optimizer_eval_smoke"}]}}) + "\n")
+        runner = FakeRunner((_command("0.84.2\n"), preflight, timeout))
         result = PiAdapter(runner).role_eval(request, self.context)
         self.assertEqual(result.status, "HANG")
         self.assertIn("eval_timeout", result.reason_codes)

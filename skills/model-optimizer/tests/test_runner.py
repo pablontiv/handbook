@@ -236,10 +236,21 @@ class RunnerTests(unittest.TestCase):
                 "timed_out",
                 "stdout_truncated",
                 "stderr_truncated",
+                "stdout_decode_replaced",
+                "stderr_decode_replaced",
             },
         )
 
     @unittest.skipIf(os.name == "nt", "POSIX process-group cleanup is validated on POSIX hosts only")
+    def test_decode_replacement_flags_when_subprocess_emits_invalid_utf8(self):
+        result = CommandRunner().run(
+            (sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xff')"),
+            timeout=2,
+            cwd=Path.cwd(),
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout_decode_replaced)
+
     def test_timeout_kills_child_process_group_without_leaving_active_child(self):
         with tempfile.TemporaryDirectory() as td:
             heartbeat = Path(td) / "heartbeat.txt"

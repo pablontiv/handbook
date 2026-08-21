@@ -704,7 +704,9 @@ class OpenCodeAdapter:
             return inconclusive_result(request, "eval_runtime_kind_mismatch")
         if unsupported_custom_tools(request.agent):
             return inconclusive_result(request, "eval_essential_custom_tool_unproven")
-        minimal_env = {"PATH": context.env.get("PATH") or os.environ.get("PATH", "")}
+
+        path_value = context.env.get("PATH") or os.environ.get("PATH", "")
+        minimal_env = {"PATH": path_value}
         version = self.runner.run(("opencode", "--version"), timeout=10, cwd=context.cwd, env_replacement=minimal_env, stdout_limit=MAX_STDOUT_LIMIT_CHARS)
         if version.timed_out or version.returncode != 0 or version.stdout.strip() != request.route.runtime_version:
             return inconclusive_result(request, "eval_runtime_version_mismatch", elapsed_ms=version.elapsed_ms)
@@ -718,6 +720,7 @@ class OpenCodeAdapter:
         token = secrets.token_hex(16)
         if not isinstance(token, str) or re.fullmatch(r"[0-9a-f]{32}", token) is None:
             return inconclusive_result(request, "eval_opencode_agent_name_unsafe")
+
         agent_name = f"model-optimizer-eval-{token}"
         xdg_config_home = request.workspace.root / f".opencode-eval-config-{token}"
         xdg_data_home = request.workspace.root / f".opencode-eval-data-{token}"
@@ -749,11 +752,12 @@ class OpenCodeAdapter:
                 config_path = config_dir / "opencode.json"
                 config_bytes = json.dumps(expected_config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
                 config_path.write_bytes(config_bytes)
-                env_replacement = isolated_opencode_env(context.env, xdg_config_home, xdg_data_home, request.model_record.provider)
-                if env_replacement is None:
-                    return inconclusive_result(request, "eval_opencode_auth_unavailable")
             except OSError:
                 return inconclusive_result(request, "eval_opencode_config_write_failed")
+
+            env_replacement = isolated_opencode_env(context.env, xdg_config_home, xdg_data_home, request.model_record.provider)
+            if env_replacement is None:
+                return inconclusive_result(request, "eval_opencode_auth_unavailable")
 
             debug = self.runner.run(
                 ("opencode", "debug", "config", "--pure"),
@@ -811,6 +815,7 @@ class OpenCodeAdapter:
                 )
             except ValueError as exc:
                 return inconclusive_result(request, str(exc) or "eval_invalid_command_audit", elapsed_ms=run.elapsed_ms)
+
             required_ids = {command.command_id for command in request.fixture.allowed_commands}
             successful_ids = {audit.command_id for audit in command_runs if audit.exit_code == 0}
             timed_out_ids = {audit.command_id for audit in command_runs if audit.exit_code is None}
@@ -820,16 +825,26 @@ class OpenCodeAdapter:
                 role_result = append_command_audits(role_result, command_runs, status="FAIL", reason_codes=("eval_required_command_failed",))
             else:
                 role_result = append_command_audits(role_result, command_runs, status="PASS", reason_codes=())
-            diff = self.runner.run(("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"), timeout=10, cwd=request.workspace.root, env_replacement=minimal_env, stdout_limit=None)
+
+            diff = self.runner.run(
+                ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+                timeout=10,
+                cwd=request.workspace.root,
+                env_replacement=minimal_env,
+                stdout_limit=MAX_STDOUT_LIMIT_CHARS,
+            )
             return with_changed_paths_result(role_result, changed_paths_from_git_status(diff, request.workspace))
 
+        final_result = inconclusive_result(request, "eval_opencode_runtime_exception")
         try:
             final_result = evaluate_once()
         except Exception:
             final_result = inconclusive_result(request, "eval_opencode_runtime_exception")
-        cleanup_reason = cleanup()
-        if cleanup_reason:
-            final_result = with_cleanup_failure(final_result, cleanup_reason)
+        finally:
+            cleanup_reason = cleanup()
+            if cleanup_reason:
+                final_result = with_cleanup_failure(final_result, cleanup_reason)
+
         return final_result
 
     def reload_semantics(self, context: RuntimeContext) -> dict[str, Any]:
