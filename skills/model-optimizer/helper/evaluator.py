@@ -15,6 +15,7 @@ from typing import Any
 
 from helper.models import ModelRecord, RuntimeKind
 from helper.optimizer import AgentContract, RoleRequirements, RouteKey
+from helper.state import EvaluationSummary
 from helper.runner import CompletedCommand, MAX_STDOUT_LIMIT_CHARS, redact_text
 
 _MARKER_NAME = ".model-optimizer-eval.json"
@@ -188,6 +189,30 @@ class GradeResult:
 
 
 @dataclass(frozen=True)
+class EvaluationArtifact:
+    schema: str
+    created_at: str
+    inventory_digest: str
+    route: RouteKey
+    agent_digest: str
+    fixture_id: str
+    fixture_version: str
+    result: EvaluationSummary
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "created_at": self.created_at,
+            "inventory_digest": self.inventory_digest,
+            "route": _route_to_dict(self.route),
+            "agent_digest": self.agent_digest,
+            "fixture_id": self.fixture_id,
+            "fixture_version": self.fixture_version,
+            "result": _evaluation_summary_to_dict(self.result),
+        }
+
+
+@dataclass(frozen=True)
 class ParsedEvalOutput:
     status: str
     final_text: str
@@ -211,6 +236,35 @@ class SandboxProbeSpec:
     probe_id: str
     command: tuple[str, ...]
     expected_outcome: str
+
+
+def _route_to_dict(route: RouteKey) -> dict[str, Any]:
+    return {
+        "runtime_kind": route.runtime_kind.value,
+        "runtime_version": route.runtime_version,
+        "model": route.model,
+        "effort": route.effort,
+    }
+
+
+def _evaluation_summary_to_dict(summary: EvaluationSummary) -> dict[str, Any]:
+    return {
+        "key": {
+            "route": _route_to_dict(summary.key.route),
+            "agent_digest": summary.key.agent_digest,
+            "tool_digest": summary.key.tool_digest,
+            "fixture_id": summary.key.fixture_id,
+            "fixture_version": summary.key.fixture_version,
+            "model_fingerprint": summary.key.model_fingerprint,
+        },
+        "created_at": summary.created_at,
+        "success": summary.success,
+        "role_score": summary.role_score,
+        "contract_success": summary.contract_success,
+        "elapsed_ms": summary.elapsed_ms,
+        "metered_cost": summary.metered_cost,
+        "reason_codes": list(summary.reason_codes),
+    }
 
 
 def empty_audit() -> ToolAudit:

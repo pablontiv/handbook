@@ -12,6 +12,7 @@ from threading import Lock
 from unittest.mock import patch
 
 from helper.artifacts import inventory_with_digest, load_health, write_inventory
+from helper.evaluator import CommandAudit, RoleEvalResult, SandboxAttestation, ToolAudit
 from helper.models import (
     HealthStatus,
     Inventory,
@@ -21,7 +22,9 @@ from helper.models import (
     RuntimeInfo,
     RuntimeKind,
 )
+from helper.optimizer import AgentContract, PermissionRule, RouteKey
 from helper.runner import CompletedCommand
+from helper.state import load_state
 from scripts.model_optimizer import main
 from tests.support import FakeRunner, _command, copy_pi_fixtures_to_home, fixture_text, pi_inventory_runner_from_fixtures
 
@@ -101,6 +104,71 @@ class TimeoutCapturingRunner:
         self.argv.append(tuple(argv))
         self.timeouts.append(timeout)
         return CompletedCommand(tuple(argv), 0, "PONG\n", "", 7, False)
+
+
+def eval_agent(name: str = "implementer") -> AgentContract:
+    return AgentContract(
+        name=name,
+        description="Temporary test agent",
+        mode=None,
+        model=None,
+        effort=None,
+        tools=("read", "edit"),
+        permissions=(PermissionRule("write", "*", "allow"),),
+        mutation_authority="allowed",
+        body="No secrets here.",
+        scope="project",
+        definition_source="project:agents/implementer.md",
+        assignment_source=None,
+        inheritance_sources=(),
+        apply_target=None,
+        digest=f"sha256:{name}-digest",
+    )
+
+
+class RoleEvalAdapter:
+    def __init__(self, status: str, *, final_text: str = "", command_exit: int | None = 0):
+        self.status = status
+        self.final_text = final_text
+        self.command_exit = command_exit
+        self.requests = []
+
+    def role_eval(self, request, context):
+        self.requests.append((request, context))
+        audit = ToolAudit(
+            tool_names=("read", "edit"),
+            command_runs=(CommandAudit("python-unittest", self.command_exit, 10, "bwrap"),),
+            changed_paths=("slugify.py",) if self.status == "PASS" else (),
+            outside_workspace_attempts=0,
+            unauthorized_tools=(),
+        )
+        return RoleEvalResult(
+            route=request.route,
+            fixture_id=request.fixture.fixture_id,
+            fixture_version=request.fixture.fixture_version,
+            manifest_digest=request.fixture.manifest_digest,
+            status=self.status,
+            elapsed_ms=10,
+            final_text=self.final_text,
+            audit=audit,
+            input_tokens=11,
+            output_tokens=12,
+            cache_read_tokens=0,
+            metered_cost=0.01,
+            reason_codes=("eval_test_reason",) if self.status != "PASS" else (),
+        )
+
+
+def sandbox_attestation() -> SandboxAttestation:
+    return SandboxAttestation(
+        backend="bwrap",
+        workspace_root="/tmp/model-optimizer-test",
+        workspace_token="token",
+        profile_identity="test-profile",
+        profile_digest="sha256:test-profile",
+        observed_at="2026-08-20T00:00:00Z",
+        probe_observations=(),
+    )
 
 
 class ReloadSemanticsAdapter:
@@ -560,6 +628,183 @@ class CliTests(unittest.TestCase):
         self.assertEqual(opencode_inventory_code, 0, opencode_inventory_stderr)
         self.assertEqual(opencode_check_code, 0, opencode_check_stderr)
         self.assertEqual(after, before)
+
+    def test_evaluate_parser_schema_path_privacy_config_bytes_and_exit_codes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            cache_root = root / "cache"
+            pi_agent = root / ".pi" / "agent"
+            opencode_config = root / ".config" / "opencode"
+            pi_agent.mkdir(parents=True)
+            opencode_config.mkdir(parents=True)
+            pi_settings = pi_agent / "settings.json"
+            oc_settings = opencode_config / "opencode.json"
+            pi_settings.write_bytes(b"pi-config")
+            oc_settings.write_bytes(b"opencode-config")
+            inventory = write_fixture_inventory(root, ("nan/qwen3.6",))
+            before = {path: path.read_bytes() for path in (pi_settings, oc_settings)}
+
+            adapter = RoleEvalAdapter("PASS", final_text=f"secret={SECRET}")
+            output = root / "evaluation.json"
+            with patch("scripts.model_optimizer.discover_agent_contracts", return_value=(eval_agent(),)), \
+                 patch("scripts.model_optimizer.adapter_for", return_value=adapter), \
+                 patch("scripts.model_optimizer.select_sandbox_backend", return_value=sandbox_attestation()):
+                code, stdout, stderr = run_cli(root, FakeRunner(()), {"pi"},
+                    "evaluate", "--inventory", str(inventory), "--agent", "implementer",
+                    "--model", "nan/qwen3.6", "--effort", "high", "--fixture", "mechanical-slugify",
+                    "--timeout", "1", "--output", str(output), environ={"XDG_CACHE_HOME": str(cache_root)})
+            payload = json.loads(output.read_text(encoding="utf-8")) if output.exists() else {}
+            inventory_digest = json.loads(Path(inventory).read_text())["digest"]
+            state = load_state(cache_root / "model-optimizer" / "state.json")
+            after = {path: path.read_bytes() for path in before}
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("evaluation=PASS", stdout)
+        self.assertEqual(payload["schema"], "model-optimizer.evaluation/v1")
+        self.assertEqual(payload["inventory_digest"], inventory_digest)
+        self.assertNotIn(SECRET, json.dumps(payload))
+        self.assertEqual(after, before)
+        self.assertEqual(len(state.evaluations), 1)
+        self.assertTrue(state.evaluations[0].success)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            inventory = write_fixture_inventory(root, ("nan/qwen3.6",))
+            with patch("scripts.model_optimizer.discover_agent_contracts", return_value=(eval_agent(),)), \
+                 patch("scripts.model_optimizer.adapter_for", return_value=RoleEvalAdapter("FAIL", command_exit=1)), \
+                 patch("scripts.model_optimizer.select_sandbox_backend", return_value=sandbox_attestation()):
+                fail_code, _, fail_stderr = run_cli(root, FakeRunner(()), {"pi"},
+                    "evaluate", "--inventory", str(inventory), "--agent", "implementer",
+                    "--model", "nan/qwen3.6", "--effort", "high", "--fixture", "mechanical-slugify", "--timeout", "1",
+                    environ={"XDG_CACHE_HOME": str(root / "cache")})
+            with patch("scripts.model_optimizer.discover_agent_contracts", return_value=(eval_agent(),)), \
+                 patch("scripts.model_optimizer.adapter_for", return_value=RoleEvalAdapter("INCONCLUSIVE", command_exit=None)), \
+                 patch("scripts.model_optimizer.select_sandbox_backend", return_value=sandbox_attestation()):
+                inconclusive_code, _, inconclusive_stderr = run_cli(root, FakeRunner(()), {"pi"},
+                    "evaluate", "--inventory", str(inventory), "--agent", "implementer",
+                    "--model", "nan/qwen3.6", "--effort", "high", "--fixture", "mechanical-slugify", "--timeout", "1",
+                    environ={"XDG_CACHE_HOME": str(root / "cache2")})
+        self.assertEqual(fail_code, 5, fail_stderr)
+        self.assertEqual(inconclusive_code, 6, inconclusive_stderr)
+
+    def test_evaluate_rejects_parser_schema_path_and_binding_preconditions_before_adapter(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ready_root = root / "ready"
+            opencode_root = root / "opencode-inventory"
+            not_ready_root = root / "not-ready"
+            ready_root.mkdir()
+            opencode_root.mkdir()
+            not_ready_root.mkdir()
+            ready_inventory = write_fixture_inventory(ready_root, ("nan/qwen3.6",))
+            opencode_inventory = write_fixture_inventory(opencode_root, ("openai/gpt",), runtime=RuntimeKind.OPENCODE)
+            not_ready_inventory = write_fixture_inventory(not_ready_root, ("nan/qwen3.6",), ready_providers=())
+            forbidden_output = root / ".pi" / "agent" / "eval.json"
+            forbidden_output.parent.mkdir(parents=True)
+            representative = root / "representative"
+            representative.mkdir()
+            (representative / ".model-optimizer-representative-token").write_text("token", encoding="utf-8")
+            (representative / "eval.json").write_text(json.dumps({"schema": "wrong"}), encoding="utf-8")
+            cases = (
+                ("duplicate-model", ("--model", "nan/qwen3.6", "--model", "nan/qwen3.6", "--fixture", "mechanical-slugify"), ready_inventory, (eval_agent(),), "usage_"),
+                ("missing-model", ("--model", "other/model", "--fixture", "mechanical-slugify"), ready_inventory, (eval_agent(),), "eval_model_not_catalog_local"),
+                ("not-ready", ("--model", "nan/qwen3.6", "--fixture", "mechanical-slugify"), not_ready_inventory, (eval_agent(),), "eval_provider_not_ready"),
+                ("bad-effort", ("--model", "openai/gpt", "--fixture", "mechanical-slugify"), opencode_inventory, (eval_agent(),), "eval_unsupported_effort"),
+                ("unknown-agent", ("--model", "nan/qwen3.6", "--fixture", "mechanical-slugify"), ready_inventory, (), "eval_agent_unknown"),
+                ("ambiguous-agent", ("--model", "nan/qwen3.6", "--fixture", "mechanical-slugify"), ready_inventory, (eval_agent(), eval_agent()), "eval_agent_ambiguous"),
+                ("unknown-fixture", ("--model", "nan/qwen3.6", "--fixture", "missing-fixture"), ready_inventory, (eval_agent(),), "eval_fixture_unknown"),
+                ("bad-representative", ("--model", "nan/qwen3.6", "--fixture-path", str(representative), "--fixture-token", "wrong"), ready_inventory, (eval_agent(),), "eval_representative_token_mismatch"),
+                ("forbidden-output", ("--model", "nan/qwen3.6", "--fixture", "mechanical-slugify", "--output", str(forbidden_output)), ready_inventory, (eval_agent(),), "usage_output_forbidden"),
+            )
+            for name, extra, inventory, agents, expected in cases:
+                with self.subTest(name=name):
+                    adapter = RoleEvalAdapter("PASS")
+                    with patch("scripts.model_optimizer.discover_agent_contracts", return_value=agents), \
+                         patch("scripts.model_optimizer.adapter_for", return_value=adapter), \
+                         patch("scripts.model_optimizer.select_sandbox_backend", return_value=sandbox_attestation()):
+                        effort = "medium" if name == "bad-effort" else "high"
+                        code, _, stderr = run_cli(root, FakeRunner(()), {"pi", "opencode"},
+                            "evaluate", "--inventory", str(inventory), "--agent", "implementer",
+                            *extra, "--effort", effort, "--timeout", "1", environ={"XDG_CACHE_HOME": str(root / "cache")})
+                    self.assertEqual(code, 2, stderr)
+                    self.assertIn(expected, stderr)
+                    self.assertEqual(adapter.requests, [])
+
+    def test_cache_benchmark_validates_inputs_preserves_config_bytes_and_restricts_state_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pi_agent = root / ".pi" / "agent"
+            opencode_config = root / ".config" / "opencode"
+            pi_agent.mkdir(parents=True)
+            opencode_config.mkdir(parents=True)
+            pi_settings = pi_agent / "settings.json"
+            oc_settings = opencode_config / "opencode.json"
+            pi_settings.write_bytes(b"pi-config")
+            oc_settings.write_bytes(b"opencode-config")
+            ready_root = root / "ready"
+            not_ready_root = root / "not-ready"
+            ready_root.mkdir()
+            not_ready_root.mkdir()
+            ready_inventory = write_fixture_inventory(ready_root, ("openai/gpt",), runtime=RuntimeKind.OPENCODE)
+            not_ready_inventory = write_fixture_inventory(not_ready_root, ("nan/qwen3.6",), ready_providers=())
+            before = {path: path.read_bytes() for path in (pi_settings, oc_settings)}
+            base = (
+                "cache-benchmark", "--inventory", str(ready_inventory), "--model", "openai/gpt", "--effort", "high",
+                "--identity", "EXACT", "--source-name", "suite", "--benchmark", "SWE-mini", "--benchmark-version", "2026-08",
+                "--source-url", "https://example.test/results?token=secret", "--evaluated-model-identity", "openai/gpt",
+                "--observed-at", "2026-08-20T00:00:00Z", "--metric-name", "score", "--metric-value", "1.0",
+            )
+            cases = (
+                ("identity", ("--identity", "NOT_A_CLASS"), "identity_invalid", ready_inventory, str(root / "cache")),
+                ("url", ("--source-url", "http://example.test/results"), "benchmark_source_url_invalid", ready_inventory, str(root / "cache")),
+                ("timestamp", ("--observed-at", "2026-08-20 00:00:00"), "benchmark_observed_at_invalid", ready_inventory, str(root / "cache")),
+                ("metric", ("--metric-value", "nan"), "benchmark_metric_invalid", ready_inventory, str(root / "cache")),
+                ("missing-model", ("--model", "other/model"), "benchmark_model_not_catalog_local", ready_inventory, str(root / "cache")),
+                ("not-ready", ("--inventory", str(not_ready_inventory), "--model", "nan/qwen3.6"), "benchmark_provider_not_ready", not_ready_inventory, str(root / "cache")),
+                ("bad-effort", ("--effort", "medium"), "benchmark_unsupported_effort", ready_inventory, str(root / "cache")),
+                ("forbidden-state", (), "state_path_forbidden", ready_inventory, str(pi_agent / "cache")),
+            )
+            for name, replacements, _expected, _inventory, cache_home in cases:
+                argv = list(base)
+                for key, value in zip(replacements[0::2], replacements[1::2]):
+                    index = argv.index(key)
+                    argv[index + 1] = value
+                with self.subTest(name=name):
+                    code, _, stderr = run_cli(root, FakeRunner(()), {"opencode"}, *argv, environ={"XDG_CACHE_HOME": cache_home})
+                    self.assertEqual(code, 2, stderr)
+                    self.assertIn(_expected, stderr)
+            after = {path: path.read_bytes() for path in before}
+        self.assertEqual(after, before)
+
+    def test_cache_benchmark_locked_update_writes_only_cache_and_preserves_identity_distinctions(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            inventory = write_fixture_inventory(root, ("openai/gpt",), runtime=RuntimeKind.OPENCODE)
+            cache_home = root / "cache"
+            base = (
+                "cache-benchmark", "--inventory", str(inventory), "--model", "openai/gpt", "--effort", "high",
+                "--source-name", "suite", "--benchmark", "SWE-mini", "--benchmark-version", "2026-08",
+                "--source-url", "https://example.test/results?token=secret", "--observed-at", "2026-08-20T00:00:00Z",
+                "--metric-name", "score", "--metric-value", "omit",
+            )
+            source_unavailable, _, source_err = run_cli(root, FakeRunner(()), {"opencode"}, *base,
+                "--identity", "SOURCE_UNAVAILABLE", "--evaluated-model-identity", "openai/gpt", environ={"XDG_CACHE_HOME": str(cache_home)})
+            absent, _, absent_err = run_cli(root, FakeRunner(()), {"opencode"}, *base,
+                "--identity", "ABSENT", "--evaluated-model-identity", "openai/gpt", environ={"XDG_CACHE_HOME": str(cache_home)})
+            proxy, _, proxy_err = run_cli(root, FakeRunner(()), {"opencode"}, *base,
+                "--identity", "FAMILY_PROXY", "--evaluated-model-identity", "gpt-family", "--reasoning-mode", "high", environ={"XDG_CACHE_HOME": str(cache_home)})
+            state_path = cache_home / "model-optimizer" / "state.json"
+            state_exists = state_path.exists()
+            state = load_state(state_path)
+            state_files = sorted(path.relative_to(cache_home).as_posix() for path in cache_home.rglob("*"))
+        self.assertEqual(source_unavailable, 0, source_err)
+        self.assertEqual(absent, 0, absent_err)
+        self.assertEqual(proxy, 0, proxy_err)
+        self.assertTrue(state_exists)
+        self.assertIn("model-optimizer/state.json", state_files)
+        self.assertIn("model-optimizer/state.json.lock", state_files)
+        self.assertEqual([summary.identity for summary in state.benchmarks], ["SOURCE_UNAVAILABLE", "FAMILY_PROXY"])
+        self.assertEqual(state.benchmarks[0].metric_value, None)
+        self.assertEqual(state.benchmarks[0].source_url, "https://example.test/results")
 
     def test_main_rejects_injected_test_overrides_without_test_mode_before_runner_or_artifact_access(self):
         with tempfile.TemporaryDirectory() as td:

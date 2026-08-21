@@ -23,6 +23,7 @@ from helper.artifacts import (
     write_inventory,
     write_json_atomic,
 )
+from helper.evaluator import EvaluationArtifact
 from helper.models import (
     CurrentAssignment,
     HealthArtifact,
@@ -33,10 +34,46 @@ from helper.models import (
     RuntimeInfo,
     RuntimeKind,
 )
+from helper.optimizer import RouteKey
+from helper.state import EvaluationKey, EvaluationSummary
 from tests.support import assert_test_path
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_evaluation_artifact_schema_is_bounded_and_privacy_preserving(self):
+        secret = "sk-artifact-secret"
+        route = RouteKey(RuntimeKind.PI, "test", "nan/qwen3.6", "high")
+        summary = EvaluationSummary(
+            key=EvaluationKey(route, "sha256:agent", "sha256:tools", "mechanical-slugify", "1", "sha256:model"),
+            created_at="2026-08-20T00:00:00Z",
+            success=True,
+            role_score=1.0,
+            contract_success=True,
+            elapsed_ms=10,
+            metered_cost=None,
+            reason_codes=("eval_pass",),
+        )
+        artifact = EvaluationArtifact(
+            schema="model-optimizer.evaluation/v1",
+            created_at="2026-08-20T00:00:00Z",
+            inventory_digest="sha256:inventory",
+            route=route,
+            agent_digest="sha256:agent",
+            fixture_id="mechanical-slugify",
+            fixture_version="1",
+            result=summary,
+        ).to_dict()
+        serialized = json.dumps({"artifact": artifact, "forbidden_probe": secret})
+        artifact_only = json.dumps(artifact)
+        self.assertEqual(artifact["schema"], "model-optimizer.evaluation/v1")
+        self.assertEqual(artifact["route"]["model"], "nan/qwen3.6")
+        self.assertIn("result", artifact)
+        self.assertNotIn("final_text", artifact_only)
+        self.assertNotIn("task", artifact_only)
+        self.assertNotIn("tool_arguments", artifact_only)
+        self.assertNotIn(secret, artifact_only)
+        self.assertIn(secret, serialized)
+
     def test_byte_inventory_captures_before_after_config_boundaries(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
