@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 from helper.runner import CompletedCommand
 
 FIXTURES = Path(__file__).parent / "fixtures"
+FAKE_BWRAP_PATH = str((Path(tempfile.gettempdir()) / "model-optimizer-fake-bwrap").resolve())
 
 
 def assert_test_path(path: Path, temp_root: Path) -> None:

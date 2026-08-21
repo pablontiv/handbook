@@ -31,7 +31,7 @@ from helper.evaluator import (
 from helper.models import HealthStatus, ModelRecord, ReadinessStatus, RuntimeKind
 from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
 from helper.runner import MAX_STDOUT_LIMIT_CHARS, CompletedCommand
-from tests.support import FakeRunner, _command, assert_test_path, fixture_text
+from tests.support import FAKE_BWRAP_PATH, FakeRunner, _command, assert_test_path, fixture_text
 
 
 class EnvCapturingRunner(FakeRunner):
@@ -73,8 +73,8 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.context = RuntimeContext(home=self.root, cwd=self.root / "project", env={})
         self.context.cwd.mkdir()
-        self._which_patch = patch("helper.evaluator.shutil.which", return_value="/fake/bwrap")
-        self._identity_patch = patch("helper.evaluator._executable_identity", return_value="bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64))
+        self._which_patch = patch("helper.evaluator.shutil.which", return_value=FAKE_BWRAP_PATH)
+        self._identity_patch = patch("helper.evaluator._executable_identity", return_value=f"bwrap:{FAKE_BWRAP_PATH}:1:2:3:sha256:" + ("0" * 64))
         self._which_patch.start()
         self._identity_patch.start()
 
@@ -917,7 +917,7 @@ openai/gpt-second
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
         observed_at = datetime.now(timezone.utc).replace(microsecond=0)
-        executable_identity = "bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64)
+        executable_identity = f"bwrap:{FAKE_BWRAP_PATH}:1:2:3:sha256:" + ("0" * 64)
         profile_identity = f"bwrap:{workspace_root.resolve()}:network=none:env=minimal"
         outside_probe = workspace_root.resolve().parent / ".model-optimizer-outside-token-opencode.txt"
         probe_specs = (
@@ -962,7 +962,7 @@ openai/gpt-second
             probe_observation_from_result(
                 probe_id=probe_id,
                 argv=(
-                    "/fake/bwrap",
+                    FAKE_BWRAP_PATH,
                     "--unshare-net",
                     "--bind",
                     str(workspace_root.resolve()),
@@ -1138,7 +1138,7 @@ openai/gpt-second
             "OPENAI_API_KEY": "runtime-auth-token",
         }
         context = RuntimeContext(home=self.root, cwd=self.context.cwd, env=original_env)
-        with patch("helper.adapters.opencode.secrets.token_hex", return_value="a" * 32), patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "bwrap" else None):
+        with patch("helper.adapters.opencode.secrets.token_hex", return_value="a" * 32), patch("helper.evaluator.shutil.which", side_effect=lambda name: FAKE_BWRAP_PATH if name == "bwrap" else None):
             result = OpenCodeAdapter(runner).role_eval(request, context)
         self.assertEqual(result.status, "PASS")
         self.assertEqual(context.env, original_env)
@@ -1159,7 +1159,7 @@ openai/gpt-second
         config_path = Path(debug_env["XDG_CONFIG_HOME"]) / "opencode" / "opencode.json"
         self.assertFalse(config_path.exists(), "isolated config root should be cleaned after role_eval")
         self.assertEqual(result.audit.command_runs[-1].command_id, "cmd-test")
-        self.assertEqual(runner.argv[3][0], "/fake/bwrap")
+        self.assertEqual(runner.argv[3][0], FAKE_BWRAP_PATH)
         self.assertIn("--unshare-net", runner.argv[3])
         self.assertEqual(runner.argv[-1], ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"))
         self.assertNotIn(None, runner.stdout_limits)

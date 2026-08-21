@@ -40,6 +40,7 @@ from helper.evaluator import (
 from helper.models import HealthCheck, HealthStatus, ModelRecord, RuntimeKind
 from helper.optimizer import AgentContract, CandidateEvidence, FixtureEvidence, IdentityMatch, PermissionRule, RoleRequirements, RouteKey, RunObservation, choose_mapping
 from helper.runner import CommandRunner
+from tests.support import FAKE_BWRAP_PATH
 
 MECHANICAL = ("mechanical-slugify", "mechanical-duration")
 REGRESSION = ("regression-timeout", "regression-retry-delay")
@@ -190,10 +191,10 @@ def fixtures_only() -> int:
 
 def FAKE_SANDBOX_ATTESTATION(workspace: PreparedWorkspace) -> SandboxAttestation:
     observed = datetime.now(timezone.utc).replace(microsecond=0)
-    executable_identity = "bwrap:/fake/bwrap:1:1:1:sha256:" + ("0" * 64)
+    executable_identity = f"bwrap:{FAKE_BWRAP_PATH}:1:1:1:sha256:" + ("0" * 64)
     profile_identity = f"bwrap:{workspace.root.resolve()}:network=none:env=minimal"
     observations = tuple(
-        ProbeObservation(probe_id, ("/fake/bwrap", "probe", probe_id), executable_identity, profile_identity, expected, "PASS", 0, False, False, False, "sha256:test", "sha256:test", observed.isoformat().replace("+00:00", "Z"))
+        ProbeObservation(probe_id, (FAKE_BWRAP_PATH, "probe", probe_id), executable_identity, profile_identity, expected, "PASS", 0, False, False, False, "sha256:test", "sha256:test", observed.isoformat().replace("+00:00", "Z"))
         for probe_id, expected in (
             ("workspace_write", "ok"),
             ("outside_read_denied", "denied"),

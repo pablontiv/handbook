@@ -28,6 +28,7 @@ from helper.models import HealthStatus, ModelRecord, ProviderReadiness, Readines
 from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
 from helper.runner import CompletedCommand, MAX_STDOUT_LIMIT_CHARS
 from tests.support import (
+    FAKE_BWRAP_PATH,
     FakeRunner,
     _command,
     copy_pi_fixtures_to_home,
@@ -43,8 +44,8 @@ class PiAdapterTests(unittest.TestCase):
         self.context = RuntimeContext(home=self.root, cwd=self.root / "project", env={})
         self.context.cwd.mkdir()
         self.real_pi_path = shutil.which("pi")
-        self._which_patch = patch("helper.evaluator.shutil.which", return_value="/fake/bwrap")
-        self._identity_patch = patch("helper.evaluator._executable_identity", return_value="bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64))
+        self._which_patch = patch("helper.evaluator.shutil.which", return_value=FAKE_BWRAP_PATH)
+        self._identity_patch = patch("helper.evaluator._executable_identity", return_value=f"bwrap:{FAKE_BWRAP_PATH}:1:2:3:sha256:" + ("0" * 64))
         self._which_patch.start()
         self._identity_patch.start()
 
@@ -511,7 +512,7 @@ ok-provider     ok-model    1K       2K       yes       no
         workspace_root.mkdir()
         (workspace_root / "src").mkdir()
         observed_at = datetime.now(timezone.utc).replace(microsecond=0)
-        executable_identity = "bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64)
+        executable_identity = f"bwrap:{FAKE_BWRAP_PATH}:1:2:3:sha256:" + ("0" * 64)
         profile_identity = f"bwrap:{workspace_root.resolve()}:network=none:env=minimal"
         outside_probe = workspace_root.resolve().parent / ".model-optimizer-outside-token-pi.txt"
         probe_specs = (
@@ -556,7 +557,7 @@ ok-provider     ok-model    1K       2K       yes       no
             probe_observation_from_result(
                 probe_id=probe_id,
                 argv=(
-                    "/fake/bwrap",
+                    FAKE_BWRAP_PATH,
                     "--unshare-net",
                     "--bind",
                     str(workspace_root.resolve()),

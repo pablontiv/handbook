@@ -46,7 +46,7 @@ from helper.evaluator import (
 from helper.models import ModelRecord, RuntimeKind
 from helper.optimizer import AgentContract, PermissionRule, RoleRequirements, RouteKey
 from helper.runner import CompletedCommand, CommandRunner
-from tests.support import FakeRunner, _command, fixture_text
+from tests.support import FAKE_BWRAP_PATH, FakeRunner, _command, fixture_text
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -255,7 +255,7 @@ class EvaluatorContractTests(unittest.TestCase):
         (self.workspace_root / "allowed").mkdir()
         (self.workspace_root / "src").mkdir()
         observed_at = datetime.now(timezone.utc).replace(microsecond=0)
-        executable_identity = "bwrap:/fake/bwrap:1:2:3:sha256:" + ("0" * 64)
+        executable_identity = f"bwrap:{FAKE_BWRAP_PATH}:1:2:3:sha256:" + ("0" * 64)
         profile_identity = f"bwrap:{self.workspace_root.resolve()}:network=none:env=minimal"
         outside_probe = self.workspace_root.resolve().parent / ".model-optimizer-outside-token-123.txt"
         probe_specs = (
@@ -300,7 +300,7 @@ class EvaluatorContractTests(unittest.TestCase):
             probe_observation_from_result(
                 probe_id=probe_id,
                 argv=(
-                    "/fake/bwrap",
+                    FAKE_BWRAP_PATH,
                     "--unshare-net",
                     "--bind",
                     str(self.workspace_root.resolve()),
@@ -382,7 +382,7 @@ class EvaluatorContractTests(unittest.TestCase):
             task="Make tests pass",
             timeout=30,
         )
-        self._which_patch = patch("helper.evaluator.shutil.which", return_value="/fake/bwrap")
+        self._which_patch = patch("helper.evaluator.shutil.which", return_value=FAKE_BWRAP_PATH)
         self._identity_patch = patch("helper.evaluator._executable_identity", return_value=executable_identity)
         self._which_patch.start()
         self._identity_patch.start()
@@ -521,7 +521,7 @@ class EvaluatorContractTests(unittest.TestCase):
                 now=base_now,
             )
 
-        future_at = (base_now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+        future_at = (base_now + timedelta(seconds=60)).isoformat().replace("+00:00", "Z")
         future = CapabilityAttestation(
             "custom_safe",
             probe_id,
@@ -550,7 +550,7 @@ class EvaluatorContractTests(unittest.TestCase):
         stale_attestation = replace(self.workspace.sandbox_attestation, observed_at=stale_at, probe_observations=stale_observations, profile_digest=stale_digest)
         self.assert_invalid(replace(self.request, workspace=replace(self.workspace, sandbox_attestation=stale_attestation)), "eval_sandbox_attestation_stale")
 
-        future_at = (now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+        future_at = (now + timedelta(seconds=60)).isoformat().replace("+00:00", "Z")
         future_observations = tuple(replace(item, observed_at=future_at) for item in self.workspace.sandbox_attestation.probe_observations)
         future_digest = sandbox_attestation_digest(
             self.workspace.sandbox_attestation.backend,
@@ -582,7 +582,7 @@ class EvaluatorContractTests(unittest.TestCase):
         pass_probe = probe_observation_from_result(
             probe_id="workspace_write",
             argv=("bwrap", "--unshare-net", "python3", "-c", "print('ok')"),
-            executable_identity="bwrap:/fake/bwrap:1:2:3",
+            executable_identity=f"bwrap:{FAKE_BWRAP_PATH}:1:2:3",
             profile_identity="bwrap:/tmp/work:network=none:env=minimal",
             expected_outcome="ok",
             result=CompletedCommand((), 0, "ok", "", 1, False),
@@ -629,7 +629,7 @@ class EvaluatorContractTests(unittest.TestCase):
             (replace(base_observation, stderr_truncated=True), "eval_sandbox_attestation_incomplete"),
             (replace(base_observation, stdout_digest="sha256:" + "f" * 64), "eval_sandbox_attestation_incomplete"),
             (replace(base_observation, stderr_digest="sha256:" + "f" * 64), "eval_sandbox_attestation_incomplete"),
-            (replace(base_observation, observed_at=(datetime.now(timezone.utc) + timedelta(seconds=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z")), "eval_sandbox_attestation_stale"),
+            (replace(base_observation, observed_at=(datetime.now(timezone.utc) + timedelta(seconds=60)).replace(microsecond=0).isoformat().replace("+00:00", "Z")), "eval_sandbox_attestation_stale"),
         )
         for updated, reason in cases:
             with self.subTest(field=reason):
@@ -758,7 +758,7 @@ class EvaluatorContractTests(unittest.TestCase):
 
     def test_sandbox_selection_self_tests_supported_fake_backend_and_scrubbed_manifest_runs(self):
         runner = RecordingRunner((_command("ok"), _command("denied"), _command("absent"), _command("denied"), _command("tests ok")))
-        with patch("helper.evaluator.shutil.which", side_effect=lambda name: f"/fake/{name}" if name == "bwrap" else None):
+        with patch("helper.evaluator.shutil.which", side_effect=lambda name: FAKE_BWRAP_PATH if name == "bwrap" else None):
             backend = select_sandbox_backend(runner, self.workspace)
         self.assertIsNotNone(backend)
         self.assertEqual(backend.backend, "bwrap")
