@@ -6,6 +6,8 @@
 
 **Governing ADRs:** ADR 0001, ADR 0014, ADR 0015, ADR 0016
 
+**OpenCode verification qualification:** ADR 0017 and `docs/superpowers/specs/2026-08-26-opencode-verification-isolation-design.md` supersede only this specification's OpenCode verification assumptions: governed verification runs `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` inline for each `opencode debug skill` invocation and uses file-backed capture, while normal OpenCode behavior and required Claude links remain unchanged.
+
 ## Purpose
 
 Establish one canonical owner for every installed Agent Skill, eliminate drift between runtime copies, and define how this repository publishes global skills to Pi, OpenCode, and Claude without absorbing repository-local or externally managed skills.
