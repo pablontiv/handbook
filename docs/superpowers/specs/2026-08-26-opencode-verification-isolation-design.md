@@ -34,7 +34,7 @@ The repository must not persist, install, or manage this OpenCode setting. In pa
 
 The verifier must capture stdout and stderr to files and parse the stdout file after command completion. It must not rely on pipe capture for the JSON payload on this host.
 
-The gate passes only when the parsed OpenCode skill inventory contains exactly these five names exactly once, each corresponding reported `location` lexically equals `~/.agents/skills/<name>/SKILL.md`, and each reported path resolves strictly to the matching canonical repository skill file.
+The gate passes only when the parsed OpenCode skill inventory, after filtering to governed skill names, contains each of these five governed names exactly once, each corresponding reported `location` lexically equals `~/.agents/skills/<name>/SKILL.md`, and each reported path resolves strictly to the matching canonical repository skill file. The full OpenCode inventory may contain additional non-governed skill names; those entries are ignored for pass/fail, though the verifier may record aggregate full-inventory counts. Any duplicate of a governed name still fails.
 
 - `adr`
 - `decision-calibrator`
@@ -96,13 +96,15 @@ Required data flow:
 5. Reject nonzero exits, timeouts, and any stderr content before trusting stdout.
 6. Read the stdout file as the complete JSON payload.
 7. Parse the JSON strictly.
-8. Extract OpenCode skill entries and normalize each reported `location` by expanding user/home notation and making it absolute with platform-safe lexical path normalization only. Do not resolve symlinks for the shared-root assertion.
-9. Filter to the five governed names.
-10. Assert that every governed name appears exactly once.
-11. For each governed name, construct the expected lexical location as `agents_root/<name>/SKILL.md` and require the normalized reported `location` to equal that exact lexical path. A path under the root but not exactly matching `~/.agents/skills/<name>/SKILL.md` fails.
-12. Separately resolve the reported location with strict resolution equivalent to `reported_location.resolve(strict=True)`, resolve `<canonical_repo_skill_root>/<name>/SKILL.md` strictly, and require the two resolved paths to be equal. This proves canonical target identity without weakening the lexical shared-root assertion.
-13. Fail closed when any reported path, expected lexical path, or canonical target path is ambiguous or unresolvable because of symlink loops, missing path components, permissions, unsupported path syntax, normalization errors, or strict-resolution errors.
-14. Emit a machine-readable receipt containing command metadata, capture file paths or digests, parsed names, normalized lexical locations, strict resolved locations, expected lexical locations, expected resolved canonical locations, and pass/fail reasons.
+8. Extract OpenCode skill entries from the full inventory. The full inventory may include non-governed skill names outside this repository's five-name gate.
+9. Filter entries to the exact governed-name set.
+10. Ignore non-governed entries for pass/fail; optionally record aggregate full-inventory counts for diagnostics.
+11. Assert that every governed name appears exactly once in the filtered governed set. Missing governed names and duplicate governed names both fail.
+12. For each governed entry, normalize the reported `location` by expanding user/home notation and making it absolute with platform-safe lexical path normalization only. Do not resolve symlinks for the shared-root assertion.
+13. For each governed name, construct the expected lexical location as `agents_root/<name>/SKILL.md` and require the normalized reported `location` to equal that exact lexical path. A path under the root but not exactly matching `~/.agents/skills/<name>/SKILL.md` fails.
+14. Separately resolve the reported location with strict resolution equivalent to `reported_location.resolve(strict=True)`, resolve `<canonical_repo_skill_root>/<name>/SKILL.md` strictly, and require the two resolved paths to be equal. This proves canonical target identity without weakening the lexical shared-root assertion.
+15. Fail closed when any governed reported path, expected lexical path, or canonical target path is ambiguous or unresolvable because of symlink loops, missing path components, permissions, unsupported path syntax, normalization errors, or strict-resolution errors.
+16. Emit a machine-readable receipt containing command metadata, capture file paths or digests, the governed names accepted for evaluation, optional aggregate full-inventory counts, normalized lexical locations, strict resolved locations, expected lexical locations, expected resolved canonical locations, and pass/fail reasons.
 
 The verifier must treat the inline flag as an input precondition, not as an ambient shell assumption. If the implementation cannot prove that the invocation environment contained `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1`, it must fail before accepting OpenCode discovery output.
 
@@ -118,7 +120,7 @@ The OpenCode gate must fail closed for every condition that prevents determinist
 | stderr is nonempty | Fail. |
 | stdout capture file is missing, empty, truncated, or unreadable | Fail. |
 | stdout is not valid JSON | Fail. |
-| JSON shape does not contain the expected skill inventory | Fail. |
+| JSON shape does not contain a parseable OpenCode skill inventory | Fail. |
 | Any governed name is missing | Fail. |
 | Any governed name appears more than once | Fail. |
 | Any governed reported `location` does not lexically equal `~/.agents/skills/<name>/SKILL.md` after platform-safe absolute path normalization without symlink resolution | Fail. |
@@ -135,7 +137,8 @@ A later implementation must test the verifier without mutating the real home dir
 
 Required fixture coverage:
 
-- valid OpenCode JSON containing exactly the five governed names with `location` values that lexically equal `~/.agents/skills/<name>/SKILL.md` and strictly resolve to `<canonical_repo_skill_root>/<name>/SKILL.md`;
+- valid OpenCode JSON whose governed subset contains exactly the five governed names with `location` values that lexically equal `~/.agents/skills/<name>/SKILL.md` and strictly resolve to `<canonical_repo_skill_root>/<name>/SKILL.md`, while the full inventory may also contain non-governed entries;
+- extra non-governed names that are ignored for pass/fail, with optional aggregate count recording;
 - duplicate governed names;
 - a missing governed name;
 - a governed name under `~/.claude/skills`;
@@ -156,7 +159,7 @@ Required live verification before any future corrective commit or runtime mutati
 1. Validate ADR 0017 with `rootline validate docs/adr/0017-aislar-discovery-opencode-solo-en-verificacion.md --strict`.
 2. Run the complete repository test suite.
 3. Run the OpenCode verifier with inline isolation and file-backed capture.
-4. Confirm the receipt lists exactly the five governed names exactly once, records each exact lexical `~/.agents/skills/<name>/SKILL.md` location, and records each matching strict resolved canonical repository target.
+4. Confirm the receipt's governed subset lists exactly the five governed names exactly once, records each exact lexical `~/.agents/skills/<name>/SKILL.md` location, and records each matching strict resolved canonical repository target. Extra non-governed inventory entries do not affect pass/fail, though aggregate counts may be recorded.
 
 ## Governance and Resume Sequence
 
