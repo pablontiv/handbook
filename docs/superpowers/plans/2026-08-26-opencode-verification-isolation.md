@@ -23,7 +23,8 @@
 - Permit non-governed OpenCode inventory entries; they do not affect pass/fail.
 - Compare each governed reported location lexically to the exact absolute `~/.agents/skills/<name>/SKILL.md` path without resolving symlinks; separately resolve strictly to `<repo>/skills/<name>/SKILL.md`.
 - Tests must use temporary homes and fake executables; they must never mutate the real home directory.
-- Claude verification requires a trusted live TUI observation. A filesystem link, cached catalog, or automated inference does not satisfy it.
+- Claude verification requires a trusted live normal-mode TUI observation. Launch `claude` with no `--bare` or `--safe-mode` flags for governed discovery verification; a filesystem link, cached catalog, reduced-mode catalog, or automated inference does not satisfy it.
+- Reduced mode is incompatible with Claude discovery verification: verified `claude --bare --debug` evidence showed `[reduced mode] Skipping skill dir discovery`, `getSkills returning: 0 skill dir commands`, and `/adr` autocomplete had no match. Use `--debug` only for troubleshooting, not as a required gate condition.
 - Do not remove `~/.pi/agent/skills/systemic-issue-triage` until corrected `runtime-verification.json.all_passed == true`.
 - Preserve unrelated worktree changes and untracked files. Stage only the plan file when committing this plan.
 
@@ -581,10 +582,10 @@ Expected: `pi_discovery_passed` and `opencode_isolated_discovery_passed`. OpenCo
 Run in a visible trusted terminal:
 
 ```bash
-claude --bare
+claude
 ```
 
-Type `/`. Confirm all five names are visibly offered:
+Type `/`, then type/filter each governed name without pressing `Enter`. Confirm all five names are visibly offered in the normal TUI:
 
 ```text
 adr
@@ -622,6 +623,8 @@ value = {
         "systemic-issue-triage",
     ],
     "all_visible": True,
+    "launch_mode": "normal",
+    "reduced_mode": False,
     "skill_invoked": False,
     "model_request_sent": False,
     "observer": "human",
@@ -639,7 +642,7 @@ print("claude_tui_observation_recorded")
 PY
 ```
 
-Expected: a mode-`0600` observation records only what the human saw; it does not infer discovery from filesystem state.
+Expected: a mode-`0600` observation records only what the human saw in normal launch mode; it does not infer discovery from filesystem state. If reduced-mode output shows zero skill commands or autocomplete misses `/adr`, treat that as evidence of reduced-mode incompatibility, not as a Claude discovery failure.
 
 - [ ] **Step 4: Write the corrected combined runtime gate exclusively**
 
@@ -694,6 +697,10 @@ if opencode.get("inline_environment") != {"OPENCODE_DISABLE_CLAUDE_CODE_SKILLS":
     raise SystemExit("opencode_inline_isolation_missing")
 if claude.get("all_visible") is not True or claude.get("names") != required:
     raise SystemExit("claude_observation_not_passed")
+if claude.get("launch_mode") != "normal" or claude.get("reduced_mode") is not False:
+    raise SystemExit("claude_launch_mode_invalid")
+if claude.get("observer") != "human":
+    raise SystemExit("claude_observer_invalid")
 if claude.get("skill_invoked") is not False or claude.get("model_request_sent") is not False:
     raise SystemExit("claude_observation_unsafe")
 value = {
@@ -986,7 +993,7 @@ Expected: both pass; Pi reports all five through `~/.agents`, and the isolated O
 
 - [ ] **Step 3: Repeat the trusted Claude TUI observation and record it exclusively**
 
-Run `claude --bare` in a visible trusted terminal, type `/`, confirm the same five names, then exit without invoking a skill or sending a model request.
+Run `claude` in a visible trusted terminal, type `/`, type/filter each governed name without pressing `Enter`, confirm the same five names in the normal TUI, then exit without invoking a skill or sending a model request.
 
 After the human confirms, record:
 
@@ -1007,6 +1014,8 @@ value = {
     "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "names": ["adr", "decision-calibrator", "model-optimizer", "remove-gentle-context", "systemic-issue-triage"],
     "all_visible": True,
+    "launch_mode": "normal",
+    "reduced_mode": False,
     "skill_invoked": False,
     "model_request_sent": False,
     "observer": "human",
@@ -1024,7 +1033,7 @@ print("claude_final_observation_recorded")
 PY
 ```
 
-Expected: a fresh human-observed final Claude artifact exists at mode `0600`.
+Expected: a fresh human-observed final Claude artifact exists at mode `0600` and records `launch_mode: "normal"` with `reduced_mode: False`. Reduced-mode misses remain troubleshooting evidence only, because reduced mode skips skill directory discovery.
 
 - [ ] **Step 4: Write corrected final runtime evidence**
 
@@ -1067,6 +1076,12 @@ if opencode.get("inline_environment") != {"OPENCODE_DISABLE_CLAUDE_CODE_SKILLS":
     raise SystemExit("final_opencode_isolation_missing")
 if claude.get("all_visible") is not True or claude.get("names") != required:
     raise SystemExit("final_claude_not_passed")
+if claude.get("launch_mode") != "normal" or claude.get("reduced_mode") is not False:
+    raise SystemExit("final_claude_launch_mode_invalid")
+if claude.get("observer") != "human":
+    raise SystemExit("final_claude_observer_invalid")
+if claude.get("skill_invoked") is not False or claude.get("model_request_sent") is not False:
+    raise SystemExit("final_claude_observation_unsafe")
 value = {
     "schema": "harness-skills.runtime-verification/v2",
     "verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
