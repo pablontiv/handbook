@@ -18,6 +18,15 @@ schema:
     decision:
         type: string
         required: true
+    alternativas:
+        type: string
+        required: false
     consecuencias:
         type: string
         required: true
+    pendientes:
+        type: string
+        required: false
+    superseded_by:
+        type: string
+        required: false
