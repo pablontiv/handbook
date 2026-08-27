@@ -1,12 +1,12 @@
 ---
 name: systemic-issue-triage
-description: "Use when evaluating issues, bug reports, backlog items, duplicated fixes, blocked users, or proposed systemic initiatives; classify verified reports by root cause before any design or implementation."
+description: "Use when systemic triage is requested for the current repository without supplied issue identifiers, or when evaluating issues, bug reports, backlog items, duplicated fixes, blocked users, or proposed systemic initiatives."
 license: Apache-2.0
 metadata:
   author: "pablontiv"
   created: "2026-08-20"
   updated: "2026-08-27"
-  version: "0.2.0"
+  version: "0.3.0"
   upstream-author: "Alan-TheGentleman"
   upstream-repository: "https://github.com/Gentleman-Programming/gentle-ai"
   upstream-commit: "d1e1777faafc91a34656ba94bd712972dbe427a1"
@@ -29,6 +29,23 @@ Triage verified issues by root class. Shrink the system by grouping shared cause
 - Treat an issue's stated mechanism as a hypothesis; the observed symptom is evidence.
 - If evidence is missing or the report cannot be classified, use Bucket E and ask the reporter. Do not guess.
 - Reproduce claims when repository or runtime access exists. If access does not exist, mark the evidence pending and name the exact verification needed.
+
+## Autonomous Intake
+
+When invoked without issue identifiers or tracker links, perform the complete intake and triage in the same run:
+
+1. From the resolved repository root, inspect `git remote get-url origin` and infer the issue tracker from the `origin` remote. The remote establishes tracker identity; it does not change repository scope.
+2. Use the tracker-native CLI or API in read-only mode to enumerate every open issue. Follow pagination until exhaustion, include issues only rather than pull requests, and preserve each issue identifier and URL.
+3. Read each issue's title, body, comments, and linked references needed to verify its observed symptoms, proposed mechanisms, dependencies, duplicates, and superseding work.
+4. Verify the resulting source set against the CWD repository, reproduce claims when possible, then produce the complete Output Contract. Do not stop after inventory or defer triage to a later turn.
+
+The requested artifact is the triage report itself, not a readiness explanation, execution plan, or review of this skill.
+
+Do not ask the user to provide issue identifiers when they can be discovered from `origin`. If the tracker reports zero open issues, return a zero-count triage with no initiative candidate and `next skill: none`.
+
+If the exhaustive inventory cannot be completed because `origin` is missing or ambiguous, the forge is unsupported, authentication or network access fails, or any page cannot be retrieved, fail closed. Name the exact failed command or verification needed; never present a partial issue set as the complete repository backlog.
+
+When the user explicitly supplies issue identifiers or tracker links, triage that explicit source set instead of the autonomous all-open default.
 
 ## Root-Class Buckets
 

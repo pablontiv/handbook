@@ -27,7 +27,7 @@ class SkillContractTests(unittest.TestCase):
             "author": "pablontiv",
             "created": "2026-08-20",
             "updated": "2026-08-27",
-            "version": "0.2.0",
+            "version": "0.3.0",
             "upstream-author": "Alan-TheGentleman",
             "upstream-repository": "https://github.com/Gentleman-Programming/gentle-ai",
             "upstream-commit": "d1e1777faafc91a34656ba94bd712972dbe427a1",
@@ -44,7 +44,7 @@ class SkillContractTests(unittest.TestCase):
 
     def test_input_contract_binds_triage_to_git_repository_containing_cwd(self):
         text = SKILL.read_text(encoding="utf-8")
-        input_contract = text.split("## Input Contract", 1)[1].split("## Root-Class Buckets", 1)[0]
+        input_contract = text.split("## Input Contract", 1)[1].split("## Autonomous Intake", 1)[0]
         for phrase in (
             "git rev-parse --show-toplevel",
             "repository that contains the current working directory",
@@ -53,6 +53,21 @@ class SkillContractTests(unittest.TestCase):
             "Do not substitute",
         ):
             self.assertIn(phrase, input_contract)
+
+    def test_no_argument_invocation_discovers_every_open_issue(self):
+        text = SKILL.read_text(encoding="utf-8")
+        self.assertIn("## Autonomous Intake", text)
+        intake = text.split("## Autonomous Intake", 1)[1].split("## Root-Class Buckets", 1)[0]
+        for phrase in (
+            "without issue identifiers",
+            "infer the issue tracker from the `origin` remote",
+            "enumerate every open issue",
+            "Do not ask the user to provide issue identifiers",
+            "body, comments, and linked references",
+            "If the exhaustive inventory cannot be completed",
+            "The requested artifact is the triage report itself",
+        ):
+            self.assertIn(phrase, intake)
 
     def test_skill_preserves_root_class_clustering_and_named_evidence(self):
         text = SKILL.read_text(encoding="utf-8")
@@ -94,7 +109,7 @@ class SkillContractTests(unittest.TestCase):
     def test_pressure_schema_covers_all_required_boundaries(self):
         payload = json.loads(SCENARIOS.read_text(encoding="utf-8"))
         self.assertEqual(payload["schema"], "systemic-issue-triage.pressure-scenarios/v1")
-        self.assertEqual(len(payload["scenarios"]), 6)
+        self.assertEqual(len(payload["scenarios"]), 7)
         required = {item for scenario in payload["scenarios"] for item in scenario["required"]}
         self.assertTrue(
             {
@@ -105,6 +120,10 @@ class SkillContractTests(unittest.TestCase):
                 "cwd-git-root",
                 "sole-repository-scope",
                 "fail-closed-outside-git",
+                "automatic-open-issue-inventory",
+                "infer-tracker-from-origin",
+                "no-request-for-identifiers",
+                "complete-triage-output",
             }
             <= required
         )
