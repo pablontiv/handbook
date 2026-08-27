@@ -3,12 +3,25 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
 from helper.runner import CommandRunner, MAX_STDOUT_LIMIT_CHARS, MAX_STREAM_CHARS, redact_text
+
+
+def _wait_for_nonempty_file(path: Path, *, timeout: float) -> str:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            content = path.read_text(encoding="utf-8")
+            if content:
+                return content
+        time.sleep(0.01)
+    raise AssertionError(f"child readiness timeout: no heartbeat from {path} within {timeout:.3f}s")
 
 
 class RunnerTests(unittest.TestCase):
@@ -23,6 +36,27 @@ class RunnerTests(unittest.TestCase):
         self.assertFalse(result.timed_out)
         self.assertGreaterEqual(result.elapsed_ms, 0)
         self.assertEqual(result.argv[:2], (sys.executable, "-c"))
+
+    def test_wait_for_nonempty_file_observes_delayed_readiness(self):
+        with tempfile.TemporaryDirectory() as td:
+            heartbeat = Path(td) / "heartbeat.txt"
+
+            def write_heartbeat():
+                time.sleep(0.05)
+                heartbeat.write_text("ready", encoding="utf-8")
+
+            writer = threading.Thread(target=write_heartbeat)
+            writer.start()
+            try:
+                self.assertEqual(_wait_for_nonempty_file(heartbeat, timeout=0.5), "ready")
+            finally:
+                writer.join()
+
+    def test_wait_for_nonempty_file_reports_readiness_timeout(self):
+        with tempfile.TemporaryDirectory() as td:
+            heartbeat = Path(td) / "heartbeat.txt"
+            with self.assertRaisesRegex(AssertionError, "child readiness timeout"):
+                _wait_for_nonempty_file(heartbeat, timeout=0.02)
 
     def test_timeout_returns_bounded_hang_result(self):
         result = CommandRunner().run(
@@ -268,15 +302,18 @@ class RunnerTests(unittest.TestCase):
                 "subprocess.Popen([sys.executable, '-c', child_code, str(heartbeat)]); "
                 "time.sleep(30)"
             )
-            result = CommandRunner().run(
-                (sys.executable, "-c", script, str(heartbeat)),
-                timeout=0.4,
-                cwd=Path.cwd(),
-            )
-            time.sleep(0.05)
-            first = heartbeat.read_text(encoding="utf-8") if heartbeat.exists() else ""
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                run = executor.submit(
+                    CommandRunner().run,
+                    (sys.executable, "-c", script, str(heartbeat)),
+                    2.0,
+                    Path.cwd(),
+                )
+                _wait_for_nonempty_file(heartbeat, timeout=1.0)
+                result = run.result(timeout=4.0)
+            first = heartbeat.read_text(encoding="utf-8")
             time.sleep(0.25)
-            second = heartbeat.read_text(encoding="utf-8") if heartbeat.exists() else ""
+            second = heartbeat.read_text(encoding="utf-8")
         self.assertTrue(result.timed_out)
         self.assertNotEqual(first, "")
         self.assertEqual(first, second)
