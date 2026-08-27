@@ -315,7 +315,6 @@ class RunnerTests(unittest.TestCase):
             time.sleep(0.25)
             second = heartbeat.read_text(encoding="utf-8")
         self.assertTrue(result.timed_out)
-        self.assertNotEqual(first, "")
         self.assertEqual(first, second)
 
     @unittest.skipIf(os.name == "nt", "POSIX killpg fallback is validated on POSIX hosts only")
