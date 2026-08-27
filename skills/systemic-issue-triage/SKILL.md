@@ -5,8 +5,8 @@ license: Apache-2.0
 metadata:
   author: "pablontiv"
   created: "2026-08-20"
-  updated: "2026-08-20"
-  version: "0.1.0"
+  updated: "2026-08-27"
+  version: "0.2.0"
   upstream-author: "Alan-TheGentleman"
   upstream-repository: "https://github.com/Gentleman-Programming/gentle-ai"
   upstream-commit: "d1e1777faafc91a34656ba94bd712972dbe427a1"
@@ -21,6 +21,10 @@ Triage verified issues by root class. Shrink the system by grouping shared cause
 
 ## Input Contract
 
+- Before accessing repository evidence, run `git rev-parse --show-toplevel` from the current working directory to resolve the repository that contains the current working directory.
+- Treat that resolved root as the sole repository scope for triage. Repository reads, reproductions, tests, and evidence references must come from that root.
+- Do not substitute another checkout, an issue-linked repository, a user-supplied path, or a copy described as newer or more complete. External trackers may provide source-issue evidence, but they do not change repository scope.
+- If the repository root cannot be resolved unambiguously, including when the current working directory is outside Git, stop and ask the user to run the skill from the intended repository. Do not guess or fall back to another path.
 - Verify source issues or tickets before classifying them. Preserve their identifiers and evidence references.
 - Treat an issue's stated mechanism as a hypothesis; the observed symptom is evidence.
 - If evidence is missing or the report cannot be classified, use Bucket E and ask the reporter. Do not guess.
