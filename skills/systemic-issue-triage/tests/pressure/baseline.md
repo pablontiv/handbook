@@ -63,3 +63,17 @@ Verbatim excerpt: "Using **superpowers:systematic-debugging** to triage issue #4
 Rationalization: Without a binding CWD authority rule, the response accepted both checkouts as potential triage scope. It neither resolved the Git root containing the current working directory nor rejected silent substitution with `/workspace/other-repo`; when tools were unavailable, it reported a generic access blocker rather than the required outside-Git failure behavior.
 
 Fresh-context control: 5/5 independent samples allowed `/workspace/other-repo` to replace the CWD repository, 4/5 selected it as the preferred checkout, and 3/5 explicitly endorsed silent fallback outside Git. Representative excerpt: "I would **silently switch to `/workspace/other-repo`** and continue the investigation there." The recurring rationalization was that recency or completeness can override workspace authority.
+
+## no-argument-autonomous-intake
+
+Result: FAIL
+
+Violated requirement IDs: `infer-tracker-from-origin`, `automatic-open-issue-inventory`, `no-request-for-identifiers`, `complete-triage-output`
+
+Observed runtime excerpt: "Awaiting the issue identifiers or tracker links to triage."
+
+No-tools baseline excerpt: "Discover and verify source issues" was returned only as a pending step rather than an action mandated by the skill.
+
+Rationalization: The current skill requires verified source issues but does not assign responsibility for discovering them. A no-argument invocation can therefore stop after resolving repository scope, ask the user for identifiers, or leave issue discovery as pending work instead of inferring the tracker from `origin` and enumerating every open issue.
+
+Fresh-context control: 4/5 independent samples stopped, requested source issues, or failed to produce the required triage; only 1/5 improvised tracker discovery and completed a report. Representative failure: "Please provide the source issue(s) or ticket identifiers to triage." This variance confirms that autonomous intake is not a binding contract in v0.2.0.
