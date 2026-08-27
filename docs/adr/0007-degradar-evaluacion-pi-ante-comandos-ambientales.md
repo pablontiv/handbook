@@ -1,7 +1,7 @@
 ---
 tipo: adr
 estado: accepted
-fecha: 2026-08-21
+fecha: "2026-08-21"
 contexto: >-
   La evaluación de roles en runtime Pi requiere un aislamiento verificable del
   surface de comandos para evitar extensiones no solicitadas. En la versión

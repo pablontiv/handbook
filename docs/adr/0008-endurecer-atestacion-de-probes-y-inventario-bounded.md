@@ -1,7 +1,7 @@
 ---
 tipo: adr
 estado: accepted
-fecha: 2026-08-21
+fecha: "2026-08-21"
 contexto: >-
   La ronda final de Task 3 exigió cerrar brechas de verificabilidad en dos
   superficies críticas: (1) atestación de sandbox basada en probes y (2)

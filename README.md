@@ -8,6 +8,19 @@ Public repository URL: `https://github.com/pablontiv/gentle-ai`.
 
 ## Available skills
 
+### `adr`
+
+Use when a significant decision has just been made or overturned in a repository and must be recorded, accepted, or superseded as an Architecture Decision Record.
+
+- Browse [`skills/adr/`](skills/adr/) and read [`SKILL.md`](skills/adr/SKILL.md).
+- Mechanics run through `skills/adr/adr.sh` over `rootline`; run it with no arguments for usage.
+
+### `decision-calibrator`
+
+Use after a concrete trigger — a user correction that contradicts a prior assumption, a re-asked question, resumed work after context loss, a stalled research loop, or a tool/architecture choice with ongoing operating cost — to spend rigor only where it can still change the outcome. Records checkpoints through the `adr` skill.
+
+- Browse [`skills/decision-calibrator/`](skills/decision-calibrator/) and read [`SKILL.md`](skills/decision-calibrator/SKILL.md).
+
 ### `remove-gentle-context`
 
 Use when active Gentle AI context must be cleared from supported clients while preserving infrastructure and history.
