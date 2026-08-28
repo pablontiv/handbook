@@ -226,21 +226,32 @@ func selectedPublicationStateRoot(platform string, env filesystem.PlatformEnv, o
 }
 
 func repositorySourceRoots(inventory contracts.Inventory) ([]contracts.AbsolutePath, error) {
-	if len(inventory.Sources) == 0 {
-		return nil, Error{Code: "runtime_contract_missing", Message: "repository source root proof is missing from inventory", Exit: contracts.ExitUnsupported}
-	}
-	roots := make([]contracts.AbsolutePath, 0, len(inventory.Sources))
+	roots := make([]contracts.AbsolutePath, 0, len(inventory.Sources)+len(inventory.Deployments))
 	seen := map[string]struct{}{}
-	for _, source := range inventory.Sources {
-		root, err := requiredAbsoluteRoot(source.SourceIdentity, "repository source")
+	addRoot := func(path string) error {
+		root, err := requiredAbsoluteRoot(path, "repository source")
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if _, ok := seen[string(root)]; ok {
-			continue
+			return nil
 		}
 		seen[string(root)] = struct{}{}
 		roots = append(roots, root)
+		return nil
+	}
+	for _, source := range inventory.Sources {
+		if err := addRoot(source.SourceIdentity); err != nil {
+			return nil, err
+		}
+	}
+	for _, deployment := range inventory.Deployments {
+		if err := addRoot(deployment.SourceIdentity); err != nil {
+			return nil, err
+		}
+	}
+	if len(roots) == 0 {
+		return nil, Error{Code: "runtime_contract_missing", Message: "repository source root proof is missing from inventory", Exit: contracts.ExitUnsupported}
 	}
 	sort.Slice(roots, func(i, j int) bool { return roots[i] < roots[j] })
 	return roots, nil
@@ -249,16 +260,32 @@ func repositorySourceRoots(inventory contracts.Inventory) ([]contracts.AbsoluteP
 func inventoryRuntimeRoots(inventory contracts.Inventory) ([]contracts.AbsolutePath, error) {
 	roots := make([]contracts.AbsolutePath, 0, len(inventory.RuntimeBindings))
 	seen := map[string]struct{}{}
-	for _, binding := range inventory.RuntimeBindings {
-		root, err := requiredAbsoluteRoot(binding.Root, "runtime")
+	addRoot := func(path string) error {
+		root, err := requiredAbsoluteRoot(path, "runtime")
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if _, ok := seen[string(root)]; ok {
-			continue
+			return nil
 		}
 		seen[string(root)] = struct{}{}
 		roots = append(roots, root)
+		return nil
+	}
+	for _, binding := range inventory.RuntimeBindings {
+		if err := addRoot(binding.Root); err != nil {
+			return nil, err
+		}
+	}
+	for _, deployment := range inventory.Deployments {
+		for _, binding := range deployment.RuntimeBindings {
+			if err := addRoot(binding.Root); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(roots) == 0 {
+		return nil, Error{Code: "runtime_contract_missing", Message: "runtime root proof is missing from inventory", Exit: contracts.ExitUnsupported}
 	}
 	sort.Slice(roots, func(i, j int) bool { return roots[i] < roots[j] })
 	return roots, nil

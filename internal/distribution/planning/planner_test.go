@@ -210,6 +210,140 @@ func TestPlanFileOutputDerivesForbiddenRootsFromInventoryStateAndLocks(t *testin
 	}
 }
 
+func TestPlanFileOutputUnionsCanonicalInventoryRootEvidenceAcrossViews(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	xdgState := filepath.Join(tmp, "xdg-state")
+	stateRoot := filepath.Join(tmp, "state-root")
+	topLevelSource := filepath.Join(tmp, "top-level-source")
+	deploymentOnlySource := filepath.Join(tmp, "deployment-only-source")
+	topLevelRuntime := filepath.Join(tmp, "top-level-runtime")
+	deploymentOnlyRuntime := filepath.Join(tmp, "deployment-only-runtime")
+
+	cases := []struct {
+		name        string
+		raw         []byte
+		destination string
+	}{
+		{
+			name:        "source root present only in deployments",
+			destination: filepath.Join(deploymentOnlySource, "nested", "plan.json"),
+			raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) {
+				for i := range inventory.Sources {
+					inventory.Sources[i].SourceIdentity = topLevelSource
+				}
+				for i := range inventory.Deployments {
+					inventory.Deployments[i].SourceIdentity = topLevelSource
+				}
+				inventory.Deployments[0].SourceIdentity = deploymentOnlySource
+				for i := range inventory.RuntimeBindings {
+					inventory.RuntimeBindings[i].Root = topLevelRuntime
+				}
+				for i := range inventory.Deployments {
+					for j := range inventory.Deployments[i].RuntimeBindings {
+						inventory.Deployments[i].RuntimeBindings[j].Root = topLevelRuntime
+					}
+				}
+			}),
+		},
+		{
+			name:        "runtime root present only in deployments",
+			destination: filepath.Join(deploymentOnlyRuntime, "plan.json"),
+			raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) {
+				for i := range inventory.Sources {
+					inventory.Sources[i].SourceIdentity = topLevelSource
+				}
+				for i := range inventory.Deployments {
+					inventory.Deployments[i].SourceIdentity = topLevelSource
+				}
+				for i := range inventory.RuntimeBindings {
+					inventory.RuntimeBindings[i].Root = topLevelRuntime
+				}
+				for i := range inventory.Deployments {
+					for j := range inventory.Deployments[i].RuntimeBindings {
+						inventory.Deployments[i].RuntimeBindings[j].Root = topLevelRuntime
+					}
+				}
+				inventory.Deployments[0].RuntimeBindings[0].Root = deploymentOnlyRuntime
+			}),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter := filesystem.NewMemoryAdapter()
+			adapter.SetEnvironment(filesystem.PlatformEnv{Home: home, XDGStateHome: xdgState, LocalAppData: filepath.Join(tmp, "local-app-data")})
+			inventoryPath := contracts.AbsolutePath(filepath.Join(tmp, tc.name, "inventory.json"))
+			adapter.PutFile(inventoryPath, tc.raw)
+
+			_, err := planning.NewService(adapter).Plan(context.Background(), planning.Options{Intent: contracts.IntentInstall, InventoryPath: inventoryPath, Destination: contracts.AbsolutePath(tc.destination), StateRoot: contracts.AbsolutePath(stateRoot)})
+			if !isPlanningExit(err, contracts.ExitPreconditionFailed) {
+				t.Fatalf("Plan() error = %v, want destination rejected with exit 4", err)
+			}
+		})
+	}
+}
+
+func TestPlanFileOutputFailsClosedWhenTotalPublicationRootEvidenceIsEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	xdgState := filepath.Join(tmp, "xdg-state")
+	stateRoot := filepath.Join(tmp, "state-root")
+	validSource := filepath.Join(tmp, "source")
+	validRuntime := filepath.Join(tmp, "runtime")
+
+	cases := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "source roots empty in both views",
+			raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) {
+				inventory.Sources = []contracts.SourceObservation{}
+				for i := range inventory.Deployments {
+					inventory.Deployments[i].SourceIdentity = ""
+					for j := range inventory.Deployments[i].RuntimeBindings {
+						inventory.Deployments[i].RuntimeBindings[j].Root = validRuntime
+					}
+				}
+				for i := range inventory.RuntimeBindings {
+					inventory.RuntimeBindings[i].Root = validRuntime
+				}
+			}),
+		},
+		{
+			name: "runtime roots empty in both views",
+			raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) {
+				for i := range inventory.Sources {
+					inventory.Sources[i].SourceIdentity = validSource
+				}
+				for i := range inventory.Deployments {
+					inventory.Deployments[i].SourceIdentity = validSource
+					inventory.Deployments[i].RuntimeBindings = []contracts.RuntimeBinding{}
+				}
+				inventory.RuntimeBindings = []contracts.RuntimeBinding{}
+			}),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter := failIfPublishAdapter{MemoryAdapter: filesystem.NewMemoryAdapter()}
+			adapter.SetEnvironment(filesystem.PlatformEnv{Home: home, XDGStateHome: xdgState, LocalAppData: filepath.Join(tmp, "local-app-data")})
+			inventoryPath := contracts.AbsolutePath(filepath.Join(tmp, tc.name, "inventory.json"))
+			adapter.PutFile(inventoryPath, tc.raw)
+
+			_, err := planning.NewService(&adapter).Plan(context.Background(), planning.Options{Intent: contracts.IntentInstall, InventoryPath: inventoryPath, Destination: contracts.AbsolutePath(filepath.Join(tmp, tc.name, "out", "plan.json")), StateRoot: contracts.AbsolutePath(stateRoot)})
+			if !isPlanningExit(err, contracts.ExitUnsupported) {
+				t.Fatalf("Plan() error = %v, want fail-closed exit 3", err)
+			}
+			if adapter.publishCalled {
+				t.Fatalf("PublishNoReplace was called despite missing total root evidence")
+			}
+		})
+	}
+}
+
 func TestPlanFileOutputFailsClosedWhenPublicationRootProofIsMissing(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -225,7 +359,27 @@ func TestPlanFileOutputFailsClosedWhenPublicationRootProofIsMissing(t *testing.T
 		env       filesystem.PlatformEnv
 	}{
 		{name: "missing source identity", raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) { inventory.Sources[0].SourceIdentity = "" }), stateRoot: contracts.AbsolutePath(stateRoot), env: filesystem.PlatformEnv{Home: home, XDGStateHome: xdgState}},
+		{name: "relative deployment source identity", raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) {
+			for i := range inventory.Sources {
+				inventory.Sources[i].SourceIdentity = validSource
+			}
+			for i := range inventory.Deployments {
+				inventory.Deployments[i].SourceIdentity = validSource
+			}
+			inventory.Deployments[0].SourceIdentity = "relative/source"
+		}), stateRoot: contracts.AbsolutePath(stateRoot), env: filesystem.PlatformEnv{Home: home, XDGStateHome: xdgState}},
 		{name: "relative runtime root", raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) { inventory.RuntimeBindings[0].Root = "relative/runtime" }), stateRoot: contracts.AbsolutePath(stateRoot), env: filesystem.PlatformEnv{Home: home, XDGStateHome: xdgState}},
+		{name: "missing deployment runtime root", raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) {
+			for i := range inventory.RuntimeBindings {
+				inventory.RuntimeBindings[i].Root = validRuntime
+			}
+			for i := range inventory.Deployments {
+				for j := range inventory.Deployments[i].RuntimeBindings {
+					inventory.Deployments[i].RuntimeBindings[j].Root = validRuntime
+				}
+			}
+			inventory.Deployments[0].RuntimeBindings[0].Root = ""
+		}), stateRoot: contracts.AbsolutePath(stateRoot), env: filesystem.PlatformEnv{Home: home, XDGStateHome: xdgState}},
 		{name: "missing default state root environment", raw: inventoryWithPublicationRoots(t, validSource, validSource, validRuntime), env: filesystem.PlatformEnv{}},
 	}
 	for _, tc := range cases {
@@ -354,6 +508,16 @@ type noEnvironmentAdapter struct {
 
 func (a noEnvironmentAdapter) Environment(context.Context) (filesystem.PlatformEnv, error) {
 	return filesystem.PlatformEnv{}, errors.New("environment should not be read for stdout artifact output")
+}
+
+type failIfPublishAdapter struct {
+	*filesystem.MemoryAdapter
+	publishCalled bool
+}
+
+func (a *failIfPublishAdapter) PublishNoReplace(ctx context.Context, destination contracts.AbsolutePath, canonical []byte, forbiddenRoots filesystem.ForbiddenRoots) error {
+	a.publishCalled = true
+	return a.MemoryAdapter.PublishNoReplace(ctx, destination, canonical, forbiddenRoots)
 }
 
 func countPlanRuntimeBindings(deployments []contracts.Deployment) int {
