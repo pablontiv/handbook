@@ -1,0 +1,1 @@
+{"$id":"waywarden.plan/v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"approval_digest":{},"payload":{},"schema":{"const":"waywarden.plan/v1","type":"string"}},"required":["schema","approval_digest","payload"],"type":"object"}

@@ -1,0 +1,3 @@
+{"case":"duplicate-keys","json":"{\"a\":1,\"a\":2}"}
+{"case":"trailing-bytes","json":"{\"a\":1} {}"}
+{"case":"unsafe-integer","json":"{\"n\":9007199254740992}"}

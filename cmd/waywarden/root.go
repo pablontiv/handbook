@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"waywarden/internal/distribution/cli"
+	"waywarden/internal/distribution/contracts"
 )
 
 const version = "0.0.0-dev"
@@ -22,13 +23,19 @@ func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 
 func newRootCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	var outputFormat string
+	var versionFlag bool
 	cmd := &cobra.Command{
 		Use:           "waywarden",
 		Short:         "Waywarden",
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		Version:       version,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateOutputFormat(outputFormat); err != nil {
+				return err
+			}
+			if versionFlag {
+				return writeVersion(stdout, outputFormat)
+			}
 			return cmd.Help()
 		},
 	}
@@ -36,11 +43,37 @@ func newRootCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd.CompletionOptions.DisableDefaultCmd = true
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
-	cmd.SetVersionTemplate("waywarden {{.Version}}\n")
-	cmd.PersistentFlags().StringVar(&outputFormat, "output", "human", "output format")
+	cmd.PersistentFlags().StringVar(&outputFormat, "output", contracts.OutputHuman, "output format (human|json)")
+	cmd.PersistentFlags().BoolVar(&versionFlag, "version", false, "print version")
 	cmd.AddCommand(newStubCommand("inventory"), newStubCommand("plan"), newStubCommand("apply"), newStubCommand("verify"), newStubCommand("uninstall"), newStubCommand("restore"))
-	_ = outputFormat
 	return cmd
+}
+
+func validateOutputFormat(outputFormat string) error {
+	if outputFormat != contracts.OutputHuman && outputFormat != contracts.OutputJSON {
+		return fmt.Errorf("invalid --output %q: must be human or json", outputFormat)
+	}
+	return nil
+}
+
+func writeVersion(stdout io.Writer, outputFormat string) error {
+	if outputFormat == contracts.OutputHuman {
+		cli.WriteHumanVersion(stdout, "waywarden", version)
+		return nil
+	}
+	label := "waywarden " + version
+	return cli.WriteCommandResultJSON(stdout, contracts.CommandResult{
+		Schema:  contracts.SchemaCommandResult,
+		Kind:    contracts.ResultArtifact,
+		Command: "version",
+		Status:  contracts.ResultStatusSuccess,
+		Artifact: &contracts.ArtifactResult{
+			Schema: contracts.SchemaCommandResult,
+			SHA256: contracts.SHA256([]byte(label)),
+			Bytes:  fmt.Sprintf("%d", len(label)),
+			Label:  label,
+		},
+	})
 }
 
 func newStubCommand(name string) *cobra.Command {

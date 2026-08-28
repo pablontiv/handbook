@@ -1,0 +1,1 @@
+{"$id":"waywarden.error/v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"code":{},"command":{},"evidence":{},"exit":{},"message":{},"schema":{"const":"waywarden.error/v1","type":"string"}},"required":["schema","code","message","exit","command","evidence"],"type":"object"}

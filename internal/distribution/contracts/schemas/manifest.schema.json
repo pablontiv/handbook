@@ -1,0 +1,1 @@
+{"$id":"waywarden.manifest/v1","$schema":"https://json-schema.org/draft/2020-12/schema","additionalProperties":false,"properties":{"adapters":{},"runtime_roots":{},"schema":{"const":"waywarden.manifest/v1","type":"string"},"skills":{}},"required":["schema","skills","runtime_roots","adapters"],"type":"object"}
