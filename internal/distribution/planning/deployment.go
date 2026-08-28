@@ -15,14 +15,32 @@ type DeploymentSet struct {
 	Blockers        []contracts.Blocker
 }
 
+type deploymentIdentityResolver struct {
+	canonical        func(string) (string, error)
+	contained        func(string, string) (string, error)
+	lexical          func(string) (string, error)
+	slotCollisionKey func(string) (string, bool)
+}
+
+var defaultDeploymentIdentityResolver = deploymentIdentityResolver{
+	canonical:        filesystem.CanonicalIdentity,
+	contained:        filesystem.ContainedCanonicalIdentity,
+	lexical:          filesystem.LexicalIdentity,
+	slotCollisionKey: filesystem.GovernedSlotCollisionKey,
+}
+
 func BuildDeployments(manifest contracts.Manifest, sourceRoot, home string) (DeploymentSet, error) {
+	return buildDeployments(manifest, sourceRoot, home, defaultDeploymentIdentityResolver)
+}
+
+func buildDeployments(manifest contracts.Manifest, sourceRoot, home string, identities deploymentIdentityResolver) (DeploymentSet, error) {
 	if !filepath.IsAbs(sourceRoot) {
 		return DeploymentSet{}, fmt.Errorf("source root must be absolute")
 	}
 	if !filepath.IsAbs(home) {
 		return DeploymentSet{}, fmt.Errorf("home must be absolute")
 	}
-	sourceRootIdentity, err := filesystem.CanonicalIdentity(sourceRoot)
+	sourceRootIdentity, err := identities.canonical(sourceRoot)
 	if err != nil {
 		return DeploymentSet{}, err
 	}
@@ -37,20 +55,37 @@ func BuildDeployments(manifest contracts.Manifest, sourceRoot, home string) (Dep
 	})
 
 	bySlot := map[string]*contracts.Deployment{}
+	comparisonExact := map[string]string{}
+	ambiguousComparison := map[string]bool{}
 	var blockers []contracts.Blocker
 	for _, skill := range skills {
 		sourcePath := filepath.Join(sourceRootIdentity, filepath.FromSlash(skill.SourcePath))
-		sourceIdentity, err := filesystem.ContainedCanonicalIdentity(sourceRootIdentity, sourcePath)
+		sourceIdentity, err := identities.contained(sourceRootIdentity, sourcePath)
 		if err != nil {
 			return DeploymentSet{}, err
 		}
 		for _, runtimeRoot := range runtimeRoots {
 			rootPath := filepath.Join(home, filepath.FromSlash(runtimeRoot.Root))
 			governedPath := filepath.Join(rootPath, skill.SkillID)
-			slotIdentity, err := filesystem.LexicalIdentity(governedPath)
+			slotIdentity, err := identities.lexical(governedPath)
 			if err != nil {
 				return DeploymentSet{}, err
 			}
+			comparisonKey, comparisonSupported := identities.slotCollisionKey(slotIdentity)
+			if !comparisonSupported {
+				blockers = append(blockers, slotUnsupportedCaseAmbiguity(slotIdentity))
+				continue
+			}
+			if ambiguousComparison[comparisonKey] {
+				continue
+			}
+			if existingExact, ok := comparisonExact[comparisonKey]; ok && existingExact != slotIdentity {
+				blockers = append(blockers, slotCaseAmbiguity(existingExact, slotIdentity, comparisonKey))
+				ambiguousComparison[comparisonKey] = true
+				delete(bySlot, existingExact)
+				continue
+			}
+			comparisonExact[comparisonKey] = slotIdentity
 			deploymentID := deploymentID(slotIdentity, sourceIdentity)
 			binding := contracts.RuntimeBinding{DeploymentID: deploymentID, Runtime: runtimeRoot.Runtime, Root: rootPath, Name: skill.SkillID, Target: filepath.Join(governedPath, "SKILL.md")}
 			if existing := bySlot[slotIdentity]; existing != nil {

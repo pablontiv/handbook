@@ -35,6 +35,25 @@ func LexicalIdentity(path string) (string, error) {
 	return platformPathIdentity(filepath.Clean(path))
 }
 
+func GovernedSlotCollisionKey(slotIdentity string) (string, bool) {
+	return platformGovernedSlotCollisionKey(slotIdentity)
+}
+
+func asciiCaseInsensitiveCollisionKey(identity string) (string, bool) {
+	out := []byte(identity)
+	supported := true
+	for i, c := range out {
+		if c >= 0x80 {
+			supported = false
+			continue
+		}
+		if c >= 'A' && c <= 'Z' {
+			out[i] = c + ('a' - 'A')
+		}
+	}
+	return string(out), supported
+}
+
 func ContainedCanonicalIdentity(root, candidate string) (string, error) {
 	rootIdentity, err := CanonicalIdentity(root)
 	if err != nil {

@@ -7,3 +7,7 @@ import "path/filepath"
 func platformPathIdentity(path string) (string, error) {
 	return filepath.Clean(path), nil
 }
+
+func platformGovernedSlotCollisionKey(identity string) (string, bool) {
+	return asciiCaseInsensitiveCollisionKey(filepath.Clean(identity))
+}
