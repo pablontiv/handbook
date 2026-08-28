@@ -69,14 +69,8 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		},
 		{
 			name: "receipt publication complete",
-			seed: func(ctx context.Context, t *testing.T, _ *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
-				op := opID("op-complete")
-				appendJournalBoundary(ctx, t, store, roots, op, "started")
-				appendJournalBoundary(ctx, t, store, roots, op, "ready_to_commit")
-				appendJournalBoundary(ctx, t, store, roots, op, "committed")
-				if _, err := store.PublishRunArtifact(ctx, roots, contracts.OperationID(op), "receipt.json", []byte("{}")); err != nil {
-					t.Fatal(err)
-				}
+			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
+				completeReceiptDAG(ctx, t, adapter, store, roots, "op-complete")
 			},
 			wantStatus: contracts.RecoveryClean,
 			wantCode:   "",
@@ -99,7 +93,10 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 					t.Fatal(err)
 				}
 				record := ownershipRecord("install-rec", opID("op-rec"), "recovery_required")
-				record.FailureCode = "mutation_unprovable"
+				failure := "mutation_unprovable"
+				record.FailureCode = &failure
+				record.OperationResult = contracts.RecoveryRequired
+				record.CompensatingPriorState = &contracts.CompensatingPriorState{AggregateEvent: "applied_unverified", DeploymentIDs: record.DeploymentIDs, LedgerRecordHash: contracts.SHA256([]byte("prior"))}
 				if _, err := ledger.Append(ctx, record); err != nil {
 					t.Fatal(err)
 				}

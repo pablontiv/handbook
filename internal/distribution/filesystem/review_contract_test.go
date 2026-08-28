@@ -12,6 +12,7 @@ type requiredStateAdapterSeams interface {
 	SafeRoot(context.Context, contracts.AbsolutePath) (filesystem.SafeRoot, error)
 	PhysicalIdentity(context.Context, contracts.AbsolutePath) (filesystem.PhysicalIdentity, error)
 	ListNoFollow(context.Context, contracts.AbsolutePath) ([]filesystem.DirEntry, error)
+	EnsureDirSync(context.Context, contracts.AbsolutePath) error
 	SyncDirectory(context.Context, contracts.AbsolutePath) error
 }
 
@@ -38,6 +39,11 @@ func TestLocalStateRootRecoverySeamsFailClosedUntilNativeTask(t *testing.T) {
 		t.Fatalf("local ListNoFollow succeeded before native no-follow enumeration implementation")
 	} else if err != filesystem.ErrUnsupportedCapability {
 		t.Fatalf("local ListNoFollow error = %v, want ErrUnsupportedCapability", err)
+	}
+	if err := adapter.EnsureDirSync(ctx, root); err == nil {
+		t.Fatalf("local EnsureDirSync succeeded before native directory creation sync implementation")
+	} else if err != filesystem.ErrUnsupportedCapability {
+		t.Fatalf("local EnsureDirSync error = %v, want ErrUnsupportedCapability", err)
 	}
 	if err := adapter.SyncDirectory(ctx, root); err == nil {
 		t.Fatalf("local SyncDirectory succeeded before native directory sync implementation")

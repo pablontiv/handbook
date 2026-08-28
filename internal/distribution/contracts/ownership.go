@@ -1,25 +1,30 @@
 package contracts
 
-import "fmt"
+import (
+	"fmt"
+	"path"
+	"strings"
+)
 
 type OwnershipRecord struct {
-	Schema          SchemaID       `json:"schema"`
-	RecordID        string         `json:"record_id"`
-	OperationID     OperationID    `json:"operation_id"`
-	InstallationID  InstallationID `json:"installation_id"`
-	Sequence        int64          `json:"sequence,omitempty"`
-	PreviousHash    *SHA256Hex     `json:"previous_hash"`
-	RecordHash      SHA256Hex      `json:"record_hash,omitempty"`
-	PlanRef         ArtifactRef    `json:"plan_ref"`
-	InventoryRef    ArtifactRef    `json:"inventory_ref"`
-	JournalRef      JournalRef     `json:"journal_ref"`
-	BackupSetRef    *BackupSetRef  `json:"backup_set_ref"`
-	VerificationRef *ArtifactRef   `json:"verification_ref"`
-	DeploymentIDs   []string       `json:"deployment_ids"`
-	Entries         []JournalEntry `json:"entries"`
-	AggregateEvent  string         `json:"aggregate_event"`
-	OperationResult string         `json:"operation_result"`
-	FailureCode     string         `json:"failure_code,omitempty"`
+	Schema                 SchemaID                    `json:"schema"`
+	RecordID               string                      `json:"record_id"`
+	OperationID            OperationID                 `json:"operation_id"`
+	InstallationID         InstallationID              `json:"installation_id"`
+	Sequence               int64                       `json:"sequence,omitempty"`
+	PreviousHash           *SHA256Hex                  `json:"previous_hash"`
+	RecordHash             SHA256Hex                   `json:"record_hash,omitempty"`
+	PlanRef                ArtifactRef                 `json:"plan_ref"`
+	InventoryRef           ArtifactRef                 `json:"inventory_ref"`
+	JournalRef             JournalRef                  `json:"journal_ref"`
+	BackupSetRef           *BackupSetRef               `json:"backup_set_ref"`
+	VerificationRef        *ArtifactRef                `json:"verification_ref"`
+	DeploymentIDs          []string                    `json:"deployment_ids"`
+	Deployments            []OwnershipDeploymentRecord `json:"deployments"`
+	AggregateEvent         string                      `json:"aggregate_event"`
+	OperationResult        string                      `json:"operation_result"`
+	FailureCode            *string                     `json:"failure_code"`
+	CompensatingPriorState *CompensatingPriorState     `json:"compensating_prior_state"`
 }
 
 type BackupSetRef struct {
@@ -34,11 +39,63 @@ type JournalRef struct {
 }
 
 type JournalEntry struct {
-	OperationID       string    `json:"operation_id"`
-	Boundary          string    `json:"boundary"`
-	Result            string    `json:"result"`
-	ReceiptSHA256     SHA256Hex `json:"receipt_sha256,omitempty"`
-	FinalArtifactPath string    `json:"final_artifact_path,omitempty"`
+	OperationID           string        `json:"operation_id"`
+	Command               string        `json:"command,omitempty"`
+	Intent                string        `json:"intent,omitempty"`
+	StateRoot             string        `json:"state_root,omitempty"`
+	Sequence              int64         `json:"sequence,omitempty"`
+	Step                  string        `json:"step,omitempty"`
+	Boundary              string        `json:"boundary"`
+	State                 string        `json:"state,omitempty"`
+	Result                string        `json:"result"`
+	DeploymentRefs        []string      `json:"deployment_refs,omitempty"`
+	GovernedSlotRefs      []string      `json:"governed_slot_refs,omitempty"`
+	BackupSetRef          *BackupSetRef `json:"backup_set_ref,omitempty"`
+	VerificationRef       *ArtifactRef  `json:"verification_ref,omitempty"`
+	RollbackAuthorityRefs []ArtifactRef `json:"rollback_authority_refs,omitempty"`
+	ReceiptSHA256         SHA256Hex     `json:"receipt_sha256,omitempty"`
+	FinalReceiptPath      string        `json:"final_receipt_path,omitempty"`
+	FinalArtifactPath     string        `json:"final_artifact_path,omitempty"`
+	SyncBoundary          string        `json:"sync_boundary,omitempty"`
+	Terminal              bool          `json:"terminal,omitempty"`
+}
+
+type DeploymentObservation struct {
+	ObservedType          string `json:"observed_type"`
+	Path                  string `json:"path"`
+	GovernedSlotIdentity  string `json:"governed_slot_identity"`
+	ManagedObjectIdentity string `json:"managed_object_identity"`
+	ManagedLinkIdentity   string `json:"managed_link_identity"`
+	LexicalLinkTarget     string `json:"lexical_link_target"`
+	SourceContentDigest   string `json:"source_content_digest"`
+	AttributesFingerprint string `json:"attributes_fingerprint"`
+}
+
+type RuntimeBindingSummary struct {
+	Runtime         string       `json:"runtime"`
+	BindingIdentity string       `json:"binding_identity"`
+	Status          string       `json:"status"`
+	EvidenceRef     *ArtifactRef `json:"evidence_ref"`
+}
+
+type OwnershipDeploymentRecord struct {
+	DeploymentID            string                  `json:"deployment_id"`
+	BeforeObservation       DeploymentObservation   `json:"before_observation"`
+	AfterObservation        DeploymentObservation   `json:"after_observation"`
+	RuntimeBindingSummaries []RuntimeBindingSummary `json:"runtime_binding_summaries"`
+	OriginalPreimage        DeploymentObservation   `json:"original_preimage"`
+	InstalledPostimage      *DeploymentObservation  `json:"installed_postimage"`
+	BackupEntryRef          *ArtifactRef            `json:"backup_entry_ref"`
+	VerificationRef         *ArtifactRef            `json:"verification_ref"`
+	CleanupEvidenceRef      *ArtifactRef            `json:"cleanup_evidence_ref"`
+	RollbackAuthorityRefs   []ArtifactRef           `json:"rollback_authority_refs"`
+	Result                  string                  `json:"result"`
+}
+
+type CompensatingPriorState struct {
+	AggregateEvent   string    `json:"aggregate_event"`
+	DeploymentIDs    []string  `json:"deployment_ids"`
+	LedgerRecordHash SHA256Hex `json:"ledger_record_hash"`
 }
 
 func ValidateOwnershipRecord(record OwnershipRecord) error {
@@ -60,40 +117,215 @@ func ValidateOwnershipRecord(record OwnershipRecord) error {
 	if err := ValidateJournalRef(record.JournalRef, record.OperationID); err != nil {
 		return fmt.Errorf("journal_ref: %w", err)
 	}
-	if record.BackupSetRef != nil {
-		if record.BackupSetRef.BackupSetID == "" || !sha256Pattern.MatchString(string(record.BackupSetRef.SHA256)) {
-			return fmt.Errorf("backup_set_ref is invalid")
-		}
+	if err := validateBackupSetRef(record.BackupSetRef); err != nil {
+		return err
 	}
 	if record.VerificationRef != nil {
 		if err := ValidateArtifactRef(*record.VerificationRef); err != nil {
 			return fmt.Errorf("verification_ref: %w", err)
 		}
 	}
-	if len(record.DeploymentIDs) == 0 {
-		return fmt.Errorf("ownership record requires deployment_ids")
+	if err := validateDeploymentCardinality(record.DeploymentIDs, record.Deployments); err != nil {
+		return err
 	}
 	if record.AggregateEvent == "" || record.OperationResult == "" {
 		return fmt.Errorf("ownership record requires aggregate_event and operation_result")
 	}
+	if err := validateOwnershipEventRefs(record); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateBackupSetRef(ref *BackupSetRef) error {
+	if ref == nil {
+		return nil
+	}
+	if ref.BackupSetID == "" || !sha256Pattern.MatchString(string(ref.SHA256)) {
+		return fmt.Errorf("backup_set_ref is invalid")
+	}
+	return nil
+}
+
+func validateOwnershipEventRefs(record OwnershipRecord) error {
 	switch record.AggregateEvent {
-	case "applied_unverified", "restored_unverified", "restored_verified":
+	case "applied_unverified", "restored_unverified":
 		if record.BackupSetRef == nil {
 			return fmt.Errorf("%s requires backup_set_ref", record.AggregateEvent)
 		}
-		if record.VerificationRef != nil && record.AggregateEvent != "restored_verified" {
+		if record.VerificationRef != nil {
 			return fmt.Errorf("mutator ownership event must not carry verification_ref")
 		}
-	case "installed_verified", "removed_verified":
+		if record.FailureCode != nil || record.CompensatingPriorState != nil {
+			return fmt.Errorf("normal mutator ownership event requires null failure and compensating refs")
+		}
+		if record.OperationResult != "verification_required" {
+			return fmt.Errorf("normal mutator ownership event result must be verification_required")
+		}
+	case "removed_unverified":
+		if record.BackupSetRef != nil || record.VerificationRef != nil {
+			return fmt.Errorf("uninstall mutator event requires null backup_set_ref and verification_ref")
+		}
+		if record.FailureCode != nil || record.CompensatingPriorState != nil {
+			return fmt.Errorf("normal uninstall event requires null failure and compensating refs")
+		}
+		if record.OperationResult != "verification_required" {
+			return fmt.Errorf("normal uninstall event result must be verification_required")
+		}
+	case "installed_verified", "removed_verified", "restored_verified":
 		if record.VerificationRef == nil {
 			return fmt.Errorf("verified ownership event requires verification_ref")
 		}
-	case "removed_unverified", "install_rolled_back", "uninstall_rolled_back", "restore_rolled_back", RecoveryRequired:
-		if record.AggregateEvent == RecoveryRequired && record.FailureCode == "" {
-			return fmt.Errorf("recovery_required ownership event requires failure_code")
+		if record.AggregateEvent != "restored_verified" && record.BackupSetRef != nil {
+			return fmt.Errorf("installation/removal verification event requires null backup_set_ref")
+		}
+		if record.FailureCode != nil || record.CompensatingPriorState != nil {
+			return fmt.Errorf("verified ownership event requires null failure and compensating refs")
+		}
+		if record.OperationResult != "verified" {
+			return fmt.Errorf("verified ownership event result must be verified")
+		}
+	case "install_rolled_back", "uninstall_rolled_back", "restore_rolled_back", RecoveryRequired:
+		if record.FailureCode == nil || *record.FailureCode == "" {
+			return fmt.Errorf("compensating ownership event requires failure_code")
+		}
+		if record.CompensatingPriorState == nil {
+			return fmt.Errorf("compensating ownership event requires compensating_prior_state")
+		}
+		if !sha256Pattern.MatchString(string(record.CompensatingPriorState.LedgerRecordHash)) {
+			return fmt.Errorf("compensating_prior_state ledger_record_hash must be lower-case hex SHA-256")
+		}
+		if record.OperationResult != "rolled_back" && record.OperationResult != RecoveryRequired {
+			return fmt.Errorf("compensating ownership event result must be rolled_back or recovery_required")
 		}
 	default:
 		return fmt.Errorf("unknown aggregate_event %q", record.AggregateEvent)
+	}
+	for _, deployment := range record.Deployments {
+		if err := validateOwnershipDeployment(record, deployment); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateOwnershipDeployment(record OwnershipRecord, deployment OwnershipDeploymentRecord) error {
+	if deployment.DeploymentID == "" || deployment.Result == "" {
+		return fmt.Errorf("deployment record requires deployment_id and result")
+	}
+	if err := validateObservation(deployment.BeforeObservation, false); err != nil {
+		return fmt.Errorf("before_observation: %w", err)
+	}
+	if err := validateObservation(deployment.AfterObservation, false); err != nil {
+		return fmt.Errorf("after_observation: %w", err)
+	}
+	if err := validateObservation(deployment.OriginalPreimage, false); err != nil {
+		return fmt.Errorf("original_preimage: %w", err)
+	}
+	if deployment.InstalledPostimage == nil && (record.AggregateEvent == "applied_unverified" || record.AggregateEvent == "installed_verified") {
+		return fmt.Errorf("installed state requires installed_postimage")
+	}
+	if deployment.InstalledPostimage != nil {
+		if err := validateObservation(*deployment.InstalledPostimage, false); err != nil {
+			return fmt.Errorf("installed_postimage: %w", err)
+		}
+	}
+	seenBindings := map[string]bool{}
+	for _, binding := range deployment.RuntimeBindingSummaries {
+		if binding.Runtime == "" || binding.BindingIdentity == "" || binding.Status == "" {
+			return fmt.Errorf("runtime binding summary requires runtime, binding_identity, and status")
+		}
+		key := binding.Runtime + "\x00" + binding.BindingIdentity
+		if seenBindings[key] {
+			return fmt.Errorf("duplicate runtime binding identity")
+		}
+		seenBindings[key] = true
+		if binding.EvidenceRef != nil {
+			if err := ValidateArtifactRef(*binding.EvidenceRef); err != nil {
+				return fmt.Errorf("runtime binding evidence_ref: %w", err)
+			}
+		}
+	}
+	if len(deployment.RuntimeBindingSummaries) == 0 && strings.HasSuffix(record.AggregateEvent, "verified") {
+		return fmt.Errorf("verified aggregate event requires runtime binding summaries")
+	}
+	if record.BackupSetRef != nil && deployment.BackupEntryRef == nil {
+		return fmt.Errorf("backup-backed aggregate event requires backup_entry_ref per deployment")
+	}
+	if deployment.BackupEntryRef != nil {
+		if err := ValidateArtifactRef(*deployment.BackupEntryRef); err != nil {
+			return fmt.Errorf("backup_entry_ref: %w", err)
+		}
+	}
+	if deployment.VerificationRef != nil {
+		if err := ValidateArtifactRef(*deployment.VerificationRef); err != nil {
+			return fmt.Errorf("deployment verification_ref: %w", err)
+		}
+	}
+	if deployment.CleanupEvidenceRef == nil && (record.OperationResult == "verification_required" || record.OperationResult == "rolled_back") {
+		return fmt.Errorf("completed command-phase event requires cleanup_evidence_ref per deployment")
+	}
+	if deployment.CleanupEvidenceRef != nil {
+		if err := ValidateArtifactRef(*deployment.CleanupEvidenceRef); err != nil {
+			return fmt.Errorf("cleanup_evidence_ref: %w", err)
+		}
+	}
+	for _, ref := range deployment.RollbackAuthorityRefs {
+		if err := ValidateArtifactRef(ref); err != nil {
+			return fmt.Errorf("rollback_authority_refs: %w", err)
+		}
+	}
+	if record.OperationResult == "rolled_back" && len(deployment.RollbackAuthorityRefs) == 0 {
+		return fmt.Errorf("rolled_back deployment requires rollback authority refs")
+	}
+	return nil
+}
+
+func validateObservation(observation DeploymentObservation, allowZero bool) error {
+	if allowZero && observation == (DeploymentObservation{}) {
+		return nil
+	}
+	if observation.ObservedType == "" || observation.Path == "" || observation.GovernedSlotIdentity == "" || observation.ManagedObjectIdentity == "" {
+		return fmt.Errorf("observation requires observed_type, path, governed_slot_identity, and managed_object_identity")
+	}
+	if observation.SourceContentDigest != "" && !sha256Pattern.MatchString(observation.SourceContentDigest) {
+		return fmt.Errorf("source_content_digest must be lower-case hex SHA-256 when present")
+	}
+	return nil
+}
+
+func validateDeploymentCardinality(ids []string, deployments []OwnershipDeploymentRecord) error {
+	if len(ids) == 0 {
+		return fmt.Errorf("ownership record requires deployment_ids")
+	}
+	if len(deployments) == 0 {
+		return fmt.Errorf("ownership record requires deployment records")
+	}
+	seenIDs := map[string]bool{}
+	for _, id := range ids {
+		if id == "" {
+			return fmt.Errorf("deployment_ids must not contain empty values")
+		}
+		if seenIDs[id] {
+			return fmt.Errorf("duplicate deployment_id")
+		}
+		seenIDs[id] = true
+	}
+	seenDeployments := map[string]bool{}
+	for _, deployment := range deployments {
+		if deployment.DeploymentID == "" {
+			return fmt.Errorf("deployment record requires deployment_id")
+		}
+		if seenDeployments[deployment.DeploymentID] {
+			return fmt.Errorf("duplicate deployment identity")
+		}
+		seenDeployments[deployment.DeploymentID] = true
+		if !seenIDs[deployment.DeploymentID] {
+			return fmt.Errorf("deployment record not listed in deployment_ids")
+		}
+	}
+	if len(seenIDs) != len(seenDeployments) {
+		return fmt.Errorf("incomplete aggregate deployment cardinality")
 	}
 	return nil
 }
@@ -113,6 +345,76 @@ func ValidateJournalRef(ref JournalRef, operationID OperationID) error {
 	}
 	if !sha256Pattern.MatchString(string(ref.SHA256)) {
 		return fmt.Errorf("journal_ref sha256 must be lower-case hex SHA-256")
+	}
+	return nil
+}
+
+func ValidateJournalEntry(entry JournalEntry, operationID OperationID) error {
+	if entry.OperationID == "" || entry.Boundary == "" || entry.Result == "" {
+		return fmt.Errorf("journal entry requires operation_id, boundary, and result")
+	}
+	if entry.OperationID != string(operationID) {
+		return fmt.Errorf("journal entry operation_id mismatch")
+	}
+	if err := ValidateOperationID(entry.OperationID); err != nil {
+		return err
+	}
+	if entry.Sequence < 1 {
+		return fmt.Errorf("journal entry requires positive sequence")
+	}
+	if entry.State != "" && entry.State != entry.Boundary {
+		return fmt.Errorf("journal state must match boundary")
+	}
+	if entry.BackupSetRef != nil {
+		if err := validateBackupSetRef(entry.BackupSetRef); err != nil {
+			return err
+		}
+	}
+	if entry.VerificationRef != nil {
+		if err := ValidateArtifactRef(*entry.VerificationRef); err != nil {
+			return fmt.Errorf("verification_ref: %w", err)
+		}
+	}
+	for _, ref := range entry.RollbackAuthorityRefs {
+		if err := ValidateArtifactRef(ref); err != nil {
+			return fmt.Errorf("rollback_authority_refs: %w", err)
+		}
+	}
+	switch entry.Boundary {
+	case "started", "ready_to_commit":
+		if entry.Terminal || entry.ReceiptSHA256 != "" || entry.FinalReceiptPath != "" || entry.FinalArtifactPath != "" {
+			return fmt.Errorf("nonterminal journal entry must not carry terminal receipt fields")
+		}
+	case "committed":
+		if !entry.Terminal {
+			return fmt.Errorf("committed journal entry must be terminal")
+		}
+		if entry.ReceiptSHA256 == "" || !sha256Pattern.MatchString(string(entry.ReceiptSHA256)) {
+			return fmt.Errorf("committed journal entry requires receipt digest")
+		}
+		finalPath := entry.FinalReceiptPath
+		if finalPath == "" {
+			finalPath = entry.FinalArtifactPath
+		}
+		if err := validateFinalReceiptPath(finalPath); err != nil {
+			return err
+		}
+	case "rolled_back", "rollback_failed":
+		if !entry.Terminal {
+			return fmt.Errorf("rollback terminal journal entry must be terminal")
+		}
+	default:
+		return fmt.Errorf("unknown journal boundary %q", entry.Boundary)
+	}
+	return nil
+}
+
+func validateFinalReceiptPath(value string) error {
+	if value == "" {
+		return fmt.Errorf("terminal journal entry requires final receipt destination")
+	}
+	if strings.HasPrefix(value, "/") || strings.ContainsAny(value, `\\:`) || value == "." || value == ".." || strings.HasPrefix(value, "../") || strings.Contains(value, "/../") || path.Clean(value) != value {
+		return fmt.Errorf("final receipt destination must be slash-relative and confined")
 	}
 	return nil
 }

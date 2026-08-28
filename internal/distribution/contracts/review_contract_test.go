@@ -31,23 +31,29 @@ func TestReceiptSchemaIsAcyclicAndRejectsTerminalJournalRef(t *testing.T) {
 
 func TestOwnershipAndReceiptSemanticValidatorsRejectInvalidNullability(t *testing.T) {
 	sha := contracts.SHA256([]byte("artifact"))
-	artifact := contracts.ArtifactRef{Path: "runs/op/artifact.json", SHA256: sha, Bytes: "2"}
-	journal := contracts.JournalRef{OperationID: "op", Path: "runs/op/journal.ndjson", SHA256: sha}
+	op := string(contracts.SHA256([]byte("review-op")))
+	artifact := contracts.ArtifactRef{Path: "runs/" + op + "/artifact.json", SHA256: sha, Bytes: "2"}
+	journal := contracts.JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: sha}
+	before := contracts.DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/skill", GovernedSlotIdentity: "slot", ManagedObjectIdentity: "missing"}
+	after := contracts.DeploymentObservation{ObservedType: "symlink", Path: "/runtime/skill", GovernedSlotIdentity: "slot", ManagedObjectIdentity: "object", ManagedLinkIdentity: "link", SourceContentDigest: string(sha)}
+	deployment := contracts.OwnershipDeploymentRecord{DeploymentID: "deployment", BeforeObservation: before, AfterObservation: after, RuntimeBindingSummaries: []contracts.RuntimeBindingSummary{{Runtime: "pi", BindingIdentity: "pi:/runtime/skill", Status: "verification_required", EvidenceRef: &artifact}}, OriginalPreimage: before, InstalledPostimage: &after, BackupEntryRef: &artifact, CleanupEvidenceRef: &artifact, RollbackAuthorityRefs: []contracts.ArtifactRef{artifact}, Result: "verification_required"}
 	ownership := contracts.OwnershipRecord{
-		Schema:          contracts.SchemaOwnership,
-		RecordID:        "record",
-		OperationID:     "op",
-		InstallationID:  "install",
-		PreviousHash:    nil,
-		PlanRef:         artifact,
-		InventoryRef:    artifact,
-		JournalRef:      journal,
-		BackupSetRef:    nil,
-		VerificationRef: nil,
-		DeploymentIDs:   []string{"deployment"},
-		Entries:         []contracts.JournalEntry{},
-		AggregateEvent:  "applied_unverified",
-		OperationResult: "verification_required",
+		Schema:                 contracts.SchemaOwnership,
+		RecordID:               "record",
+		OperationID:            contracts.OperationID(op),
+		InstallationID:         "install",
+		PreviousHash:           nil,
+		PlanRef:                artifact,
+		InventoryRef:           artifact,
+		JournalRef:             journal,
+		BackupSetRef:           nil,
+		VerificationRef:        nil,
+		DeploymentIDs:          []string{"deployment"},
+		Deployments:            []contracts.OwnershipDeploymentRecord{deployment},
+		AggregateEvent:         "applied_unverified",
+		OperationResult:        "verification_required",
+		FailureCode:            nil,
+		CompensatingPriorState: nil,
 	}
 	bytes, err := contracts.CanonicalBytes(ownership)
 	if err != nil {
@@ -58,20 +64,23 @@ func TestOwnershipAndReceiptSemanticValidatorsRejectInvalidNullability(t *testin
 	}
 
 	receipt := contracts.Receipt{
-		Schema:           contracts.SchemaReceipt,
-		ReceiptID:        "receipt",
-		OperationID:      "op",
-		Command:          "apply",
-		ApprovalDigest:   &sha,
-		LedgerRecordHash: sha,
-		ReadyJournalRef:  journal,
-		PlanRef:          &artifact,
-		InventoryRef:     &artifact,
-		BackupSetRef:     nil,
-		VerificationRef:  &artifact,
-		Preconditions:    []contracts.Precondition{},
-		Results:          []contracts.JournalEntry{},
-		OperationResult:  "verification_required",
+		Schema:                     contracts.SchemaReceipt,
+		ReceiptID:                  "receipt",
+		OperationID:                op,
+		Command:                    "apply",
+		ApprovalDigest:             &sha,
+		LedgerRecordHash:           sha,
+		ReadyJournalRef:            journal,
+		PlanRef:                    &artifact,
+		InventoryRef:               &artifact,
+		BackupSetRef:               nil,
+		VerificationRef:            &artifact,
+		Preconditions:              []contracts.Precondition{},
+		DeploymentResults:          []contracts.OperationDeploymentResult{{DeploymentID: "deployment", Result: "verification_required", BeforeObservation: &before, AfterObservation: &after, RuntimeBindingSummaries: []contracts.RuntimeBindingSummary{{Runtime: "pi", BindingIdentity: "pi:/runtime/skill", Status: "verification_required", EvidenceRef: &artifact}}, CleanupEvidenceRef: &artifact}},
+		RollbackResults:            []contracts.OperationDeploymentResult{},
+		CleanupEvidenceRef:         &artifact,
+		RequiredVerificationStatus: "verification_required",
+		OperationResult:            "verification_required",
 	}
 	bytes, err = contracts.CanonicalBytes(receipt)
 	if err != nil {

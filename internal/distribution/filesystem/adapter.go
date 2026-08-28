@@ -25,6 +25,7 @@ type Adapter interface {
 	HashFileByHandle(context.Context, contracts.AbsolutePath) (contracts.SHA256Hex, error)
 	LockShared(context.Context, contracts.AbsolutePath, string) (LockHandle, error)
 	LockExclusive(context.Context, contracts.AbsolutePath, string) (LockHandle, error)
+	EnsureDirSync(context.Context, contracts.AbsolutePath) error
 	AppendFileSync(context.Context, contracts.AbsolutePath, []byte) error
 	WriteFileNoReplaceSync(context.Context, contracts.AbsolutePath, []byte) error
 	ReadFile(context.Context, contracts.AbsolutePath) ([]byte, error)
@@ -169,6 +170,10 @@ func (localAdapter) LockShared(context.Context, contracts.AbsolutePath, string) 
 
 func (localAdapter) LockExclusive(context.Context, contracts.AbsolutePath, string) (LockHandle, error) {
 	return nil, ErrUnsupportedCapability
+}
+
+func (localAdapter) EnsureDirSync(context.Context, contracts.AbsolutePath) error {
+	return ErrUnsupportedCapability
 }
 
 func (localAdapter) AppendFileSync(_ context.Context, path contracts.AbsolutePath, data []byte) error {

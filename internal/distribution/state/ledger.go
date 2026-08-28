@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 
 	"waywarden/internal/distribution/contracts"
 	"waywarden/internal/distribution/filesystem"
@@ -50,7 +51,7 @@ func (l *ledger) Append(ctx context.Context, record contracts.OwnershipRecord) (
 	if err := contracts.ValidateOwnershipRecord(record); err != nil {
 		return "", err
 	}
-	hash, err := ComputeLedgerRecordHash(record)
+	hash, err := computeLedgerRecordHash(record)
 	if err != nil {
 		return "", err
 	}
@@ -60,6 +61,9 @@ func (l *ledger) Append(ctx context.Context, record contracts.OwnershipRecord) (
 		return "", err
 	}
 	appendBytes := append(append([]byte(nil), line...), '\n')
+	if err := l.fs.EnsureDirSync(ctx, contracts.AbsolutePath(filepath.Dir(string(l.roots.LedgerPath())))); err != nil {
+		return "", err
+	}
 	if err := l.fs.AppendFileSync(ctx, l.roots.LedgerPath(), appendBytes); err != nil {
 		return "", err
 	}
@@ -122,7 +126,7 @@ func readLedger(ctx context.Context, adapter filesystem.Adapter, roots Roots) ([
 		} else if record.PreviousHash == nil || *record.PreviousHash != *previous {
 			return nil, fmt.Errorf("ownership record previous_hash mismatch")
 		}
-		computed, err := ComputeLedgerRecordHash(record)
+		computed, err := computeLedgerRecordHash(record)
 		if err != nil {
 			return nil, err
 		}
@@ -136,7 +140,7 @@ func readLedger(ctx context.Context, adapter filesystem.Adapter, roots Roots) ([
 	return records, nil
 }
 
-func ComputeLedgerRecordHash(record contracts.OwnershipRecord) (contracts.SHA256Hex, error) {
+func computeLedgerRecordHash(record contracts.OwnershipRecord) (contracts.SHA256Hex, error) {
 	preimage, err := canonicalLedgerRecordPreimage(record)
 	if err != nil {
 		return "", err

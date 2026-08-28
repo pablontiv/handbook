@@ -248,7 +248,7 @@ func TestLedgerAppendCanonicalHashChainRejectsPartialAndMismatch(t *testing.T) {
 	if second.PreviousHash == nil || *second.PreviousHash != first.RecordHash {
 		t.Fatalf("second previous hash = %v, want %s", second.PreviousHash, first.RecordHash)
 	}
-	if got, err := state.ComputeLedgerRecordHash(first); err != nil || got != first.RecordHash {
+	if got, err := computeLedgerRecordHashForTest(first); err != nil || got != first.RecordHash {
 		t.Fatalf("first record hash verification = %s, %v; want %s", got, err, first.RecordHash)
 	}
 
@@ -416,24 +416,45 @@ func tempRoots(t *testing.T) state.Roots {
 
 func ownershipRecord(installationID, operationID, event string) contracts.OwnershipRecord {
 	sha := contracts.SHA256([]byte("artifact"))
-	artifact := contracts.ArtifactRef{Path: "runs/" + operationID + "/artifact.json", SHA256: sha, Bytes: "2"}
+	artifact := contracts.ArtifactRef{Path: "runs/" + operationID + "/plan.json", SHA256: sha, Bytes: "2"}
 	journal := contracts.JournalRef{OperationID: operationID, Path: "runs/" + operationID + "/journal.ndjson", SHA256: sha}
-	return contracts.OwnershipRecord{
-		Schema:          contracts.SchemaOwnership,
-		RecordID:        "record-" + operationID,
-		OperationID:     contracts.OperationID(operationID),
-		InstallationID:  contracts.InstallationID(installationID),
-		DeploymentIDs:   []string{"deployment-a", "deployment-b"},
-		PreviousHash:    nil,
-		PlanRef:         artifact,
-		InventoryRef:    artifact,
-		JournalRef:      journal,
-		BackupSetRef:    &contracts.BackupSetRef{BackupSetID: "backup-" + installationID, SHA256: sha},
-		VerificationRef: nil,
-		Entries:         []contracts.JournalEntry{},
-		AggregateEvent:  event,
-		OperationResult: "verification_required",
+	before := contracts.DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/skill", GovernedSlotIdentity: "slot-a", ManagedObjectIdentity: "missing", AttributesFingerprint: "attrs-before"}
+	after := contracts.DeploymentObservation{ObservedType: "symlink", Path: "/runtime/skill", GovernedSlotIdentity: "slot-a", ManagedObjectIdentity: "object-a", ManagedLinkIdentity: "link-a", LexicalLinkTarget: "/repo/skill", SourceContentDigest: string(sha), AttributesFingerprint: "attrs-after"}
+	deployment := contracts.OwnershipDeploymentRecord{DeploymentID: "deployment-a", BeforeObservation: before, AfterObservation: after, RuntimeBindingSummaries: []contracts.RuntimeBindingSummary{{Runtime: "pi", BindingIdentity: "pi:/runtime/skill", Status: "verification_required", EvidenceRef: &artifact}}, OriginalPreimage: before, InstalledPostimage: &after, BackupEntryRef: &artifact, VerificationRef: nil, CleanupEvidenceRef: &artifact, RollbackAuthorityRefs: []contracts.ArtifactRef{artifact}, Result: "verification_required"}
+	record := contracts.OwnershipRecord{
+		Schema:                 contracts.SchemaOwnership,
+		RecordID:               "record-" + operationID,
+		OperationID:            contracts.OperationID(operationID),
+		InstallationID:         contracts.InstallationID(installationID),
+		DeploymentIDs:          []string{"deployment-a"},
+		Deployments:            []contracts.OwnershipDeploymentRecord{deployment},
+		PreviousHash:           nil,
+		PlanRef:                artifact,
+		InventoryRef:           artifact,
+		JournalRef:             journal,
+		BackupSetRef:           &contracts.BackupSetRef{BackupSetID: "backup-" + installationID, SHA256: sha},
+		VerificationRef:        nil,
+		AggregateEvent:         event,
+		OperationResult:        "verification_required",
+		FailureCode:            nil,
+		CompensatingPriorState: nil,
 	}
+	switch event {
+	case "removed_unverified":
+		record.BackupSetRef = nil
+	case "installed_verified", "removed_verified", "restored_verified":
+		record.OperationResult = "verified"
+		record.VerificationRef = &artifact
+		if event != "restored_verified" {
+			record.BackupSetRef = nil
+		}
+	case "install_rolled_back", "uninstall_rolled_back", "restore_rolled_back":
+		failure := "state_or_io_failure_preterminal"
+		record.OperationResult = "rolled_back"
+		record.FailureCode = &failure
+		record.CompensatingPriorState = &contracts.CompensatingPriorState{AggregateEvent: "applied_unverified", DeploymentIDs: []string{"deployment-a"}, LedgerRecordHash: sha}
+	}
+	return record
 }
 
 func prepareReceiptProtocol(ctx context.Context, t *testing.T, store state.Store, roots state.Roots, op contracts.OperationID) contracts.Receipt {
@@ -470,22 +491,45 @@ func receiptForTest(op contracts.OperationID) contracts.Receipt {
 	journal := contracts.JournalRef{OperationID: string(op), Path: "runs/" + string(op) + "/journal.ndjson", SHA256: sha}
 	artifact := contracts.ArtifactRef{Path: "runs/" + string(op) + "/plan.json", SHA256: sha, Bytes: "2"}
 	approval := sha
+	before := contracts.DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/skill", GovernedSlotIdentity: "slot-a", ManagedObjectIdentity: "missing"}
+	after := contracts.DeploymentObservation{ObservedType: "symlink", Path: "/runtime/skill", GovernedSlotIdentity: "slot-a", ManagedObjectIdentity: "object-a", ManagedLinkIdentity: "link-a"}
 	return contracts.Receipt{
-		Schema:           contracts.SchemaReceipt,
-		ReceiptID:        "receipt-" + string(op),
-		OperationID:      string(op),
-		Command:          "apply",
-		ApprovalDigest:   &approval,
-		LedgerRecordHash: sha,
-		ReadyJournalRef:  journal,
-		PlanRef:          &artifact,
-		InventoryRef:     &artifact,
-		BackupSetRef:     &contracts.BackupSetRef{BackupSetID: "backup", SHA256: sha},
-		VerificationRef:  nil,
-		Preconditions:    []contracts.Precondition{},
-		Results:          []contracts.JournalEntry{},
-		OperationResult:  "verification_required",
+		Schema:                     contracts.SchemaReceipt,
+		ReceiptID:                  "receipt-" + string(op),
+		OperationID:                string(op),
+		Command:                    "apply",
+		ApprovalDigest:             &approval,
+		LedgerRecordHash:           sha,
+		ReadyJournalRef:            journal,
+		PlanRef:                    &artifact,
+		InventoryRef:               &artifact,
+		BackupSetRef:               &contracts.BackupSetRef{BackupSetID: "backup-install", SHA256: sha},
+		VerificationRef:            nil,
+		Preconditions:              []contracts.Precondition{},
+		DeploymentResults:          []contracts.OperationDeploymentResult{{DeploymentID: "deployment-a", Result: "verification_required", BeforeObservation: &before, AfterObservation: &after, RuntimeBindingSummaries: []contracts.RuntimeBindingSummary{{Runtime: "pi", BindingIdentity: "pi:/runtime/skill", Status: "verification_required", EvidenceRef: &artifact}}, BackupEntryRef: &artifact, CleanupEvidenceRef: &artifact}},
+		RollbackResults:            []contracts.OperationDeploymentResult{},
+		CleanupEvidenceRef:         &artifact,
+		RequiredVerificationStatus: "verification_required",
+		OperationResult:            "verification_required",
 	}
+}
+
+func computeLedgerRecordHashForTest(record contracts.OwnershipRecord) (contracts.SHA256Hex, error) {
+	record.RecordHash = ""
+	data, err := contracts.CanonicalBytes(record)
+	if err != nil {
+		return "", err
+	}
+	var object map[string]any
+	if err := contracts.StrictParseCanonical(data, &object); err != nil {
+		return "", err
+	}
+	delete(object, "record_hash")
+	preimage, err := contracts.CanonicalBytes(object)
+	if err != nil {
+		return "", err
+	}
+	return contracts.SHA256(preimage), nil
 }
 
 func opID(seed string) string {

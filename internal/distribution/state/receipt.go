@@ -43,6 +43,9 @@ func (s *store) PublishReceipt(ctx context.Context, roots Roots, op contracts.Op
 		return contracts.ArtifactRef{}, err
 	}
 	draftPath := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs", string(op), "receipt.json.draft"))
+	if err := s.fs.EnsureDirSync(ctx, contracts.AbsolutePath(filepath.Dir(string(draftPath)))); err != nil {
+		return contracts.ArtifactRef{}, err
+	}
 	if err := s.fs.WriteFileNoReplaceSync(ctx, draftPath, draft); err != nil {
 		return contracts.ArtifactRef{}, err
 	}
@@ -85,6 +88,9 @@ func publishRunArtifact(ctx context.Context, s *store, roots Roots, op contracts
 	abs := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), filepath.FromSlash(rel)))
 	if !isUnderRoot(string(roots.StateRoot), string(abs)) {
 		return contracts.ArtifactRef{}, fmt.Errorf("run artifact escaped state root")
+	}
+	if err := s.fs.EnsureDirSync(ctx, contracts.AbsolutePath(filepath.Dir(string(abs)))); err != nil {
+		return contracts.ArtifactRef{}, err
 	}
 	if err := s.fs.WriteFileNoReplaceSync(ctx, abs, data); err != nil {
 		return contracts.ArtifactRef{}, err

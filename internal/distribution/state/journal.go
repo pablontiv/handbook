@@ -54,6 +54,7 @@ func (j *journal) Append(ctx context.Context, entry contracts.JournalEntry) (con
 	if entry.OperationID != string(j.op) {
 		return contracts.JournalRef{}, fmt.Errorf("journal entry operation_id = %q, want %q", entry.OperationID, j.op)
 	}
+	entry = normalizeJournalEntry(entries, entry, j.command)
 	if err := validateJournalTransition(entries, entry); err != nil {
 		return contracts.JournalRef{}, err
 	}
@@ -62,6 +63,9 @@ func (j *journal) Append(ctx context.Context, entry contracts.JournalEntry) (con
 		return contracts.JournalRef{}, err
 	}
 	appendBytes := append(append([]byte(nil), line...), '\n')
+	if err := j.fs.EnsureDirSync(ctx, contracts.AbsolutePath(filepath.Dir(string(j.absolutePath())))); err != nil {
+		return contracts.JournalRef{}, err
+	}
 	if err := j.fs.AppendFileSync(ctx, j.absolutePath(), appendBytes); err != nil {
 		return contracts.JournalRef{}, err
 	}
@@ -118,10 +122,38 @@ func (j *journal) read(ctx context.Context) ([]contracts.JournalEntry, error) {
 	return entries, nil
 }
 
+func normalizeJournalEntry(entries []contracts.JournalEntry, entry contracts.JournalEntry, command contracts.CommandName) contracts.JournalEntry {
+	if entry.Sequence == 0 {
+		entry.Sequence = int64(len(entries) + 1)
+	}
+	if entry.Command == "" {
+		entry.Command = string(command)
+	}
+	if entry.State == "" {
+		entry.State = entry.Boundary
+	}
+	if isTerminalBoundary(entry.Boundary) {
+		entry.Terminal = true
+	}
+	if entry.Boundary == "committed" && entry.FinalReceiptPath == "" {
+		entry.FinalReceiptPath = entry.FinalArtifactPath
+	}
+	if entry.Boundary == "committed" && entry.FinalArtifactPath == "" {
+		entry.FinalArtifactPath = entry.FinalReceiptPath
+	}
+	return entry
+}
+
 func validateJournalTransition(entries []contracts.JournalEntry, entry contracts.JournalEntry) error {
 	next := entry.Boundary
 	if next == "" {
 		return fmt.Errorf("journal boundary is required")
+	}
+	if err := contracts.ValidateJournalEntry(entry, contracts.OperationID(entry.OperationID)); err != nil {
+		return err
+	}
+	if entry.Sequence != int64(len(entries)+1) {
+		return fmt.Errorf("journal sequence = %d, want %d", entry.Sequence, len(entries)+1)
 	}
 	if len(entries) == 0 {
 		if next != "started" {
@@ -143,9 +175,6 @@ func validateJournalTransition(entries []contracts.JournalEntry, entry contracts
 	case "committed":
 		if last != "ready_to_commit" {
 			return fmt.Errorf("committed must follow ready_to_commit")
-		}
-		if entry.ReceiptSHA256 == "" || entry.FinalArtifactPath == "" {
-			return fmt.Errorf("committed journal entry requires receipt digest and final artifact path")
 		}
 	case "rolled_back", "rollback_failed":
 		if last == "committed" {

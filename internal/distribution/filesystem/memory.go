@@ -13,18 +13,21 @@ import (
 )
 
 type MemoryAdapter struct {
-	mu          sync.Mutex
-	platform    string
-	env         PlatformEnv
-	files       map[string][]byte
-	trees       map[string]TreeSnapshot
-	physical    map[string]PhysicalIdentity
-	physicalErr map[string]error
-	locks       map[string]memoryLockState
-	shared      []string
-	exclusive   []string
-	released    []string
-	writeLog    []string
+	mu             sync.Mutex
+	platform       string
+	env            PlatformEnv
+	files          map[string][]byte
+	trees          map[string]TreeSnapshot
+	physical       map[string]PhysicalIdentity
+	physicalErr    map[string]error
+	locks          map[string]memoryLockState
+	lockCloseErr   map[string]error
+	writeFailures  map[memoryWriteFailureKey]memoryWriteFailure
+	ambiguousFails []string
+	shared         []string
+	exclusive      []string
+	released       []string
+	writeLog       []string
 }
 
 type memoryLockState struct {
@@ -32,15 +35,39 @@ type memoryLockState struct {
 	exclusive int
 }
 
+type ActiveLockState struct {
+	Shared    int
+	Exclusive int
+}
+
+type FailureTiming string
+
+const (
+	FailBeforeWrite FailureTiming = "before"
+	FailAfterWrite  FailureTiming = "after"
+)
+
+type memoryWriteFailureKey struct {
+	operation string
+	path      string
+}
+
+type memoryWriteFailure struct {
+	timing FailureTiming
+	err    error
+}
+
 func NewMemoryAdapter() *MemoryAdapter {
 	return &MemoryAdapter{
-		platform:    "linux",
-		env:         PlatformEnv{Home: "/memory/home", XDGStateHome: "/memory/state", LocalAppData: "C:/memory/local"},
-		files:       map[string][]byte{},
-		trees:       map[string]TreeSnapshot{},
-		physical:    map[string]PhysicalIdentity{},
-		physicalErr: map[string]error{},
-		locks:       map[string]memoryLockState{},
+		platform:      "linux",
+		env:           PlatformEnv{Home: "/memory/home", XDGStateHome: "/memory/state", LocalAppData: "C:/memory/local"},
+		files:         map[string][]byte{},
+		trees:         map[string]TreeSnapshot{},
+		physical:      map[string]PhysicalIdentity{},
+		physicalErr:   map[string]error{},
+		locks:         map[string]memoryLockState{},
+		lockCloseErr:  map[string]error{},
+		writeFailures: map[memoryWriteFailureKey]memoryWriteFailure{},
 	}
 }
 
@@ -82,6 +109,48 @@ func (m *MemoryAdapter) PutFile(path contracts.AbsolutePath, data []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.files[cleanMemoryPath(string(path))] = append([]byte(nil), data...)
+}
+
+func (m *MemoryAdapter) SetLockCloseError(path contracts.AbsolutePath, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clean := cleanMemoryPath(string(path))
+	if err == nil {
+		delete(m.lockCloseErr, clean)
+		return
+	}
+	m.lockCloseErr[clean] = err
+}
+
+func (m *MemoryAdapter) ActiveLocks() map[string]ActiveLockState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string]ActiveLockState{}
+	for path, state := range m.locks {
+		out[path] = ActiveLockState{Shared: state.shared, Exclusive: state.exclusive}
+	}
+	return out
+}
+
+func (m *MemoryAdapter) SetWriteFailure(operation string, path contracts.AbsolutePath, timing FailureTiming, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := memoryWriteFailureKey{operation: operation, path: cleanMemoryPath(string(path))}
+	if err == nil {
+		delete(m.writeFailures, key)
+		return
+	}
+	m.writeFailures[key] = memoryWriteFailure{timing: timing, err: err}
+}
+
+func (m *MemoryAdapter) AmbiguousDurabilityFailures() []contracts.AbsolutePath {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]contracts.AbsolutePath, 0, len(m.ambiguousFails))
+	for _, path := range m.ambiguousFails {
+		out = append(out, contracts.AbsolutePath(path))
+	}
+	return out
 }
 
 func (m *MemoryAdapter) SharedLockKeys() []string {
@@ -259,7 +328,9 @@ func (m *MemoryAdapter) LockShared(_ context.Context, path contracts.AbsolutePat
 			m.locks[clean] = state
 		}
 		m.released = append(m.released, clean)
-		return nil
+		err := m.lockCloseErr[clean]
+		delete(m.lockCloseErr, clean)
+		return err
 	}}, nil
 }
 
@@ -287,16 +358,44 @@ func (m *MemoryAdapter) LockExclusive(_ context.Context, path contracts.Absolute
 			m.locks[clean] = state
 		}
 		m.released = append(m.released, clean)
-		return nil
+		err := m.lockCloseErr[clean]
+		delete(m.lockCloseErr, clean)
+		return err
 	}}, nil
+}
+
+func (m *MemoryAdapter) EnsureDirSync(_ context.Context, path contracts.AbsolutePath) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clean := cleanMemoryPath(string(path))
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "ensure-dir", path: clean}]; ok && failure.timing == FailBeforeWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "ensure-dir", path: clean})
+		return failure.err
+	}
+	m.writeLog = append(m.writeLog, "ensure-dir:"+clean)
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "ensure-dir", path: clean}]; ok && failure.timing == FailAfterWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "ensure-dir", path: clean})
+		m.ambiguousFails = append(m.ambiguousFails, clean)
+		return failure.err
+	}
+	return nil
 }
 
 func (m *MemoryAdapter) AppendFileSync(_ context.Context, path contracts.AbsolutePath, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	clean := cleanMemoryPath(string(path))
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "append", path: clean}]; ok && failure.timing == FailBeforeWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "append", path: clean})
+		return failure.err
+	}
 	m.files[clean] = append(m.files[clean], data...)
 	m.writeLog = append(m.writeLog, "append:"+clean)
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "append", path: clean}]; ok && failure.timing == FailAfterWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "append", path: clean})
+		m.ambiguousFails = append(m.ambiguousFails, clean)
+		return failure.err
+	}
 	return nil
 }
 
@@ -304,11 +403,20 @@ func (m *MemoryAdapter) WriteFileNoReplaceSync(_ context.Context, path contracts
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	clean := cleanMemoryPath(string(path))
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "write-no-replace", path: clean}]; ok && failure.timing == FailBeforeWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "write-no-replace", path: clean})
+		return failure.err
+	}
 	if _, exists := m.files[clean]; exists {
 		return ErrDestinationExists
 	}
 	m.files[clean] = append([]byte(nil), data...)
 	m.writeLog = append(m.writeLog, "write-no-replace:"+clean)
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "write-no-replace", path: clean}]; ok && failure.timing == FailAfterWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "write-no-replace", path: clean})
+		m.ambiguousFails = append(m.ambiguousFails, clean)
+		return failure.err
+	}
 	return nil
 }
 
@@ -325,7 +433,17 @@ func (m *MemoryAdapter) ReadFile(_ context.Context, path contracts.AbsolutePath)
 func (m *MemoryAdapter) SyncDirectory(_ context.Context, path contracts.AbsolutePath) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.writeLog = append(m.writeLog, "sync-dir:"+cleanMemoryPath(string(path)))
+	clean := cleanMemoryPath(string(path))
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "sync-dir", path: clean}]; ok && failure.timing == FailBeforeWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "sync-dir", path: clean})
+		return failure.err
+	}
+	m.writeLog = append(m.writeLog, "sync-dir:"+clean)
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "sync-dir", path: clean}]; ok && failure.timing == FailAfterWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "sync-dir", path: clean})
+		m.ambiguousFails = append(m.ambiguousFails, clean)
+		return failure.err
+	}
 	return nil
 }
 
@@ -333,6 +451,10 @@ func (m *MemoryAdapter) PublishNoReplace(_ context.Context, destination contract
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	clean := cleanMemoryPath(string(destination))
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "publish", path: clean}]; ok && failure.timing == FailBeforeWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "publish", path: clean})
+		return failure.err
+	}
 	if err := validatePublishDestination(clean, forbiddenRoots); err != nil {
 		return err
 	}
@@ -340,6 +462,12 @@ func (m *MemoryAdapter) PublishNoReplace(_ context.Context, destination contract
 		return ErrDestinationExists
 	}
 	m.files[clean] = append([]byte(nil), canonical...)
+	m.writeLog = append(m.writeLog, "publish:"+clean)
+	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "publish", path: clean}]; ok && failure.timing == FailAfterWrite {
+		delete(m.writeFailures, memoryWriteFailureKey{operation: "publish", path: clean})
+		m.ambiguousFails = append(m.ambiguousFails, clean)
+		return failure.err
+	}
 	return nil
 }
 
