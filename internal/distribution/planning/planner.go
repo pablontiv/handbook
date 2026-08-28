@@ -4,18 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
+	"path/filepath"
 	"sort"
 	"strconv"
 
 	"waywarden/internal/distribution/contracts"
 	"waywarden/internal/distribution/filesystem"
+	"waywarden/internal/distribution/runtimes"
 )
 
 type InventoryArtifact struct {
-	Inventory contracts.Inventory
-	original  contracts.Inventory
+	inventory contracts.Inventory
 	raw       []byte
+}
+
+func (a InventoryArtifact) Inventory() contracts.Inventory {
+	return cloneInventory(a.inventory)
 }
 
 type Options struct {
@@ -25,6 +29,7 @@ type Options struct {
 	ArtifactLabel string
 	ArtifactSink  func([]byte) error
 	Destination   contracts.AbsolutePath
+	StateRoot     contracts.AbsolutePath
 }
 
 type Result struct {
@@ -64,15 +69,18 @@ func DecodeInventoryArtifact(raw []byte) (InventoryArtifact, error) {
 	if err := contracts.ValidateSchema(contracts.SchemaInventory, raw); err != nil {
 		return InventoryArtifact{}, Error{Code: "invalid_inventory", Message: err.Error(), Exit: contracts.ExitInvalidInput}
 	}
-	return InventoryArtifact{Inventory: inventory, original: cloneInventory(inventory), raw: append([]byte(nil), raw...)}, nil
+	return InventoryArtifact{inventory: cloneInventory(inventory), raw: append([]byte(nil), raw...)}, nil
 }
 
 func BuildPlan(_ context.Context, artifact InventoryArtifact, opts Options) (Result, error) {
+	if len(artifact.raw) == 0 {
+		return Result{}, Error{Code: "invalid_inventory", Message: "inventory artifact was not decoded from canonical bytes", Exit: contracts.ExitInvalidInput}
+	}
 	if err := contracts.ValidateIntentSelector(opts.Intent, opts.Selector); err != nil {
 		return Result{}, Error{Code: "invalid_selector", Message: err.Error(), Exit: contracts.ExitInvalidInput}
 	}
 
-	inventory := cloneInventory(artifact.Inventory)
+	inventory := cloneInventory(artifact.inventory)
 	deployments := cloneDeployments(inventory.Deployments)
 	sortDeployments(deployments)
 	blockers := append([]contracts.Blocker(nil), inventory.Blockers...)
@@ -153,7 +161,11 @@ func (s service) Plan(ctx context.Context, opts Options) (contracts.ArtifactResu
 		return contracts.ArtifactResult{}, err
 	}
 	if opts.Destination != "" {
-		if err := s.adapter.PublishNoReplace(ctx, opts.Destination, canonical, filesystem.ForbiddenRoots{}); err != nil {
+		forbidden, err := publicationForbiddenRoots(ctx, s.adapter, artifact, opts.StateRoot)
+		if err != nil {
+			return contracts.ArtifactResult{}, err
+		}
+		if err := s.adapter.PublishNoReplace(ctx, opts.Destination, canonical, forbidden); err != nil {
 			return contracts.ArtifactResult{}, publishError(err)
 		}
 	}
@@ -170,15 +182,101 @@ func (s service) Plan(ctx context.Context, opts Options) (contracts.ArtifactResu
 	return result, planErr
 }
 
-func inventoryDigest(artifact InventoryArtifact, inventory contracts.Inventory) contracts.SHA256Hex {
-	if len(artifact.raw) > 0 && reflect.DeepEqual(artifact.original, inventory) {
-		return contracts.SHA256(artifact.raw)
-	}
-	canonical, err := contracts.CanonicalBytes(inventory)
+func publicationForbiddenRoots(ctx context.Context, adapter filesystem.Adapter, artifact InventoryArtifact, overrideStateRoot contracts.AbsolutePath) (filesystem.ForbiddenRoots, error) {
+	env, err := adapter.Environment(ctx)
 	if err != nil {
-		return ""
+		return filesystem.ForbiddenRoots{}, Error{Code: "runtime_contract_missing", Message: "cannot read platform environment for artifact publication", Exit: contracts.ExitUnsupported}
 	}
-	return contracts.SHA256(canonical)
+	stateRoot, err := selectedPublicationStateRoot(adapter.Platform(), env, overrideStateRoot)
+	if err != nil {
+		return filesystem.ForbiddenRoots{}, err
+	}
+	lockRoot, err := adapter.OwnerPrivateLockRoot(env)
+	if err != nil {
+		return filesystem.ForbiddenRoots{}, Error{Code: "runtime_contract_missing", Message: "cannot select publication lock root", Exit: contracts.ExitUnsupported}
+	}
+	cleanLockRoot, err := requiredAbsoluteRoot(string(lockRoot), "coordination lock")
+	if err != nil {
+		return filesystem.ForbiddenRoots{}, err
+	}
+	sourceRoots, err := repositorySourceRoots(artifact.inventory)
+	if err != nil {
+		return filesystem.ForbiddenRoots{}, err
+	}
+	runtimeRoots, err := inventoryRuntimeRoots(artifact.inventory)
+	if err != nil {
+		return filesystem.ForbiddenRoots{}, err
+	}
+	return filesystem.ForbiddenRoots{RepositorySourceRoots: sourceRoots, RuntimeRoots: runtimeRoots, StateRoot: stateRoot, LockRoot: cleanLockRoot}, nil
+}
+
+func selectedPublicationStateRoot(platform string, env filesystem.PlatformEnv, override contracts.AbsolutePath) (contracts.AbsolutePath, error) {
+	if override != "" {
+		clean := filepath.Clean(string(override))
+		if !filepath.IsAbs(clean) {
+			return "", Error{Code: "invalid_input", Message: "state root must be absolute", Exit: contracts.ExitInvalidInput}
+		}
+		return contracts.AbsolutePath(clean), nil
+	}
+	stateRoot, err := runtimes.DefaultStateRoot(platform, env)
+	if err != nil {
+		return "", Error{Code: "runtime_contract_missing", Message: "cannot select publication state root", Exit: contracts.ExitUnsupported}
+	}
+	return requiredAbsoluteRoot(string(stateRoot), "state")
+}
+
+func repositorySourceRoots(inventory contracts.Inventory) ([]contracts.AbsolutePath, error) {
+	if len(inventory.Sources) == 0 {
+		return nil, Error{Code: "runtime_contract_missing", Message: "repository source root proof is missing from inventory", Exit: contracts.ExitUnsupported}
+	}
+	roots := make([]contracts.AbsolutePath, 0, len(inventory.Sources))
+	seen := map[string]struct{}{}
+	for _, source := range inventory.Sources {
+		root, err := requiredAbsoluteRoot(source.SourceIdentity, "repository source")
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[string(root)]; ok {
+			continue
+		}
+		seen[string(root)] = struct{}{}
+		roots = append(roots, root)
+	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i] < roots[j] })
+	return roots, nil
+}
+
+func inventoryRuntimeRoots(inventory contracts.Inventory) ([]contracts.AbsolutePath, error) {
+	roots := make([]contracts.AbsolutePath, 0, len(inventory.RuntimeBindings))
+	seen := map[string]struct{}{}
+	for _, binding := range inventory.RuntimeBindings {
+		root, err := requiredAbsoluteRoot(binding.Root, "runtime")
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[string(root)]; ok {
+			continue
+		}
+		seen[string(root)] = struct{}{}
+		roots = append(roots, root)
+	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i] < roots[j] })
+	return roots, nil
+}
+
+func requiredAbsoluteRoot(path string, label string) (contracts.AbsolutePath, error) {
+	if path == "" {
+		return "", Error{Code: "runtime_contract_missing", Message: label + " root proof is missing", Exit: contracts.ExitUnsupported}
+	}
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return "", Error{Code: "runtime_contract_missing", Message: label + " root proof is not absolute", Exit: contracts.ExitUnsupported}
+	}
+	return contracts.AbsolutePath(clean), nil
+}
+
+func inventoryDigest(artifact InventoryArtifact, _ contracts.Inventory) contracts.SHA256Hex {
+	return contracts.SHA256(artifact.raw)
 }
 
 func hasObservedInstallation(inventory contracts.Inventory, installationID string) bool {
@@ -201,7 +299,7 @@ func hasObservedVerifiedBackup(inventory contracts.Inventory, backupSetID string
 
 func firstCapabilityBlocker(blockers []contracts.Blocker) error {
 	for _, blocker := range blockers {
-		if blocker.Code == "runtime_contract_missing" || blocker.Severity == "error" {
+		if blocker.Code == "runtime_contract_missing" {
 			return Error{Code: "runtime_contract_missing", Message: blocker.Message, Exit: contracts.ExitUnsupported}
 		}
 	}

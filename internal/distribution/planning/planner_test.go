@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"waywarden/internal/distribution/contracts"
+	"waywarden/internal/distribution/filesystem"
 	"waywarden/internal/distribution/planning"
 )
 
@@ -125,11 +128,138 @@ func TestBuildPlanRestoreRequiresObservedVerifiedBackupAndClassifiesBlockers(t *
 		t.Fatalf("missing backup error = %v, want exit 4", err)
 	}
 
-	withCapability := restore
-	withCapability.Inventory.Blockers = append(withCapability.Inventory.Blockers, contracts.Blocker{Code: "runtime_contract_missing", Severity: "error", Message: "capability unavailable"})
+	nonCapabilityErrorSeverity := decodeModifiedFixture(t, "restore_inventory.json", func(inventory *contracts.Inventory) {
+		inventory.Blockers = append(inventory.Blockers, contracts.Blocker{Code: "operator_review_required", Severity: "error", Message: "safe blocker requiring operator review"})
+	})
+	_, err = planning.BuildPlan(context.Background(), nonCapabilityErrorSeverity, planning.Options{Intent: contracts.IntentRestore, Selector: &contracts.Selector{Kind: contracts.SelectorBackupSet, BackupSetID: "missing"}})
+	if !isPlanningExit(err, contracts.ExitPreconditionFailed) {
+		t.Fatalf("non-capability error-severity blocker error = %v, want safe precondition exit 4", err)
+	}
+
+	withCapability := decodeModifiedFixture(t, "restore_inventory.json", func(inventory *contracts.Inventory) {
+		inventory.Blockers = append(inventory.Blockers, contracts.Blocker{Code: "runtime_contract_missing", Severity: "warning", Message: "capability unavailable"})
+	})
 	_, err = planning.BuildPlan(context.Background(), withCapability, planning.Options{Intent: contracts.IntentRestore, Selector: &contracts.Selector{Kind: contracts.SelectorBackupSet, BackupSetID: "missing"}})
 	if !isPlanningExit(err, contracts.ExitUnsupported) {
 		t.Fatalf("capability+safe blocker error = %v, want capability exit 3", err)
+	}
+}
+
+func TestInventoryArtifactIsOpaqueAndPlanDigestUsesExactAcceptedBytes(t *testing.T) {
+	if _, ok := reflect.TypeOf(planning.InventoryArtifact{}).FieldByName("Inventory"); ok {
+		t.Fatalf("InventoryArtifact exposes mutable Inventory field; want opaque decoded artifact")
+	}
+
+	raw := canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) {
+		inventory.Blockers = append(inventory.Blockers, contracts.Blocker{Code: "operator_review_required", Severity: "warning", Message: "digest evidence"})
+	})
+	artifact, err := planning.DecodeInventoryArtifact(raw)
+	if err != nil {
+		t.Fatalf("DecodeInventoryArtifact() error = %v", err)
+	}
+	result, err := planning.BuildPlan(context.Background(), artifact, planning.Options{Intent: contracts.IntentInstall})
+	if err != nil {
+		t.Fatalf("BuildPlan() error = %v", err)
+	}
+	if result.Envelope.Payload.InventoryDigest != contracts.SHA256(raw) {
+		t.Fatalf("inventory_digest = %s, want exact accepted raw digest %s", result.Envelope.Payload.InventoryDigest, contracts.SHA256(raw))
+	}
+}
+
+func TestPlanFileOutputDerivesForbiddenRootsFromInventoryStateAndLocks(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	xdgState := filepath.Join(tmp, "xdg-state")
+	stateRoot := filepath.Join(tmp, "state-root")
+	lockRoot := filepath.Join(xdgState, "waywarden", "locks")
+	sourceA := filepath.Join(tmp, "source-a")
+	sourceB := filepath.Join(tmp, "source-b")
+	runtimeRoot := filepath.Join(tmp, "runtime-root")
+	raw := inventoryWithPublicationRoots(t, sourceA, sourceB, runtimeRoot)
+
+	cases := []struct {
+		name        string
+		destination string
+		wantExit    int
+	}{
+		{name: "allowed artifact root", destination: filepath.Join(tmp, "artifacts", "plan.json"), wantExit: 0},
+		{name: "first source identity", destination: filepath.Join(sourceA, "plan.json"), wantExit: contracts.ExitPreconditionFailed},
+		{name: "second source identity", destination: filepath.Join(sourceB, "nested", "plan.json"), wantExit: contracts.ExitPreconditionFailed},
+		{name: "runtime binding root", destination: filepath.Join(runtimeRoot, "plan.json"), wantExit: contracts.ExitPreconditionFailed},
+		{name: "selected state root", destination: filepath.Join(stateRoot, "plan.json"), wantExit: contracts.ExitPreconditionFailed},
+		{name: "coordination lock root", destination: filepath.Join(lockRoot, "plan.json"), wantExit: contracts.ExitPreconditionFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter := filesystem.NewMemoryAdapter()
+			adapter.SetEnvironment(filesystem.PlatformEnv{Home: home, XDGStateHome: xdgState, LocalAppData: filepath.Join(tmp, "local-app-data")})
+			inventoryPath := contracts.AbsolutePath(filepath.Join(tmp, "inventory.json"))
+			adapter.PutFile(inventoryPath, raw)
+
+			_, err := planning.NewService(adapter).Plan(context.Background(), planning.Options{Intent: contracts.IntentInstall, InventoryPath: inventoryPath, Destination: contracts.AbsolutePath(tc.destination), StateRoot: contracts.AbsolutePath(stateRoot)})
+			if tc.wantExit == 0 {
+				if err != nil {
+					t.Fatalf("Plan() error = %v, want success", err)
+				}
+				return
+			}
+			if !isPlanningExit(err, tc.wantExit) {
+				t.Fatalf("Plan() error = %v, want exit %d", err, tc.wantExit)
+			}
+		})
+	}
+}
+
+func TestPlanFileOutputFailsClosedWhenPublicationRootProofIsMissing(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	xdgState := filepath.Join(tmp, "xdg-state")
+	stateRoot := filepath.Join(tmp, "state-root")
+	validSource := filepath.Join(tmp, "source")
+	validRuntime := filepath.Join(tmp, "runtime")
+
+	cases := []struct {
+		name      string
+		raw       []byte
+		stateRoot contracts.AbsolutePath
+		env       filesystem.PlatformEnv
+	}{
+		{name: "missing source identity", raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) { inventory.Sources[0].SourceIdentity = "" }), stateRoot: contracts.AbsolutePath(stateRoot), env: filesystem.PlatformEnv{Home: home, XDGStateHome: xdgState}},
+		{name: "relative runtime root", raw: canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) { inventory.RuntimeBindings[0].Root = "relative/runtime" }), stateRoot: contracts.AbsolutePath(stateRoot), env: filesystem.PlatformEnv{Home: home, XDGStateHome: xdgState}},
+		{name: "missing default state root environment", raw: inventoryWithPublicationRoots(t, validSource, validSource, validRuntime), env: filesystem.PlatformEnv{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter := filesystem.NewMemoryAdapter()
+			adapter.SetEnvironment(tc.env)
+			inventoryPath := contracts.AbsolutePath(filepath.Join(tmp, tc.name, "inventory.json"))
+			adapter.PutFile(inventoryPath, tc.raw)
+
+			_, err := planning.NewService(adapter).Plan(context.Background(), planning.Options{Intent: contracts.IntentInstall, InventoryPath: inventoryPath, Destination: contracts.AbsolutePath(filepath.Join(tmp, tc.name, "out", "plan.json")), StateRoot: tc.stateRoot})
+			if !isPlanningExit(err, contracts.ExitUnsupported) {
+				t.Fatalf("Plan() error = %v, want fail-closed exit 3", err)
+			}
+		})
+	}
+}
+
+func TestPlanStdoutDoesNotReadEnvironmentForPublicationRoots(t *testing.T) {
+	tmp := t.TempDir()
+	raw := inventoryWithPublicationRoots(t, filepath.Join(tmp, "source-a"), filepath.Join(tmp, "source-b"), filepath.Join(tmp, "runtime"))
+	adapter := noEnvironmentAdapter{MemoryAdapter: filesystem.NewMemoryAdapter()}
+	inventoryPath := contracts.AbsolutePath(filepath.Join(tmp, "inventory.json"))
+	adapter.PutFile(inventoryPath, raw)
+	var artifact []byte
+
+	_, err := planning.NewService(adapter).Plan(context.Background(), planning.Options{Intent: contracts.IntentInstall, InventoryPath: inventoryPath, ArtifactSink: func(data []byte) error {
+		artifact = append([]byte(nil), data...)
+		return nil
+	}})
+	if err != nil {
+		t.Fatalf("Plan() error = %v, want stdout publication without environment reads", err)
+	}
+	if _, err := contracts.ParseCanonicalPlanEnvelope(artifact); err != nil {
+		t.Fatalf("artifact sink did not receive canonical plan: %v", err)
 	}
 }
 
@@ -159,9 +289,71 @@ func decodeFixture(t *testing.T, name string) planning.InventoryArtifact {
 	return artifact
 }
 
+func decodeModifiedFixture(t *testing.T, name string, mutate func(*contracts.Inventory)) planning.InventoryArtifact {
+	t.Helper()
+	artifact, err := planning.DecodeInventoryArtifact(canonicalModifiedInventory(t, name, mutate))
+	if err != nil {
+		t.Fatalf("DecodeInventoryArtifact(%s modified) error = %v", name, err)
+	}
+	return artifact
+}
+
+func canonicalModifiedInventory(t *testing.T, name string, mutate func(*contracts.Inventory)) []byte {
+	t.Helper()
+	inventory, err := contracts.ParseCanonicalInventory(readPlannerFixture(t, name))
+	if err != nil {
+		t.Fatalf("ParseCanonicalInventory(%s) error = %v", name, err)
+	}
+	mutate(&inventory)
+	canonical, err := contracts.CanonicalBytes(inventory)
+	if err != nil {
+		t.Fatalf("CanonicalBytes(%s modified) error = %v", name, err)
+	}
+	if err := contracts.ValidateSchema(contracts.SchemaInventory, canonical); err != nil {
+		t.Fatalf("ValidateSchema(%s modified) error = %v", name, err)
+	}
+	return canonical
+}
+
+func inventoryWithPublicationRoots(t *testing.T, sourceA, sourceB, runtimeRoot string) []byte {
+	t.Helper()
+	return canonicalModifiedInventory(t, "install_inventory.json", func(inventory *contracts.Inventory) {
+		sourceBySkill := map[string]string{}
+		for i := range inventory.Sources {
+			sourceIdentity := filepath.Clean(sourceA)
+			if i == 1 {
+				sourceIdentity = filepath.Clean(sourceB)
+			} else if i > 1 {
+				sourceIdentity = filepath.Join(sourceA, fmt.Sprintf("source-%d", i))
+			}
+			inventory.Sources[i].SourceIdentity = sourceIdentity
+			sourceBySkill[inventory.Sources[i].SkillID] = sourceIdentity
+		}
+		for i := range inventory.Deployments {
+			if sourceIdentity, ok := sourceBySkill[inventory.Deployments[i].SkillID]; ok {
+				inventory.Deployments[i].SourceIdentity = sourceIdentity
+			}
+			for j := range inventory.Deployments[i].RuntimeBindings {
+				inventory.Deployments[i].RuntimeBindings[j].Root = filepath.Clean(runtimeRoot)
+			}
+		}
+		for i := range inventory.RuntimeBindings {
+			inventory.RuntimeBindings[i].Root = filepath.Clean(runtimeRoot)
+		}
+	})
+}
+
 func readPlannerFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	return mustReadFile(t, "testdata/"+name)
+}
+
+type noEnvironmentAdapter struct {
+	*filesystem.MemoryAdapter
+}
+
+func (a noEnvironmentAdapter) Environment(context.Context) (filesystem.PlatformEnv, error) {
+	return filesystem.PlatformEnv{}, errors.New("environment should not be read for stdout artifact output")
 }
 
 func countPlanRuntimeBindings(deployments []contracts.Deployment) int {

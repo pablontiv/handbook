@@ -25,6 +25,7 @@ func newPlanCommand(stdout io.Writer, stderr io.Writer, outputFormat *string) *c
 	var backupSetID string
 	var receiptID string
 	var out string
+	var stateRoot string
 	cmd := &cobra.Command{
 		Use:   "plan",
 		Short: "Build a deterministic Waywarden distribution plan from an inventory artifact",
@@ -44,9 +45,16 @@ func newPlanCommand(stdout io.Writer, stderr io.Writer, outputFormat *string) *c
 				writeHumanPlanSummary(stderr, "plan failed")
 				return exitError{code: contracts.ExitInvalidInput}
 			}
+			if stateRoot != "" && !filepath.IsAbs(stateRoot) {
+				writeHumanPlanSummary(stderr, "plan failed")
+				return exitError{code: contracts.ExitInvalidInput}
+			}
 
 			selector := selectorFromFlags(installationID, backupSetID, receiptID)
 			options := planning.Options{Intent: contracts.PlanIntent(intent), Selector: selector, InventoryPath: contracts.AbsolutePath(inventoryPath), ArtifactLabel: artifactLabel(out)}
+			if stateRoot != "" {
+				options.StateRoot = contracts.AbsolutePath(stateRoot)
+			}
 			if out == "-" {
 				options.ArtifactSink = func(data []byte) error {
 					_, err := stdout.Write(data)
@@ -85,6 +93,7 @@ func newPlanCommand(stdout io.Writer, stderr io.Writer, outputFormat *string) *c
 	cmd.Flags().StringVar(&backupSetID, "backup", "", "backup set selector")
 	cmd.Flags().StringVar(&receiptID, "receipt", "", "receipt selector")
 	cmd.Flags().StringVar(&out, "out", "-", "artifact output path or - for stdout")
+	cmd.Flags().StringVar(&stateRoot, "state-root", "", "absolute Waywarden state root")
 	return cmd
 }
 

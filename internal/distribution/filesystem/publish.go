@@ -20,10 +20,11 @@ var (
 )
 
 type ForbiddenRoots struct {
-	RepositorySourceRoot contracts.AbsolutePath
-	RuntimeRoots         []contracts.AbsolutePath
-	StateRoot            contracts.AbsolutePath
-	LockRoot             contracts.AbsolutePath
+	RepositorySourceRoot  contracts.AbsolutePath
+	RepositorySourceRoots []contracts.AbsolutePath
+	RuntimeRoots          []contracts.AbsolutePath
+	StateRoot             contracts.AbsolutePath
+	LockRoot              contracts.AbsolutePath
 }
 
 type ArtifactPublisher struct {
@@ -113,7 +114,11 @@ func validatePublishDestination(dest string, forbiddenRoots ForbiddenRoots) erro
 }
 
 func collectForbiddenRoots(forbiddenRoots ForbiddenRoots) []string {
-	roots := []string{string(forbiddenRoots.RepositorySourceRoot), string(forbiddenRoots.StateRoot), string(forbiddenRoots.LockRoot)}
+	roots := []string{string(forbiddenRoots.RepositorySourceRoot)}
+	for _, root := range forbiddenRoots.RepositorySourceRoots {
+		roots = append(roots, string(root))
+	}
+	roots = append(roots, string(forbiddenRoots.StateRoot), string(forbiddenRoots.LockRoot))
 	for _, root := range forbiddenRoots.RuntimeRoots {
 		roots = append(roots, string(root))
 	}

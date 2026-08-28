@@ -74,6 +74,19 @@ func TestPlanRejectsJSONOutputWhenArtifactUsesStdout(t *testing.T) {
 	}
 }
 
+func TestPlanStateRootForbidsFileDestinationUnderExplicitStateRoot(t *testing.T) {
+	inventoryPath := writePlanCommandInventory(t, "install_inventory.json")
+	stateRoot := realTempDir(t)
+	outPath := filepath.Join(stateRoot, "plan.json")
+	var stdout, stderr bytes.Buffer
+
+	exitCode := Execute([]string{"plan", "--inventory", inventoryPath, "--intent", "install", "--state-root", stateRoot, "--out", outPath}, &stdout, &stderr)
+
+	if exitCode != contracts.ExitPreconditionFailed {
+		t.Fatalf("exit code = %d, want 4; stderr=%s stdout=%s", exitCode, stderr.String(), stdout.String())
+	}
+}
+
 func TestPlanSelectorMismatchExitsTwoAndMissingRestoreBackupExitsFour(t *testing.T) {
 	inventoryPath := writePlanCommandInventory(t, "restore_inventory.json")
 	var stdout, stderr bytes.Buffer
