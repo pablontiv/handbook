@@ -214,7 +214,7 @@ func TestLedgerAppendCanonicalHashChainRejectsPartialAndMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append(first) error = %v", err)
 	}
-	secondHash, err := ledger.Append(ctx, ownershipRecord("install-1", opID("op-2"), "installed_verified"))
+	secondHash, err := ledger.Append(ctx, ownershipRecord("install-1", opID("op-2"), "restored_unverified"))
 	if err != nil {
 		t.Fatalf("Append(second) error = %v", err)
 	}

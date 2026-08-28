@@ -47,6 +47,9 @@ func (l *ledger) Append(ctx context.Context, record contracts.OwnershipRecord) (
 		record.PreviousHash = &prev
 	}
 	record.RecordHash = ""
+	if err := contracts.ValidateOwnershipRecord(record); err != nil {
+		return "", err
+	}
 	hash, err := ComputeLedgerRecordHash(record)
 	if err != nil {
 		return "", err
@@ -55,9 +58,6 @@ func (l *ledger) Append(ctx context.Context, record contracts.OwnershipRecord) (
 	line, err := contracts.CanonicalBytes(record)
 	if err != nil {
 		return "", err
-	}
-	if bytes.Contains(line, []byte("receipt_ref")) {
-		return "", fmt.Errorf("ownership ledger records must not contain receipt_ref")
 	}
 	appendBytes := append(append([]byte(nil), line...), '\n')
 	if err := l.fs.AppendFileSync(ctx, l.roots.LedgerPath(), appendBytes); err != nil {
@@ -92,15 +92,15 @@ func readLedger(ctx context.Context, adapter filesystem.Adapter, roots Roots) ([
 		if len(line) == 0 {
 			return nil, fmt.Errorf("ownership ledger contains an empty record")
 		}
-		if bytes.Contains(line, []byte("receipt_ref")) {
-			return nil, fmt.Errorf("ownership ledger record contains forbidden receipt_ref")
-		}
 		var raw map[string]any
 		if err := contracts.StrictParseCanonical(line, &raw); err != nil {
 			return nil, err
 		}
 		if raw["schema"] != string(contracts.SchemaOwnership) {
 			return nil, fmt.Errorf("ownership record schema = %v", raw["schema"])
+		}
+		if err := contracts.ValidateSchema(contracts.SchemaOwnership, line); err != nil {
+			return nil, err
 		}
 		var record contracts.OwnershipRecord
 		if err := contracts.StrictParseCanonical(line, &record); err != nil {
