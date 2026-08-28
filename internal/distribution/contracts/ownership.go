@@ -55,7 +55,6 @@ type JournalEntry struct {
 	RollbackAuthorityRefs []ArtifactRef `json:"rollback_authority_refs,omitempty"`
 	ReceiptSHA256         SHA256Hex     `json:"receipt_sha256,omitempty"`
 	FinalReceiptPath      string        `json:"final_receipt_path,omitempty"`
-	FinalArtifactPath     string        `json:"final_artifact_path,omitempty"`
 	SyncBoundary          string        `json:"sync_boundary,omitempty"`
 	Terminal              bool          `json:"terminal,omitempty"`
 }
@@ -126,6 +125,9 @@ func ValidateOwnershipRecord(record OwnershipRecord) error {
 		}
 	}
 	if err := validateDeploymentCardinality(record.DeploymentIDs, record.Deployments); err != nil {
+		return err
+	}
+	if err := validateOwnershipRuntimeBindingAuthority(record.Deployments); err != nil {
 		return err
 	}
 	if record.AggregateEvent == "" || record.OperationResult == "" {
@@ -213,6 +215,9 @@ func validateOwnershipDeployment(record OwnershipRecord, deployment OwnershipDep
 	if deployment.DeploymentID == "" || deployment.Result == "" {
 		return fmt.Errorf("deployment record requires deployment_id and result")
 	}
+	if !allowedDeploymentResult(record.OperationResult, deployment.Result) {
+		return fmt.Errorf("deployment result %q is not allowed for operation_result %q", deployment.Result, record.OperationResult)
+	}
 	if err := validateObservation(deployment.BeforeObservation, false); err != nil {
 		return fmt.Errorf("before_observation: %w", err)
 	}
@@ -234,6 +239,9 @@ func validateOwnershipDeployment(record OwnershipRecord, deployment OwnershipDep
 	for _, binding := range deployment.RuntimeBindingSummaries {
 		if binding.Runtime == "" || binding.BindingIdentity == "" || binding.Status == "" {
 			return fmt.Errorf("runtime binding summary requires runtime, binding_identity, and status")
+		}
+		if !allowedRuntimeBindingStatus(record.OperationResult, binding.Status) {
+			return fmt.Errorf("runtime binding status %q is not allowed for operation_result %q", binding.Status, record.OperationResult)
 		}
 		key := binding.Runtime + "\x00" + binding.BindingIdentity
 		if seenBindings[key] {
@@ -288,6 +296,9 @@ func validateObservation(observation DeploymentObservation, allowZero bool) erro
 	if observation.ObservedType == "" || observation.Path == "" || observation.GovernedSlotIdentity == "" || observation.ManagedObjectIdentity == "" {
 		return fmt.Errorf("observation requires observed_type, path, governed_slot_identity, and managed_object_identity")
 	}
+	if !allowedObservationType(observation.ObservedType) {
+		return fmt.Errorf("unknown observation type %q", observation.ObservedType)
+	}
 	if observation.SourceContentDigest != "" && !sha256Pattern.MatchString(observation.SourceContentDigest) {
 		return fmt.Errorf("source_content_digest must be lower-case hex SHA-256 when present")
 	}
@@ -295,11 +306,11 @@ func validateObservation(observation DeploymentObservation, allowZero bool) erro
 }
 
 func validateDeploymentCardinality(ids []string, deployments []OwnershipDeploymentRecord) error {
-	if len(ids) == 0 {
-		return fmt.Errorf("ownership record requires deployment_ids")
+	if err := validateExactDeploymentIDArray(ids); err != nil {
+		return err
 	}
-	if len(deployments) == 0 {
-		return fmt.Errorf("ownership record requires deployment records")
+	if len(deployments) != v1DeploymentCount {
+		return fmt.Errorf("ownership deployment record count = %d, want %d", len(deployments), v1DeploymentCount)
 	}
 	seenIDs := map[string]bool{}
 	for _, id := range ids {
@@ -328,6 +339,83 @@ func validateDeploymentCardinality(ids []string, deployments []OwnershipDeployme
 		return fmt.Errorf("incomplete aggregate deployment cardinality")
 	}
 	return nil
+}
+
+func validateOwnershipRuntimeBindingAuthority(deployments []OwnershipDeploymentRecord) error {
+	expected := expectedV1BindingSummariesByDeployment()
+	count := 0
+	seenDeployments := map[string]bool{}
+	for _, deployment := range deployments {
+		seenDeployments[deployment.DeploymentID] = true
+		want := expected[deployment.DeploymentID]
+		if len(deployment.RuntimeBindingSummaries) != len(want) {
+			return fmt.Errorf("runtime binding count for deployment %s = %d, want %d", deployment.DeploymentID, len(deployment.RuntimeBindingSummaries), len(want))
+		}
+		for i, binding := range deployment.RuntimeBindingSummaries {
+			wantBinding := want[i]
+			wantIdentity := wantBinding.Runtime + ":" + wantBinding.Name
+			if binding.Runtime != wantBinding.Runtime || binding.BindingIdentity != wantIdentity {
+				return fmt.Errorf("runtime binding summary %s[%d] = %s/%s, want %s/%s", deployment.DeploymentID, i, binding.Runtime, binding.BindingIdentity, wantBinding.Runtime, wantIdentity)
+			}
+			count++
+		}
+	}
+	for _, id := range v1AggregateDeploymentIDs {
+		if !seenDeployments[id] {
+			return fmt.Errorf("missing deployment %s", id)
+		}
+	}
+	if count != v1RuntimeBindingCount {
+		return fmt.Errorf("aggregate runtime binding count = %d, want %d", count, v1RuntimeBindingCount)
+	}
+	return nil
+}
+
+func allowedDeploymentResult(operationResult, result string) bool {
+	switch operationResult {
+	case "verification_required":
+		return result == "verification_required" || result == "cleanup_completed"
+	case "verified":
+		return result == "verified"
+	case "rolled_back":
+		return result == "rolled_back"
+	case RecoveryRequired:
+		return result == RecoveryRequired || result == "rollback_failed"
+	case "failed":
+		return result == "failed"
+	case "operator_required":
+		return result == "operator_required"
+	default:
+		return false
+	}
+}
+
+func allowedRuntimeBindingStatus(operationResult, status string) bool {
+	switch operationResult {
+	case "verification_required":
+		return status == "verification_required"
+	case "verified":
+		return status == "verified"
+	case "rolled_back":
+		return status == "rolled_back" || status == "verification_required"
+	case RecoveryRequired:
+		return status == RecoveryRequired || status == "failed" || status == "operator_required"
+	case "failed":
+		return status == "failed"
+	case "operator_required":
+		return status == "operator_required"
+	default:
+		return false
+	}
+}
+
+func allowedObservationType(kind string) bool {
+	switch kind {
+	case "typed_missing", "regular_file", "file", "ordinary_symlink", "symlink", "empty_directory", "nonempty_directory", "directory":
+		return true
+	default:
+		return false
+	}
 }
 
 func ValidateJournalRef(ref JournalRef, operationID OperationID) error {
@@ -362,8 +450,11 @@ func ValidateJournalEntry(entry JournalEntry, operationID OperationID) error {
 	if entry.Sequence < 1 {
 		return fmt.Errorf("journal entry requires positive sequence")
 	}
-	if entry.State != "" && entry.State != entry.Boundary {
+	if entry.State != "" && entry.Boundary != "step" && entry.State != entry.Boundary {
 		return fmt.Errorf("journal state must match boundary")
+	}
+	if entry.Boundary == "step" && entry.State == "" {
+		return fmt.Errorf("step journal entry requires step state")
 	}
 	if entry.BackupSetRef != nil {
 		if err := validateBackupSetRef(entry.BackupSetRef); err != nil {
@@ -381,9 +472,12 @@ func ValidateJournalEntry(entry JournalEntry, operationID OperationID) error {
 		}
 	}
 	switch entry.Boundary {
-	case "started", "ready_to_commit":
-		if entry.Terminal || entry.ReceiptSHA256 != "" || entry.FinalReceiptPath != "" || entry.FinalArtifactPath != "" {
+	case "started", "step", "ready_to_commit":
+		if entry.Terminal || entry.ReceiptSHA256 != "" || entry.FinalReceiptPath != "" {
 			return fmt.Errorf("nonterminal journal entry must not carry terminal receipt fields")
+		}
+		if entry.Boundary == "step" && entry.Step == "" {
+			return fmt.Errorf("step journal entry requires step name")
 		}
 	case "committed":
 		if !entry.Terminal {
@@ -392,11 +486,7 @@ func ValidateJournalEntry(entry JournalEntry, operationID OperationID) error {
 		if entry.ReceiptSHA256 == "" || !sha256Pattern.MatchString(string(entry.ReceiptSHA256)) {
 			return fmt.Errorf("committed journal entry requires receipt digest")
 		}
-		finalPath := entry.FinalReceiptPath
-		if finalPath == "" {
-			finalPath = entry.FinalArtifactPath
-		}
-		if err := validateFinalReceiptPath(finalPath); err != nil {
+		if err := validateFinalReceiptPath(entry.FinalReceiptPath); err != nil {
 			return err
 		}
 	case "rolled_back", "rollback_failed":
@@ -412,6 +502,9 @@ func ValidateJournalEntry(entry JournalEntry, operationID OperationID) error {
 func validateFinalReceiptPath(value string) error {
 	if value == "" {
 		return fmt.Errorf("terminal journal entry requires final receipt destination")
+	}
+	if value != "receipt.json" {
+		return fmt.Errorf("final receipt destination must be exactly receipt.json")
 	}
 	if strings.HasPrefix(value, "/") || strings.ContainsAny(value, `\\:`) || value == "." || value == ".." || strings.HasPrefix(value, "../") || strings.Contains(value, "/../") || path.Clean(value) != value {
 		return fmt.Errorf("final receipt destination must be slash-relative and confined")

@@ -77,3 +77,45 @@ func TestEmbeddedSchemasAreDraft202012AndClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnershipAndReceiptSchemasCloseEveryNestedObject(t *testing.T) {
+	for _, id := range []SchemaID{SchemaOwnership, SchemaReceipt} {
+		t.Run(string(id), func(t *testing.T) {
+			schema, err := LoadSchema(id)
+			if err != nil {
+				t.Fatalf("LoadSchema() error = %v", err)
+			}
+			var doc map[string]any
+			if err := StrictParseCanonical(schema, &doc); err != nil {
+				t.Fatalf("embedded schema is not canonical: %v\n%s", err, schema)
+			}
+			assertSchemaObjectsClosed(t, "$", doc)
+		})
+	}
+}
+
+func assertSchemaObjectsClosed(t *testing.T, path string, node any) {
+	t.Helper()
+	switch value := node.(type) {
+	case map[string]any:
+		if value["type"] == "object" {
+			if value["additionalProperties"] != false {
+				t.Fatalf("%s object lacks additionalProperties:false", path)
+			}
+			props, ok := value["properties"].(map[string]any)
+			if !ok || len(props) == 0 {
+				t.Fatalf("%s object lacks explicit nested properties", path)
+			}
+			if _, ok := value["required"].([]any); !ok {
+				t.Fatalf("%s object lacks required list", path)
+			}
+		}
+		for key, child := range value {
+			assertSchemaObjectsClosed(t, path+"."+key, child)
+		}
+	case []any:
+		for _, child := range value {
+			assertSchemaObjectsClosed(t, path+"[]", child)
+		}
+	}
+}

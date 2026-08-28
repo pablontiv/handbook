@@ -60,14 +60,16 @@ func TestTask6DurabilityBoundaryFailureInjection(t *testing.T) {
 			name: "ledger append written but error",
 			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) error {
 				op := opID("round2-ledger-fail")
-				appendJournalBoundary(ctx, t, store, roots, op, "started")
+				ledgerRef := appendStartedJournalForTest(ctx, t, store, roots, contracts.OperationID(op))
 				ledgerPath := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "ownership", "installations.ndjson"))
 				adapter.SetWriteFailure("append", ledgerPath, filesystem.FailAfterWrite, ambiguous)
 				ledger, err := store.OpenLedger(ctx, roots)
 				if err != nil {
 					return err
 				}
-				_, err = ledger.Append(ctx, ownershipRecord("install-ledger", op, "applied_unverified"))
+				record := ownershipRecord("install-ledger", op, "applied_unverified")
+				record.JournalRef = ledgerRef
+				_, err = ledger.Append(ctx, record)
 				return err
 			},
 		},

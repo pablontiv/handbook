@@ -69,6 +69,9 @@ func (j *journal) Append(ctx context.Context, entry contracts.JournalEntry) (con
 	if err := j.fs.AppendFileSync(ctx, j.absolutePath(), appendBytes); err != nil {
 		return contracts.JournalRef{}, err
 	}
+	if err := j.fs.SyncDirectory(ctx, contracts.AbsolutePath(filepath.Dir(string(j.absolutePath())))); err != nil {
+		return contracts.JournalRef{}, err
+	}
 	data, err := j.fs.ReadFile(ctx, j.absolutePath())
 	if err != nil {
 		return contracts.JournalRef{}, err
@@ -135,12 +138,6 @@ func normalizeJournalEntry(entries []contracts.JournalEntry, entry contracts.Jou
 	if isTerminalBoundary(entry.Boundary) {
 		entry.Terminal = true
 	}
-	if entry.Boundary == "committed" && entry.FinalReceiptPath == "" {
-		entry.FinalReceiptPath = entry.FinalArtifactPath
-	}
-	if entry.Boundary == "committed" && entry.FinalArtifactPath == "" {
-		entry.FinalArtifactPath = entry.FinalReceiptPath
-	}
 	return entry
 }
 
@@ -168,9 +165,13 @@ func validateJournalTransition(entries []contracts.JournalEntry, entry contracts
 	switch next {
 	case "started":
 		return fmt.Errorf("journal already started")
+	case "step":
+		if last == "ready_to_commit" {
+			return fmt.Errorf("step cannot follow ready_to_commit")
+		}
 	case "ready_to_commit":
-		if last != "started" {
-			return fmt.Errorf("ready_to_commit must follow started")
+		if last != "started" && last != "step" {
+			return fmt.Errorf("ready_to_commit must follow started or ordered step entries")
 		}
 	case "committed":
 		if last != "ready_to_commit" {

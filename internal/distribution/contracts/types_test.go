@@ -48,8 +48,9 @@ func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 	if err != nil {
 		panic(err)
 	}
-	deployment := ownershipDeploymentForTest("deployment", artifact, sha)
-	result := operationDeploymentResultForTest("deployment", artifact)
+	deployments := ownershipDeploymentsForAggregateTest(artifact, sha)
+	deploymentIDs := V1AggregateDeploymentIDs()
+	results := operationDeploymentResultsForAggregateTest(artifact, sha)
 	values := []struct {
 		schema SchemaID
 		value  any
@@ -58,8 +59,8 @@ func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 		{SchemaInventory, payload.Inventory},
 		{SchemaPlan, PlanEnvelope{Schema: SchemaPlan, ApprovalDigest: payloadDigest, Payload: payload}},
 		{SchemaBackupManifest, BackupManifest{Schema: SchemaBackupManifest, BackupSetID: "backup", InstallationID: "install", Operation: "apply", Entries: []BackupEntry{}, Verified: true}},
-		{SchemaOwnership, OwnershipRecord{Schema: SchemaOwnership, RecordID: "record", OperationID: OperationID(op), InstallationID: "install", DeploymentIDs: []string{"deployment"}, Deployments: []OwnershipDeploymentRecord{deployment}, PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: journal, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, AggregateEvent: "applied_unverified", OperationResult: "verification_required", FailureCode: nil, CompensatingPriorState: nil}},
-		{SchemaReceipt, Receipt{Schema: SchemaReceipt, ReceiptID: "receipt", OperationID: op, Command: "apply", ApprovalDigest: &approval, LedgerRecordHash: sha, ReadyJournalRef: journal, PlanRef: &artifact, InventoryRef: &artifact, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, Preconditions: []Precondition{}, DeploymentResults: []OperationDeploymentResult{result}, RollbackResults: []OperationDeploymentResult{}, CleanupEvidenceRef: &artifact, RequiredVerificationStatus: "verification_required", OperationResult: "verification_required"}},
+		{SchemaOwnership, OwnershipRecord{Schema: SchemaOwnership, RecordID: "record", OperationID: OperationID(op), InstallationID: "install", DeploymentIDs: deploymentIDs, Deployments: deployments, PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: journal, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, AggregateEvent: "applied_unverified", OperationResult: "verification_required", FailureCode: nil, CompensatingPriorState: nil}},
+		{SchemaReceipt, Receipt{Schema: SchemaReceipt, ReceiptID: "receipt", OperationID: op, Command: "apply", ApprovalDigest: &approval, LedgerRecordHash: sha, ReadyJournalRef: journal, PlanRef: &artifact, InventoryRef: &artifact, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, Preconditions: []Precondition{}, DeploymentResults: results, RollbackResults: []OperationDeploymentResult{}, CleanupEvidenceRef: &artifact, RequiredVerificationStatus: "verification_required", OperationResult: "verification_required"}},
 		{SchemaVerification, Verification{Schema: SchemaVerification, VerificationID: "verification", OperationID: op, Selector: Selector{Kind: SelectorInstallation, InstallationID: "install"}, Assertions: []VerificationAssertion{}, Status: "verified", OperatorRef: nil}},
 		{SchemaOperatorObservation, OperatorObservation{Schema: SchemaOperatorObservation, ObservationID: "observation", Runtime: "claude", Challenge: "challenge", Declaration: "visible", Freshness: "fresh"}},
 		{SchemaCommandResult, CommandResult{Schema: SchemaCommandResult, Kind: ResultArtifact, Command: "inventory", Status: ResultStatusSuccess, Artifact: &ArtifactResult{Schema: SchemaInventory, SHA256: sha, Bytes: "2", Label: "stdout"}}},
@@ -76,16 +77,30 @@ func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 	return out
 }
 
-func ownershipDeploymentForTest(id string, artifact ArtifactRef, sha SHA256Hex) OwnershipDeploymentRecord {
-	before := DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/skill", GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "missing", AttributesFingerprint: "attrs-before"}
-	after := DeploymentObservation{ObservedType: "symlink", Path: "/runtime/skill", GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "object-" + id, ManagedLinkIdentity: "link-" + id, LexicalLinkTarget: "/repo/skill", SourceContentDigest: string(sha), AttributesFingerprint: "attrs-after"}
-	return OwnershipDeploymentRecord{DeploymentID: id, BeforeObservation: before, AfterObservation: after, RuntimeBindingSummaries: []RuntimeBindingSummary{{Runtime: "pi", BindingIdentity: "pi:/runtime/skill", Status: "verification_required", EvidenceRef: &artifact}}, OriginalPreimage: before, InstalledPostimage: &after, BackupEntryRef: &artifact, VerificationRef: nil, CleanupEvidenceRef: &artifact, RollbackAuthorityRefs: []ArtifactRef{artifact}, Result: "verification_required"}
+func ownershipDeploymentsForAggregateTest(artifact ArtifactRef, sha SHA256Hex) []OwnershipDeploymentRecord {
+	bindings := expectedV1BindingSummariesByDeployment()
+	out := make([]OwnershipDeploymentRecord, 0, len(v1AggregateDeploymentIDs))
+	for _, id := range v1AggregateDeploymentIDs {
+		before := DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/" + id, GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "missing", AttributesFingerprint: "attrs-before"}
+		after := DeploymentObservation{ObservedType: "symlink", Path: "/runtime/" + id, GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "object-" + id, ManagedLinkIdentity: "link-" + id, LexicalLinkTarget: "/repo/skill", SourceContentDigest: string(sha), AttributesFingerprint: "attrs-after"}
+		summaries := make([]RuntimeBindingSummary, 0, len(bindings[id]))
+		for _, binding := range bindings[id] {
+			summaries = append(summaries, RuntimeBindingSummary{Runtime: binding.Runtime, BindingIdentity: binding.Runtime + ":" + binding.Name, Status: "verification_required", EvidenceRef: &artifact})
+		}
+		out = append(out, OwnershipDeploymentRecord{DeploymentID: id, BeforeObservation: before, AfterObservation: after, RuntimeBindingSummaries: summaries, OriginalPreimage: before, InstalledPostimage: &after, BackupEntryRef: &artifact, VerificationRef: nil, CleanupEvidenceRef: &artifact, RollbackAuthorityRefs: []ArtifactRef{artifact}, Result: "verification_required"})
+	}
+	return out
 }
 
-func operationDeploymentResultForTest(id string, artifact ArtifactRef) OperationDeploymentResult {
-	before := DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/skill", GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "missing"}
-	after := DeploymentObservation{ObservedType: "symlink", Path: "/runtime/skill", GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "object-" + id, ManagedLinkIdentity: "link-" + id}
-	return OperationDeploymentResult{DeploymentID: id, Result: "verification_required", BeforeObservation: &before, AfterObservation: &after, RuntimeBindingSummaries: []RuntimeBindingSummary{{Runtime: "pi", BindingIdentity: "pi:/runtime/skill", Status: "verification_required", EvidenceRef: &artifact}}, BackupEntryRef: &artifact, CleanupEvidenceRef: &artifact}
+func operationDeploymentResultsForAggregateTest(artifact ArtifactRef, sha SHA256Hex) []OperationDeploymentResult {
+	deployments := ownershipDeploymentsForAggregateTest(artifact, sha)
+	out := make([]OperationDeploymentResult, 0, len(deployments))
+	for _, deployment := range deployments {
+		before := deployment.BeforeObservation
+		after := deployment.AfterObservation
+		out = append(out, OperationDeploymentResult{DeploymentID: deployment.DeploymentID, Result: "verification_required", BeforeObservation: &before, AfterObservation: &after, RuntimeBindingSummaries: deployment.RuntimeBindingSummaries, BackupEntryRef: deployment.BackupEntryRef, CleanupEvidenceRef: deployment.CleanupEvidenceRef})
+	}
+	return out
 }
 
 func TestArtifactRefUsesRelativePathSHA256AndDecimalByteLength(t *testing.T) {

@@ -30,15 +30,18 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		{
 			name: "normal ledger and cleanup durable but ready boundary nonterminal",
 			seed: func(ctx context.Context, t *testing.T, _ *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
+				op := opID("op-ready")
+				ledgerRef := appendStartedJournalForTest(ctx, t, store, roots, contracts.OperationID(op))
 				ledger, err := store.OpenLedger(ctx, roots)
 				if err != nil {
 					t.Fatal(err)
 				}
-				op := opID("op-ready")
-				if _, err := ledger.Append(ctx, ownershipRecord("install-ready", op, "applied_unverified")); err != nil {
+				record := ownershipRecord("install-ready", op, "applied_unverified")
+				record.JournalRef = ledgerRef
+				if _, err := ledger.Append(ctx, record); err != nil {
 					t.Fatal(err)
 				}
-				appendJournalBoundary(ctx, t, store, roots, op, "started")
+				appendJournalBoundary(ctx, t, store, roots, op, "step")
 				appendJournalBoundary(ctx, t, store, roots, op, "ready_to_commit")
 			},
 			wantStatus: contracts.RecoveryRequired,
@@ -88,15 +91,22 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		{
 			name: "ledger recovery required aggregate event",
 			seed: func(ctx context.Context, t *testing.T, _ *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
+				record := ownershipRecord("install-rec", opID("op-rec"), "recovery_required")
+				record.JournalRef = appendStartedJournalForTest(ctx, t, store, roots, record.OperationID)
 				ledger, err := store.OpenLedger(ctx, roots)
 				if err != nil {
 					t.Fatal(err)
 				}
-				record := ownershipRecord("install-rec", opID("op-rec"), "recovery_required")
 				failure := "mutation_unprovable"
 				record.FailureCode = &failure
 				record.OperationResult = contracts.RecoveryRequired
 				record.CompensatingPriorState = &contracts.CompensatingPriorState{AggregateEvent: "applied_unverified", DeploymentIDs: record.DeploymentIDs, LedgerRecordHash: contracts.SHA256([]byte("prior"))}
+				for i := range record.Deployments {
+					record.Deployments[i].Result = contracts.RecoveryRequired
+					for j := range record.Deployments[i].RuntimeBindingSummaries {
+						record.Deployments[i].RuntimeBindingSummaries[j].Status = contracts.RecoveryRequired
+					}
+				}
 				if _, err := ledger.Append(ctx, record); err != nil {
 					t.Fatal(err)
 				}
@@ -129,9 +139,14 @@ func appendJournalBoundary(ctx context.Context, t *testing.T, store state.Store,
 		t.Fatal(err)
 	}
 	entry := contracts.JournalEntry{OperationID: op, Boundary: boundary, Result: boundary}
+	if boundary == "step" {
+		entry.Step = "cleanup"
+		entry.State = "cleanup_completed"
+		entry.Result = "cleanup_completed"
+	}
 	if boundary == "committed" {
 		entry.ReceiptSHA256 = contracts.SHA256([]byte("receipt-" + op))
-		entry.FinalArtifactPath = "receipt.json"
+		entry.FinalReceiptPath = "receipt.json"
 	}
 	if _, err := journal.Append(ctx, entry); err != nil {
 		t.Fatalf("Append(%s/%s) error = %v", op, boundary, err)

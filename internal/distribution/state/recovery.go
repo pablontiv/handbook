@@ -147,9 +147,6 @@ func validateCommittedRecoveryDAG(ctx context.Context, adapter filesystem.Adapte
 		return "journal_path_mismatch"
 	}
 	finalReceiptPath := last.FinalReceiptPath
-	if finalReceiptPath == "" {
-		finalReceiptPath = last.FinalArtifactPath
-	}
 	if finalReceiptPath != "receipt.json" {
 		return "terminal_receipt_path_mismatch"
 	}
@@ -186,23 +183,26 @@ func validateCommittedRecoveryDAG(ctx context.Context, adapter filesystem.Adapte
 	if receipt.ReadyJournalRef.OperationID != string(op) || receipt.ReadyJournalRef.Path != expectedJournalRel || contracts.SHA256(readyPrefix) != receipt.ReadyJournalRef.SHA256 {
 		return "ready_journal_ref_mismatch"
 	}
-	record := findLedgerRecordForReadyRef(records, receipt.ReadyJournalRef)
+	record := findLedgerRecordForReceipt(records, op, receipt.LedgerRecordHash)
 	if record == nil {
-		return "ledger_ready_ref_missing"
-	}
-	if record.RecordHash != receipt.LedgerRecordHash {
 		return "ledger_record_hash_mismatch"
+	}
+	s := &store{fs: adapter}
+	if err := validateReadyCommitEvidence(ctx, s, roots, op, receipt.ReadyJournalRef, *record); err != nil {
+		return "ready_commit_evidence_mismatch"
 	}
 	if !artifactRefsEqualPtr(&record.PlanRef, receipt.PlanRef) || !artifactRefsEqualPtr(&record.InventoryRef, receipt.InventoryRef) || !backupSetRefsEqual(record.BackupSetRef, receipt.BackupSetRef) || !artifactRefsEqualPtr(record.VerificationRef, receipt.VerificationRef) {
 		return "receipt_ledger_ref_mismatch"
 	}
+	if err := validateReceiptMatchesLedgerAggregate(receipt, *record); err != nil {
+		return "receipt_ledger_aggregate_mismatch"
+	}
 	return ""
 }
 
-func findLedgerRecordForReadyRef(records []contracts.OwnershipRecord, ready contracts.JournalRef) *contracts.OwnershipRecord {
+func findLedgerRecordForReceipt(records []contracts.OwnershipRecord, op contracts.OperationID, hash contracts.SHA256Hex) *contracts.OwnershipRecord {
 	for i := range records {
-		ref := records[i].JournalRef
-		if ref.OperationID == ready.OperationID && ref.Path == ready.Path && ref.SHA256 == ready.SHA256 {
+		if records[i].OperationID == string(op) && records[i].RecordHash == hash {
 			return &records[i]
 		}
 	}

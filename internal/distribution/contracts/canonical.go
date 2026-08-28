@@ -34,6 +34,7 @@ func StrictParseCanonical(data []byte, dst any) error {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(canonical))
 	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		return err
 	}

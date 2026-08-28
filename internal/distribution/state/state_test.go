@@ -210,11 +210,15 @@ func TestLedgerAppendCanonicalHashChainRejectsPartialAndMismatch(t *testing.T) {
 		t.Fatalf("OpenLedger() error = %v", err)
 	}
 
-	firstHash, err := ledger.Append(ctx, ownershipRecord("install-1", opID("op-1"), "applied_unverified"))
+	firstRecord := ownershipRecord("install-1", opID("op-1"), "applied_unverified")
+	firstRecord.JournalRef = appendStartedJournalForTest(ctx, t, store, roots, firstRecord.OperationID)
+	firstHash, err := ledger.Append(ctx, firstRecord)
 	if err != nil {
 		t.Fatalf("Append(first) error = %v", err)
 	}
-	secondHash, err := ledger.Append(ctx, ownershipRecord("install-1", opID("op-2"), "restored_unverified"))
+	secondRecord := ownershipRecord("install-1", opID("op-2"), "restored_unverified")
+	secondRecord.JournalRef = appendStartedJournalForTest(ctx, t, store, roots, secondRecord.OperationID)
+	secondHash, err := ledger.Append(ctx, secondRecord)
 	if err != nil {
 		t.Fatalf("Append(second) error = %v", err)
 	}
@@ -288,7 +292,7 @@ func TestJournalTransitionsRefsAndTerminality(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append(ready) error = %v", err)
 	}
-	committed, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "committed", Result: "verification_required", ReceiptSHA256: contracts.SHA256([]byte("receipt")), FinalArtifactPath: "receipt.json"})
+	committed, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "committed", Result: "verification_required", ReceiptSHA256: contracts.SHA256([]byte("receipt")), FinalReceiptPath: "receipt.json"})
 	if err != nil {
 		t.Fatalf("Append(committed) error = %v", err)
 	}
@@ -307,7 +311,7 @@ func TestJournalTransitionsRefsAndTerminality(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenJournal(bad) error = %v", err)
 	}
-	if _, err := badJournal.Append(ctx, contracts.JournalEntry{OperationID: string(badOp), Boundary: "committed", Result: "bad", ReceiptSHA256: contracts.SHA256([]byte("receipt")), FinalArtifactPath: "receipt.json"}); err == nil {
+	if _, err := badJournal.Append(ctx, contracts.JournalEntry{OperationID: string(badOp), Boundary: "committed", Result: "bad", ReceiptSHA256: contracts.SHA256([]byte("receipt")), FinalReceiptPath: "receipt.json"}); err == nil {
 		t.Fatalf("journal accepted committed before ready_to_commit")
 	}
 }
@@ -418,16 +422,14 @@ func ownershipRecord(installationID, operationID, event string) contracts.Owners
 	sha := contracts.SHA256([]byte("artifact"))
 	artifact := contracts.ArtifactRef{Path: "runs/" + operationID + "/plan.json", SHA256: sha, Bytes: "2"}
 	journal := contracts.JournalRef{OperationID: operationID, Path: "runs/" + operationID + "/journal.ndjson", SHA256: sha}
-	before := contracts.DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/skill", GovernedSlotIdentity: "slot-a", ManagedObjectIdentity: "missing", AttributesFingerprint: "attrs-before"}
-	after := contracts.DeploymentObservation{ObservedType: "symlink", Path: "/runtime/skill", GovernedSlotIdentity: "slot-a", ManagedObjectIdentity: "object-a", ManagedLinkIdentity: "link-a", LexicalLinkTarget: "/repo/skill", SourceContentDigest: string(sha), AttributesFingerprint: "attrs-after"}
-	deployment := contracts.OwnershipDeploymentRecord{DeploymentID: "deployment-a", BeforeObservation: before, AfterObservation: after, RuntimeBindingSummaries: []contracts.RuntimeBindingSummary{{Runtime: "pi", BindingIdentity: "pi:/runtime/skill", Status: "verification_required", EvidenceRef: &artifact}}, OriginalPreimage: before, InstalledPostimage: &after, BackupEntryRef: &artifact, VerificationRef: nil, CleanupEvidenceRef: &artifact, RollbackAuthorityRefs: []contracts.ArtifactRef{artifact}, Result: "verification_required"}
+	deployments := ownershipDeploymentsForStateTest(artifact, sha)
 	record := contracts.OwnershipRecord{
 		Schema:                 contracts.SchemaOwnership,
 		RecordID:               "record-" + operationID,
 		OperationID:            contracts.OperationID(operationID),
 		InstallationID:         contracts.InstallationID(installationID),
-		DeploymentIDs:          []string{"deployment-a"},
-		Deployments:            []contracts.OwnershipDeploymentRecord{deployment},
+		DeploymentIDs:          contracts.V1AggregateDeploymentIDs(),
+		Deployments:            deployments,
 		PreviousHash:           nil,
 		PlanRef:                artifact,
 		InventoryRef:           artifact,
@@ -445,6 +447,12 @@ func ownershipRecord(installationID, operationID, event string) contracts.Owners
 	case "installed_verified", "removed_verified", "restored_verified":
 		record.OperationResult = "verified"
 		record.VerificationRef = &artifact
+		for i := range record.Deployments {
+			record.Deployments[i].Result = "verified"
+			for j := range record.Deployments[i].RuntimeBindingSummaries {
+				record.Deployments[i].RuntimeBindingSummaries[j].Status = "verified"
+			}
+		}
 		if event != "restored_verified" {
 			record.BackupSetRef = nil
 		}
@@ -452,9 +460,25 @@ func ownershipRecord(installationID, operationID, event string) contracts.Owners
 		failure := "state_or_io_failure_preterminal"
 		record.OperationResult = "rolled_back"
 		record.FailureCode = &failure
-		record.CompensatingPriorState = &contracts.CompensatingPriorState{AggregateEvent: "applied_unverified", DeploymentIDs: []string{"deployment-a"}, LedgerRecordHash: sha}
+		record.CompensatingPriorState = &contracts.CompensatingPriorState{AggregateEvent: "applied_unverified", DeploymentIDs: contracts.V1AggregateDeploymentIDs(), LedgerRecordHash: sha}
+		for i := range record.Deployments {
+			record.Deployments[i].Result = "rolled_back"
+		}
 	}
 	return record
+}
+
+func appendStartedJournalForTest(ctx context.Context, t *testing.T, store state.Store, roots state.Roots, op contracts.OperationID) contracts.JournalRef {
+	t.Helper()
+	journal, err := store.OpenJournal(ctx, roots, op, contracts.CommandName("apply"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "started", Result: "started"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ref
 }
 
 func prepareReceiptProtocol(ctx context.Context, t *testing.T, store state.Store, roots state.Roots, op contracts.OperationID) contracts.Receipt {
@@ -463,10 +487,7 @@ func prepareReceiptProtocol(ctx context.Context, t *testing.T, store state.Store
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "started", Result: "started"}); err != nil {
-		t.Fatal(err)
-	}
-	ready, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "ready_to_commit", Result: "ready"})
+	ledgerRef, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "started", Result: "started"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,8 +496,15 @@ func prepareReceiptProtocol(ctx context.Context, t *testing.T, store state.Store
 		t.Fatal(err)
 	}
 	record := ownershipRecord("install", string(op), "applied_unverified")
-	record.JournalRef = ready
+	record.JournalRef = ledgerRef
 	ledgerHash, err := ledger.Append(ctx, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "step", Step: "cleanup", State: "cleanup_completed", Result: "cleanup_completed"}); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "ready_to_commit", Result: "ready"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,8 +519,6 @@ func receiptForTest(op contracts.OperationID) contracts.Receipt {
 	journal := contracts.JournalRef{OperationID: string(op), Path: "runs/" + string(op) + "/journal.ndjson", SHA256: sha}
 	artifact := contracts.ArtifactRef{Path: "runs/" + string(op) + "/plan.json", SHA256: sha, Bytes: "2"}
 	approval := sha
-	before := contracts.DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/skill", GovernedSlotIdentity: "slot-a", ManagedObjectIdentity: "missing"}
-	after := contracts.DeploymentObservation{ObservedType: "symlink", Path: "/runtime/skill", GovernedSlotIdentity: "slot-a", ManagedObjectIdentity: "object-a", ManagedLinkIdentity: "link-a"}
 	return contracts.Receipt{
 		Schema:                     contracts.SchemaReceipt,
 		ReceiptID:                  "receipt-" + string(op),
@@ -506,12 +532,42 @@ func receiptForTest(op contracts.OperationID) contracts.Receipt {
 		BackupSetRef:               &contracts.BackupSetRef{BackupSetID: "backup-install", SHA256: sha},
 		VerificationRef:            nil,
 		Preconditions:              []contracts.Precondition{},
-		DeploymentResults:          []contracts.OperationDeploymentResult{{DeploymentID: "deployment-a", Result: "verification_required", BeforeObservation: &before, AfterObservation: &after, RuntimeBindingSummaries: []contracts.RuntimeBindingSummary{{Runtime: "pi", BindingIdentity: "pi:/runtime/skill", Status: "verification_required", EvidenceRef: &artifact}}, BackupEntryRef: &artifact, CleanupEvidenceRef: &artifact}},
+		DeploymentResults:          operationDeploymentResultsForStateTest(artifact, sha),
 		RollbackResults:            []contracts.OperationDeploymentResult{},
 		CleanupEvidenceRef:         &artifact,
 		RequiredVerificationStatus: "verification_required",
 		OperationResult:            "verification_required",
 	}
+}
+
+func ownershipDeploymentsForStateTest(artifact contracts.ArtifactRef, sha contracts.SHA256Hex) []contracts.OwnershipDeploymentRecord {
+	bindings := map[string][]contracts.RuntimeBinding{}
+	for _, binding := range contracts.V1AggregateRuntimeBindings() {
+		bindings[binding.DeploymentID] = append(bindings[binding.DeploymentID], binding)
+	}
+	ids := contracts.V1AggregateDeploymentIDs()
+	out := make([]contracts.OwnershipDeploymentRecord, 0, len(ids))
+	for _, id := range ids {
+		before := contracts.DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/" + id, GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "missing", AttributesFingerprint: "attrs-before"}
+		after := contracts.DeploymentObservation{ObservedType: "symlink", Path: "/runtime/" + id, GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "object-" + id, ManagedLinkIdentity: "link-" + id, LexicalLinkTarget: "/repo/skill", SourceContentDigest: string(sha), AttributesFingerprint: "attrs-after"}
+		summaries := make([]contracts.RuntimeBindingSummary, 0, len(bindings[id]))
+		for _, binding := range bindings[id] {
+			summaries = append(summaries, contracts.RuntimeBindingSummary{Runtime: binding.Runtime, BindingIdentity: binding.Runtime + ":" + binding.Name, Status: "verification_required", EvidenceRef: &artifact})
+		}
+		out = append(out, contracts.OwnershipDeploymentRecord{DeploymentID: id, BeforeObservation: before, AfterObservation: after, RuntimeBindingSummaries: summaries, OriginalPreimage: before, InstalledPostimage: &after, BackupEntryRef: &artifact, VerificationRef: nil, CleanupEvidenceRef: &artifact, RollbackAuthorityRefs: []contracts.ArtifactRef{artifact}, Result: "verification_required"})
+	}
+	return out
+}
+
+func operationDeploymentResultsForStateTest(artifact contracts.ArtifactRef, sha contracts.SHA256Hex) []contracts.OperationDeploymentResult {
+	deployments := ownershipDeploymentsForStateTest(artifact, sha)
+	out := make([]contracts.OperationDeploymentResult, 0, len(deployments))
+	for _, deployment := range deployments {
+		before := deployment.BeforeObservation
+		after := deployment.AfterObservation
+		out = append(out, contracts.OperationDeploymentResult{DeploymentID: deployment.DeploymentID, Result: deployment.Result, BeforeObservation: &before, AfterObservation: &after, RuntimeBindingSummaries: deployment.RuntimeBindingSummaries, BackupEntryRef: deployment.BackupEntryRef, CleanupEvidenceRef: deployment.CleanupEvidenceRef, RollbackAuthorityRefs: deployment.RollbackAuthorityRefs})
+	}
+	return out
 }
 
 func computeLedgerRecordHashForTest(record contracts.OwnershipRecord) (contracts.SHA256Hex, error) {

@@ -157,10 +157,7 @@ func TestPublishReceiptRequiresReadyLedgerAndPublishesThroughTerminalProtocol(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "started", Result: "started"}); err != nil {
-		t.Fatal(err)
-	}
-	ready, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "ready_to_commit", Result: "ready"})
+	ledgerRef, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "started", Result: "started"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,8 +166,15 @@ func TestPublishReceiptRequiresReadyLedgerAndPublishesThroughTerminalProtocol(t 
 		t.Fatal(err)
 	}
 	record := ownershipRecord("install", string(op), "applied_unverified")
-	record.JournalRef = ready
+	record.JournalRef = ledgerRef
 	ledgerHash, err := ledger.Append(ctx, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "step", Step: "cleanup", State: "cleanup_completed", Result: "cleanup_completed"}); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "ready_to_commit", Result: "ready"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +192,7 @@ func TestPublishReceiptRequiresReadyLedgerAndPublishesThroughTerminalProtocol(t 
 		t.Fatal(err)
 	}
 	entries := reopened.Entries()
-	if entries[len(entries)-1].Boundary != "committed" || entries[len(entries)-1].ReceiptSHA256 == "" || entries[len(entries)-1].FinalArtifactPath != "receipt.json" {
+	if entries[len(entries)-1].Boundary != "committed" || entries[len(entries)-1].ReceiptSHA256 == "" || entries[len(entries)-1].FinalReceiptPath != "receipt.json" {
 		t.Fatalf("terminal journal entry missing receipt digest/final relative destination: %#v", entries[len(entries)-1])
 	}
 	if !containsWriteLog(adapter.WriteLog(), "sync-dir:"+filepath.Join(string(roots.StateRoot), "runs", string(op))) {

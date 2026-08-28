@@ -51,6 +51,9 @@ func (l *ledger) Append(ctx context.Context, record contracts.OwnershipRecord) (
 	if err := contracts.ValidateOwnershipRecord(record); err != nil {
 		return "", err
 	}
+	if err := l.validateCurrentJournalPrefix(ctx, record.JournalRef); err != nil {
+		return "", err
+	}
 	hash, err := computeLedgerRecordHash(record)
 	if err != nil {
 		return "", err
@@ -67,12 +70,38 @@ func (l *ledger) Append(ctx context.Context, record contracts.OwnershipRecord) (
 	if err := l.fs.AppendFileSync(ctx, l.roots.LedgerPath(), appendBytes); err != nil {
 		return "", err
 	}
+	if err := l.fs.SyncDirectory(ctx, contracts.AbsolutePath(filepath.Dir(string(l.roots.LedgerPath())))); err != nil {
+		return "", err
+	}
 	l.records = append(records, record)
 	return hash, nil
 }
 
 func (l *ledger) Records() []contracts.OwnershipRecord {
 	return append([]contracts.OwnershipRecord(nil), l.records...)
+}
+
+func (l *ledger) validateCurrentJournalPrefix(ctx context.Context, ref contracts.JournalRef) error {
+	journalPath := contracts.AbsolutePath(filepath.Join(string(l.roots.StateRoot), filepath.FromSlash(ref.Path)))
+	data, err := l.fs.ReadFile(ctx, journalPath)
+	if err != nil {
+		return fmt.Errorf("journal_ref is not durable: %w", err)
+	}
+	if contracts.SHA256(data) != ref.SHA256 {
+		return fmt.Errorf("journal_ref does not match current durable journal prefix before ledger append")
+	}
+	entries, err := readJournalEntries(ctx, l.fs, journalPath)
+	if err != nil {
+		return fmt.Errorf("journal_ref prefix invalid: %w", err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("journal_ref cannot bind an empty journal")
+	}
+	last := entries[len(entries)-1].Boundary
+	if last == "ready_to_commit" || isTerminalBoundary(last) {
+		return fmt.Errorf("ledger journal_ref must bind a pre-ready nonterminal prefix")
+	}
+	return nil
 }
 
 func readLedger(ctx context.Context, adapter filesystem.Adapter, roots Roots) ([]contracts.OwnershipRecord, error) {

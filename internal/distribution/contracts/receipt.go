@@ -71,8 +71,8 @@ func ValidateReceipt(receipt Receipt) error {
 	if receipt.OperationResult == "" || receipt.RequiredVerificationStatus == "" {
 		return fmt.Errorf("receipt requires operation_result and required_verification_status")
 	}
-	if len(receipt.DeploymentResults) == 0 {
-		return fmt.Errorf("receipt requires deployment_results")
+	if len(receipt.DeploymentResults) != v1DeploymentCount {
+		return fmt.Errorf("receipt deployment result count = %d, want %d", len(receipt.DeploymentResults), v1DeploymentCount)
 	}
 	if err := validateReceiptCommandRefs(receipt); err != nil {
 		return err
@@ -84,6 +84,9 @@ func ValidateReceipt(receipt Receipt) error {
 		if err := ValidateArtifactRef(*receipt.CleanupEvidenceRef); err != nil {
 			return fmt.Errorf("cleanup_evidence_ref: %w", err)
 		}
+	}
+	if err := validateReceiptAggregateAuthority(receipt.DeploymentResults); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for _, result := range receipt.DeploymentResults {
@@ -128,6 +131,9 @@ func validateReceiptCommandRefs(receipt Receipt) error {
 		if receipt.BackupSetRef != nil || receipt.VerificationRef != nil {
 			return fmt.Errorf("uninstall receipt requires null backup_set_ref and verification_ref")
 		}
+		if receipt.OperationResult != "verification_required" && receipt.OperationResult != "rolled_back" && receipt.OperationResult != RecoveryRequired {
+			return fmt.Errorf("uninstall receipt operation_result is contradictory")
+		}
 	case "verify":
 		if receipt.ApprovalDigest != nil {
 			return fmt.Errorf("verify receipt requires null approval_digest")
@@ -144,9 +150,53 @@ func validateReceiptCommandRefs(receipt Receipt) error {
 	return nil
 }
 
+func validateReceiptAggregateAuthority(results []OperationDeploymentResult) error {
+	if len(results) != v1DeploymentCount {
+		return fmt.Errorf("receipt deployment result count = %d, want %d", len(results), v1DeploymentCount)
+	}
+	expectedIDs := map[string]bool{}
+	for _, id := range v1AggregateDeploymentIDs {
+		expectedIDs[id] = true
+	}
+	expectedBindings := expectedV1BindingSummariesByDeployment()
+	seenIDs := map[string]bool{}
+	bindingCount := 0
+	for _, result := range results {
+		if !expectedIDs[result.DeploymentID] {
+			return fmt.Errorf("unexpected deployment result %s", result.DeploymentID)
+		}
+		if seenIDs[result.DeploymentID] {
+			return fmt.Errorf("duplicate deployment result")
+		}
+		seenIDs[result.DeploymentID] = true
+		want := expectedBindings[result.DeploymentID]
+		if len(result.RuntimeBindingSummaries) != len(want) {
+			return fmt.Errorf("runtime binding count for deployment %s = %d, want %d", result.DeploymentID, len(result.RuntimeBindingSummaries), len(want))
+		}
+		for i, binding := range result.RuntimeBindingSummaries {
+			wantBinding := want[i]
+			wantIdentity := wantBinding.Runtime + ":" + wantBinding.Name
+			if binding.Runtime != wantBinding.Runtime || binding.BindingIdentity != wantIdentity {
+				return fmt.Errorf("runtime binding summary %s[%d] = %s/%s, want %s/%s", result.DeploymentID, i, binding.Runtime, binding.BindingIdentity, wantBinding.Runtime, wantIdentity)
+			}
+			bindingCount++
+		}
+	}
+	if len(seenIDs) != v1DeploymentCount {
+		return fmt.Errorf("receipt deployment result set is incomplete")
+	}
+	if bindingCount != v1RuntimeBindingCount {
+		return fmt.Errorf("receipt runtime binding count = %d, want %d", bindingCount, v1RuntimeBindingCount)
+	}
+	return nil
+}
+
 func validateOperationDeploymentResult(result OperationDeploymentResult, receipt Receipt) error {
 	if result.DeploymentID == "" || result.Result == "" {
 		return fmt.Errorf("deployment result requires deployment_id and result")
+	}
+	if !allowedDeploymentResult(receipt.OperationResult, result.Result) {
+		return fmt.Errorf("deployment result %q is not allowed for operation_result %q", result.Result, receipt.OperationResult)
 	}
 	if result.BeforeObservation == nil || result.AfterObservation == nil {
 		return fmt.Errorf("deployment result requires before and after observations")
@@ -161,6 +211,9 @@ func validateOperationDeploymentResult(result OperationDeploymentResult, receipt
 	for _, binding := range result.RuntimeBindingSummaries {
 		if binding.Runtime == "" || binding.BindingIdentity == "" || binding.Status == "" {
 			return fmt.Errorf("runtime binding summary requires runtime, binding_identity, and status")
+		}
+		if !allowedRuntimeBindingStatus(receipt.OperationResult, binding.Status) {
+			return fmt.Errorf("runtime binding status %q is not allowed for operation_result %q", binding.Status, receipt.OperationResult)
 		}
 		key := binding.Runtime + "\x00" + binding.BindingIdentity
 		if seenBindings[key] {
