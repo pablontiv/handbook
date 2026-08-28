@@ -30,7 +30,7 @@ type PlanPayload struct {
 	InventoryDigest          SHA256Hex                 `json:"inventory_digest"`
 	Intent                   PlanIntent                `json:"intent"`
 	Selector                 *Selector                 `json:"selector"`
-	Deployments              []PhysicalDeployment      `json:"deployments"`
+	Deployments              []Deployment              `json:"deployments"`
 	Blockers                 []Blocker                 `json:"blockers"`
 	Preconditions            []Precondition            `json:"preconditions"`
 	BackupRequirement        BackupRequirement         `json:"backup_requirement"`

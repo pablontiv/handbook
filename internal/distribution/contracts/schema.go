@@ -92,7 +92,7 @@ func ValidateSchema(schema SchemaID, canonical []byte) error {
 }
 
 var allowedTopLevel = map[SchemaID]map[string]bool{
-	SchemaManifest:            keys("schema", "skills", "runtime_roots", "adapters"),
+	SchemaManifest:            keys("schema", "repository", "skills", "runtime_roots", "adapters"),
 	SchemaInventory:           keys("schema", "manifest_digest", "sources", "deployments", "runtime_bindings", "ownership", "backups", "blockers"),
 	SchemaPlan:                keys("schema", "approval_digest", "payload"),
 	SchemaBackupManifest:      keys("schema", "backup_set_id", "installation_id", "operation", "entries", "verified"),
