@@ -4,9 +4,11 @@
 
 **Status:** Approved
 
-**Governing ADRs:** ADR 0001, ADR 0014, ADR 0015, ADR 0016
+**Governing ADRs:** ADR 0001, ADR 0014, ADR 0015, ADR 0017, ADR 0020. ADR 0020 supersedes ADR 0019 and ADR 0016 implementation choices; ADR 0016 remains historical ownership and lifecycle evidence.
 
-**OpenCode verification qualification:** ADR 0017 and `docs/superpowers/specs/2026-08-26-opencode-verification-isolation-design.md` supersede only this specification's OpenCode verification assumptions: governed verification runs `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` inline for each `opencode debug skill` invocation and uses file-backed capture, while normal OpenCode behavior and required Claude links remain unchanged.
+**Implementation supersession:** ADR 0020 and `docs/superpowers/specs/2026-08-28-waywarden-skill-distribution-design.md` supersede this specification's TypeScript, package, state, command-contract, transaction, release, and executable implementation choices. This document remains authoritative for ownership classification, runtime topology, direct-link intent, and the separation of uninstall from restore.
+
+**OpenCode verification qualification:** ADR 0017 and `docs/superpowers/specs/2026-08-26-opencode-verification-isolation-design.md` govern OpenCode verification: governed verification runs `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` inline for each `opencode debug skill` invocation and uses file-backed capture, while normal OpenCode behavior and required Claude links remain unchanged.
 
 ## Purpose
 
@@ -19,7 +21,7 @@ Establish one canonical owner for every installed Agent Skill, eliminate drift b
 - Install this repository's skills through direct symlinks rather than copies.
 - Preserve product-owned, repository-local, private-host, and externally managed lifecycle boundaries.
 - Migrate incrementally, with backup and verification before replacing any real directory.
-- Record TypeScript as the required implementation language for a future installer, including distinct uninstall and restore operations.
+- Preserve distinct uninstall and restore operations while delegating executable implementation authority to the approved Waywarden Go specification and ADR 0020.
 
 ## Non-goals
 
@@ -167,9 +169,9 @@ Before replacing any existing path:
 
 A textual name match is never authority to remove a path. Unexpected files, symlink targets, ownership, path drift, or duplicate names block the operation.
 
-## Future TypeScript Installer
+## Waywarden implementation authority
 
-A future, separately designed installer will be implemented in TypeScript. Its required lifecycle is:
+The lifecycle evidence established here remains:
 
 ```text
 inventory -> plan -> apply -> verify
@@ -177,27 +179,17 @@ inventory -> plan -> apply -> verify
                   \-> restore   -> verify
 ```
 
-Required semantics:
+ADR 0020 and `docs/superpowers/specs/2026-08-28-waywarden-skill-distribution-design.md` now govern the executable implementation. They replace the former TypeScript choice with Waywarden in exact Go 1.26.0 and define the authoritative schemas, state layout, digest binding, physical deployments, runtime bindings, backup sets, transaction journal, receipts, rollback, verification, platform adapters, CI, and release behavior.
 
-- `inventory` is read-only and captures path type, resolved target, ownership evidence, and hashes.
-- `plan` is read-only and produces a deterministic, digest-addressed operation set.
-- `apply` accepts only the exact approved plan digest and backs up governed paths before mutation.
-- `verify` independently checks links, frontmatter names, runtime coverage, and collisions.
-- `uninstall` removes only installer-managed symlinks whose current targets still match the recorded targets.
-- `restore` is a separate explicit operation that restores verified pre-install content from a manifest.
-- `uninstall` never deletes sources, backups, real directories, third-party entries, or drifted links.
-- all mutating commands fail closed on ambiguity and emit receipts suitable for independent verification.
-- macOS, Linux, and Windows are supported. Windows uses directory symlinks and fails with an actionable message when the host cannot create them; it never silently falls back to copying.
-
-The CLI framework, versioned plan/manifest format, and package location will be selected during the installer's own design cycle.
+The safety concepts preserved from this specification are read-only inventory/planning, exact digest-bound mutation approval, verified backups before replacement, fail-closed ambiguity, ownership-bound uninstall, separate explicit restore, direct symlinks, and temporary-home tests.
 
 ## Migration Sequence
 
 ### Stage 0: governance
 
-- Accept ADR 0016.
-- Commit this design specification.
-- Do not modify skills or runtime paths before governance is accepted.
+- Preserve ADR 0016 and this specification as historical ownership/lifecycle evidence.
+- Accept ADR 0020 and the approved Waywarden specification as implementation authority.
+- Do not modify skills or runtime paths before an implementation plan derived from that authority is accepted.
 
 ### Stage 1: current portfolio convergence
 
@@ -260,4 +252,4 @@ Before each commit or pull request:
 - No third-party plugin, package, cache, clone, or marketplace skill is vendored without explicit adaptation approval.
 - Every replaced real directory has a verified backup and tested rollback path.
 - Repository-local skills remain local.
-- Future installer work starts from the TypeScript lifecycle and uninstall/restore separation recorded in ADR 0016.
+- Waywarden implementation starts from ADR 0020 and the approved Waywarden specification while preserving ADR 0016's uninstall/restore separation as historical lifecycle evidence.

@@ -1,11 +1,11 @@
 # Waywarden Skill Distribution Design
 
 **Date:** 2026-08-28
-**Status:** Proposed
+**Status:** Approved
 **Repository:** `pablontiv/skills`
 **Issue:** <https://github.com/pablontiv/skills/issues/10>
-**Governing ADRs:** ADR 0019 supersedes ADR 0016 for implementation language and release architecture; ADR 0017 continues to govern OpenCode verification isolation.
-**Related specifications:** `docs/superpowers/specs/2026-08-26-skill-ownership-and-distribution-design.md` remains the ownership evidence record; `docs/superpowers/specs/2026-08-26-opencode-verification-isolation-design.md` remains the OpenCode verifier constraint.
+**Governing ADRs:** ADR 0020 supersedes ADR 0019 and ADR 0016 for implementation contracts; ADR 0017 continues to govern OpenCode verification isolation.
+**Related specifications:** `docs/superpowers/specs/2026-08-26-skill-ownership-and-distribution-design.md` remains the ownership, topology, and lifecycle evidence record with its TypeScript implementation framing superseded; `docs/superpowers/specs/2026-08-26-opencode-verification-isolation-design.md` remains the OpenCode verifier constraint.
 
 ## Purpose
 
@@ -13,20 +13,11 @@ Waywarden is a cross-runtime Go CLI for distributing the Agent Skills owned by t
 
 Waywarden exists to make the lifecycle from inventory through restore deterministic, auditable, and safe across Linux, macOS, and Windows. It is not a skill helper, daemon, package manager, registry, runtime replacement, update agent, or configuration manager.
 
-## Governance status and approval gate
+## Governance status
 
-This document is a proposed specification pending human approval. It must not be treated as an implemented contract until the explicit governance gate below completes.
+The user approved this specification on 2026-08-28. ADR 0020 supersedes ADR 0019 through the repository's append-only ADR workflow and normatively adopts this document for contracts, state, ownership lifecycle, release posture, and rollback requirements. The prior ownership specification retains authority only for ownership classification, runtime topology, and lifecycle evidence; its TypeScript and ADR 0016 implementation framing is superseded.
 
-After human approval and before any implementation plan is accepted, the repository must:
-
-1. mark this specification `Approved`;
-2. amend ADR 0019 so it normatively references this specification for contracts, state, ownership lifecycle, release posture, and rollback requirements;
-3. amend both ADR 0019 frontmatter decision metadata and ADR 0019 body text to replace `Go 1.26 o posterior` with exact `Go 1.26.0`, correct ADR 0019's temporal phrase that implies a design is already approved, and correct its Crossbeam release wording so Crossbeam is a CI baseline only and not Waywarden release authority;
-4. validate and accept the ADR amendment using the repository ADR validation path;
-5. update `docs/superpowers/specs/2026-08-26-skill-ownership-and-distribution-design.md` to mark TypeScript and ADR 0016 implementation sections superseded by ADR 0019 plus this approved Waywarden specification, while preserving ownership, topology, and lifecycle evidence;
-6. update issue #10 title and body from the previous TypeScript/ADR 0016 framing to Waywarden Go/ADR 0019 scope.
-
-This specification does not assert that those governance updates have already occurred. It remains `Proposed` until that gate completes.
+Issue #10 is synchronized to Waywarden Go and ADR 0020 scope. No implementation may begin without an implementation plan derived from this approved specification.
 
 ## Decision summary
 
@@ -832,7 +823,7 @@ Native Ubuntu, macOS, and Windows tests cover files, directories, symlinks, dire
 - `govulncheck` v1.1.4 passes;
 - `pkcov` enforces at least 85% coverage for the Go distribution code;
 - CodeQL and gitleaks pass;
-- Rootline validates ADR records strictly when the governance gate amends ADR 0019.
+- Rootline validates the complete ADR set strictly, including accepted ADR 0020 and superseded ADR 0019.
 
 All automated tests that exercise lifecycle behavior use temporary homes, temporary runtime roots, fake runtime executables, temporary state roots, and temporary coordination lock roots. The current checkout's real home directory is never mutated by tests.
 
@@ -842,7 +833,7 @@ Waywarden reuses only the Crossbeam `go-ci.yml` light profile as a baseline. The
 
 Project-owned pinned jobs must add race detection, `go vet`, `golangci-lint` v2.13.1, `govulncheck` v1.1.4, CodeQL, gitleaks, native OS tests, release builds, attestations, and smoke tests. The implementation must pin `actions/setup-go` and every release-critical action by SHA. GoReleaser version is exactly v2.18.0 and Go version is exactly 1.26.0.
 
-The final accepted ADR 0019 amendment must clarify that releases use a Crossbeam CI baseline plus project-owned release and GoReleaser jobs. It must not say Waywarden releases are performed by Crossbeam `go-release`.
+Accepted ADR 0020 establishes that releases use a Crossbeam CI baseline plus project-owned release and GoReleaser jobs. Crossbeam `go-release` is not Waywarden release authority.
 
 Required release behavior:
 
@@ -871,8 +862,8 @@ Post-release native smoke tests download the release asset, verify the published
 
 Issue #10 is accepted only when all of the following are true:
 
-1. The governance gate has marked this specification Approved, amended ADR 0019 to normatively reference this specification, changed both ADR 0019 frontmatter decision metadata and body from `Go 1.26 o posterior` to exact `Go 1.26.0`, corrected ADR 0019 temporal and Crossbeam release wording, updated the prior ownership specification to mark TypeScript/ADR 0016 implementation sections superseded while preserving evidence, validated/accepted the ADR amendment, and updated issue #10 from TypeScript/ADR 0016 framing to Waywarden Go/ADR 0019 framing.
-2. The implementation follows ADR 0019 as amended by the governance gate and preserves ADR 0017 OpenCode verification isolation.
+1. The completed governance gate marks this specification Approved, accepts ADR 0020 as the successor to ADR 0019 and ADR 0016 implementation choices, preserves the prior ownership specification only as ownership/topology/lifecycle evidence, and synchronizes issue #10 to Waywarden Go/ADR 0020 scope.
+2. The implementation follows accepted ADR 0020 and preserves ADR 0017 OpenCode verification isolation.
 3. Every issue criterion is mapped in the implementation plan and final pull request evidence.
 4. The repository contains `waywarden` Go source under the approved layout or a reviewed equivalent that preserves the same package boundaries.
 5. `distribution/manifest.json` exists, validates as `waywarden.manifest/v1`, and lists only repository-owned skills.
@@ -895,7 +886,7 @@ Issue #10 is accepted only when all of the following are true:
 22. Pi verification supports only exact `pi --version` parse `0.84.3`, uses `pi --mode rpc --no-session --offline` with the one JSONL `get_commands` request, parses newline-delimited JSON frames, enforces the exact correlated response shape, requires lexical `sourceInfo.path == <planned-runtime-target>/SKILL.md` before resolved `<manifest-source>/SKILL.md` identity, and never claims runtime verification from filesystem-only evidence.
 23. Existing Python suites continue to pass.
 24. Go race, vet, `golangci-lint` v2.13.1, `govulncheck` v1.1.4, CodeQL, gitleaks, native OS tests, and at least 85% `pkcov` coverage pass.
-25. Rootline strict ADR validation passes for the repository's ADR set after the ADR 0019 governance amendment.
+25. Rootline strict ADR validation passes for the complete repository ADR set, including accepted ADR 0020 and superseded ADR 0019.
 26. Documentation-command-schema contract tests pass for command examples, contracts, status names, state graph, deployment/runtime-binding cardinality, artifact DAG refs/nullability, terminal receipt protocol, verification DAG, phase-aware error table with exactly one row per injection, command-result union schemas, output confinement and atomic publication, release assets, and acceptance sequence.
 27. CI uses Crossbeam `go-ci.yml` only in profile `light` pinned to `9feddefac77e2bd8dde05f5e493031f965f791c5` with exact `go-version: 1.26.0` and coverage threshold `85`; project-owned pinned jobs provide release, GoReleaser v2.18.0, attestations, security, and smokes.
 28. Releases produce exactly the six literal binary-only archives, `checksums.txt`, and mandatory GitHub provenance for each archive and `checksums.txt` with no best-effort attestation path; release archives do not include skills or manifests and release smoke uses an explicit temporary fixture checkout.
@@ -933,6 +924,6 @@ These semantics apply equally in human and JSON output modes subject to the arti
 
 ## Governance notes
 
-ADR 0019 is the architecture decision intended to govern implementing the distributor in Go after the approval gate amends it to reference this specification, changes both frontmatter decision metadata and body from `Go 1.26 o posterior` to exact `Go 1.26.0`, and corrects its temporal and Crossbeam release wording. ADR 0016's ownership classification and lifecycle evidence remain preserved through ADR 0019 and the prior ownership evidence specification, but its TypeScript implementation framing is superseded only after the gate updates that prior spec. ADR 0017 remains the authority for OpenCode verification isolation.
+ADR 0020 is the accepted architecture decision for Waywarden v1 and normatively references this specification. It supersedes ADR 0019's broader Go-version and Crossbeam-release wording and ADR 0016's TypeScript implementation choice. ADR 0016 and the prior ownership specification remain evidence for ownership classification, runtime topology, direct symlinks, and uninstall/restore separation. ADR 0017 remains the authority for OpenCode verification isolation.
 
-This design intentionally creates no Go implementation, no manifest, no CI workflow, no release configuration, and no ADR changes. It is the proposed specification pending human approval.
+This approved design intentionally creates no Go implementation, manifest, CI workflow, or release configuration. Those changes require the separate implementation plan.
