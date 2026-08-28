@@ -127,10 +127,10 @@ func TestRecoveryRejectsCrossOperationReceiptSwaps(t *testing.T) {
 	}
 }
 
-func completeReceiptDAG(ctx context.Context, t *testing.T, _ *filesystem.MemoryAdapter, store state.Store, roots state.Roots, seed string) (contracts.OperationID, contracts.Receipt) {
+func completeReceiptDAG(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots, seed string) (contracts.OperationID, contracts.Receipt) {
 	t.Helper()
 	op := contracts.OperationID(string(contracts.SHA256([]byte(seed))))
-	receipt := prepareReceiptProtocol(ctx, t, store, roots, op)
+	receipt := prepareReceiptProtocol(ctx, t, adapter, store, roots, op)
 	if _, err := store.PublishReceipt(ctx, roots, op, receipt); err != nil {
 		t.Fatalf("PublishReceipt() error = %v", err)
 	}

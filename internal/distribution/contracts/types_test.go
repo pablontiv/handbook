@@ -49,7 +49,7 @@ func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 		panic(err)
 	}
 	deployments := ownershipDeploymentsForAggregateTest(artifact, sha)
-	deploymentIDs := V1AggregateDeploymentIDs()
+	deploymentIDs := aggregateDeploymentIDsForTest()
 	results := operationDeploymentResultsForAggregateTest(artifact, sha)
 	values := []struct {
 		schema SchemaID
@@ -78,9 +78,10 @@ func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 }
 
 func ownershipDeploymentsForAggregateTest(artifact ArtifactRef, sha SHA256Hex) []OwnershipDeploymentRecord {
-	bindings := expectedV1BindingSummariesByDeployment()
-	out := make([]OwnershipDeploymentRecord, 0, len(v1AggregateDeploymentIDs))
-	for _, id := range v1AggregateDeploymentIDs {
+	bindings := aggregateRuntimeBindingsForTest()
+	ids := aggregateDeploymentIDsForTest()
+	out := make([]OwnershipDeploymentRecord, 0, len(ids))
+	for _, id := range ids {
 		before := DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/" + id, GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "missing", AttributesFingerprint: "attrs-before"}
 		after := DeploymentObservation{ObservedType: "symlink", Path: "/runtime/" + id, GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "object-" + id, ManagedLinkIdentity: "link-" + id, LexicalLinkTarget: "/repo/skill", SourceContentDigest: string(sha), AttributesFingerprint: "attrs-after"}
 		summaries := make([]RuntimeBindingSummary, 0, len(bindings[id]))
@@ -88,6 +89,27 @@ func ownershipDeploymentsForAggregateTest(artifact ArtifactRef, sha SHA256Hex) [
 			summaries = append(summaries, RuntimeBindingSummary{Runtime: binding.Runtime, BindingIdentity: binding.Runtime + ":" + binding.Name, Status: "verification_required", EvidenceRef: &artifact})
 		}
 		out = append(out, OwnershipDeploymentRecord{DeploymentID: id, BeforeObservation: before, AfterObservation: after, RuntimeBindingSummaries: summaries, OriginalPreimage: before, InstalledPostimage: &after, BackupEntryRef: &artifact, VerificationRef: nil, CleanupEvidenceRef: &artifact, RollbackAuthorityRefs: []ArtifactRef{artifact}, Result: "verification_required"})
+	}
+	return out
+}
+
+func aggregateDeploymentIDsForTest() []string {
+	ids := make([]string, 10)
+	for i := range ids {
+		ids[i] = string(SHA256([]byte("contract-test-deployment-" + string(rune('a'+i)))))
+	}
+	return ids
+}
+
+func aggregateRuntimeBindingsForTest() map[string][]RuntimeBinding {
+	out := map[string][]RuntimeBinding{}
+	ids := aggregateDeploymentIDsForTest()
+	for i, id := range ids {
+		name := "skill-" + string(rune('a'+i))
+		out[id] = append(out[id], RuntimeBinding{DeploymentID: id, Runtime: "pi", Root: ".agents/skills", Name: name, Target: "skills/" + name})
+		if i < 5 {
+			out[id] = append(out[id], RuntimeBinding{DeploymentID: id, Runtime: "opencode", Root: ".agents/skills", Name: name, Target: "skills/" + name})
+		}
 	}
 	return out
 }

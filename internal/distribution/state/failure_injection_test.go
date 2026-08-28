@@ -29,7 +29,7 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		},
 		{
 			name: "normal ledger and cleanup durable but ready boundary nonterminal",
-			seed: func(ctx context.Context, t *testing.T, _ *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
+			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
 				op := opID("op-ready")
 				ledgerRef := appendStartedJournalForTest(ctx, t, store, roots, contracts.OperationID(op))
 				ledger, err := store.OpenLedger(ctx, roots)
@@ -38,6 +38,7 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 				}
 				record := ownershipRecord("install-ready", op, "applied_unverified")
 				record.JournalRef = ledgerRef
+				publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &record)
 				if _, err := ledger.Append(ctx, record); err != nil {
 					t.Fatal(err)
 				}
@@ -90,7 +91,7 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		},
 		{
 			name: "ledger recovery required aggregate event",
-			seed: func(ctx context.Context, t *testing.T, _ *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
+			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
 				record := ownershipRecord("install-rec", opID("op-rec"), "recovery_required")
 				record.JournalRef = appendStartedJournalForTest(ctx, t, store, roots, record.OperationID)
 				ledger, err := store.OpenLedger(ctx, roots)
@@ -107,6 +108,7 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 						record.Deployments[i].RuntimeBindingSummaries[j].Status = contracts.RecoveryRequired
 					}
 				}
+				publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &record)
 				if _, err := ledger.Append(ctx, record); err != nil {
 					t.Fatal(err)
 				}

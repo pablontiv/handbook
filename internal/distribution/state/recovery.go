@@ -17,14 +17,6 @@ func (s *store) ClassifyRecovery(ctx context.Context, roots Roots) (contracts.Re
 	if err := validateRoots(ctx, s.fs, roots); err != nil {
 		return contracts.RecoveryStatus{}, err
 	}
-	if ambiguous, ok := s.fs.(interface {
-		AmbiguousDurabilityFailures() []contracts.AbsolutePath
-	}); ok {
-		failures := ambiguous.AmbiguousDurabilityFailures()
-		if len(failures) > 0 {
-			return recoveryRequired("ambiguous_durability_failure", relativeStateRef(roots, failures[0])), nil
-		}
-	}
 	records, err := readLedger(ctx, s.fs, roots)
 	if err != nil {
 		return recoveryRequired("corrupt_ledger", relativeStateRef(roots, roots.LedgerPath())), nil
@@ -45,6 +37,9 @@ func (s *store) ClassifyRecovery(ctx context.Context, roots Roots) (contracts.Re
 			return recoveryRequired("unknown_run_evidence", "runs"), nil
 		}
 		return contracts.RecoveryStatus{}, err
+	}
+	if code, ref := validateLedgerJournalCorrelation(roots, records, journals); code != "" {
+		return recoveryRequired(code, ref), nil
 	}
 	for _, path := range journals {
 		entries, err := readJournalEntries(ctx, s.fs, path)
@@ -69,6 +64,9 @@ func (s *store) ClassifyRecovery(ctx context.Context, roots Roots) (contracts.Re
 		default:
 			return recoveryRequired("interrupted_journal", relativeStateRef(roots, path)), nil
 		}
+	}
+	if code, ref := validateClosedRunLayout(ctx, s.fs, roots, records, journals); code != "" {
+		return recoveryRequired(code, ref), nil
 	}
 	return contracts.RecoveryStatus{Status: contracts.RecoveryClean, Evidence: []contracts.EvidenceRef{}}, nil
 }
@@ -112,6 +110,105 @@ func journalFiles(ctx context.Context, adapter filesystem.Adapter, roots Roots) 
 		journals = append(journals, journal)
 	}
 	return journals, nil
+}
+
+func validateLedgerJournalCorrelation(roots Roots, records []contracts.OwnershipRecord, journals []contracts.AbsolutePath) (string, string) {
+	journalOps := map[string]bool{}
+	for _, journal := range journals {
+		rel := relativeStateRef(roots, journal)
+		parts := strings.Split(rel, "/")
+		if len(parts) == 3 && parts[0] == "runs" && parts[2] == "journal.ndjson" {
+			journalOps[parts[1]] = true
+		}
+	}
+	seenRecordHashes := map[contracts.SHA256Hex]bool{}
+	seenJournalRefs := map[string]bool{}
+	for _, record := range records {
+		if seenRecordHashes[record.RecordHash] {
+			return "duplicate_ledger_record_hash", relativeStateRef(roots, roots.LedgerPath())
+		}
+		seenRecordHashes[record.RecordHash] = true
+		if !journalOps[string(record.OperationID)] {
+			return "unmatched_ledger_record", relativeStateRef(roots, roots.LedgerPath())
+		}
+		key := record.JournalRef.OperationID + "\x00" + record.JournalRef.Path + "\x00" + string(record.JournalRef.SHA256)
+		if seenJournalRefs[key] {
+			return "duplicate_ledger_journal_ref", relativeStateRef(roots, roots.LedgerPath())
+		}
+		seenJournalRefs[key] = true
+	}
+	return "", ""
+}
+
+func validateClosedRunLayout(ctx context.Context, adapter filesystem.Adapter, roots Roots, records []contracts.OwnershipRecord, journals []contracts.AbsolutePath) (string, string) {
+	runs := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs"))
+	entries, err := adapter.ListNoFollow(ctx, runs)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", ""
+		}
+		return "run_layout_read_failed", "runs"
+	}
+	allowed := map[string]bool{}
+	for _, journal := range journals {
+		allowed[relativeStateRef(roots, journal)] = true
+	}
+	for _, record := range records {
+		op := string(record.OperationID)
+		allowed[filepath.ToSlash(filepath.Join("runs", op, "journal.ndjson"))] = true
+		allowed[record.PlanRef.Path] = true
+		allowed[record.InventoryRef.Path] = true
+		if record.VerificationRef != nil {
+			allowed[record.VerificationRef.Path] = true
+		}
+		allowed[filepath.ToSlash(filepath.Join("runs", op, "receipt.json"))] = true
+		allowed[filepath.ToSlash(filepath.Join("runs", op, "receipt.json.draft"))] = true
+	}
+	for _, entry := range entries {
+		if entry.Kind != "directory" || contracts.ValidateOperationID(contracts.OperationID(entry.Name)) != nil {
+			return "unknown_run_evidence", "runs"
+		}
+		runEntries, err := adapter.ListNoFollow(ctx, entry.Path)
+		if err != nil {
+			return "run_layout_read_failed", relativeStateRef(roots, entry.Path)
+		}
+		if len(runEntries) == 0 {
+			return "empty_run_evidence", relativeStateRef(roots, entry.Path)
+		}
+		for _, runEntry := range runEntries {
+			rel := relativeStateRef(roots, runEntry.Path)
+			switch runEntry.Kind {
+			case "file":
+				if !allowed[rel] {
+					return "unreferenced_run_artifact", rel
+				}
+			case "directory":
+				if runEntry.Name != "verification" {
+					return "unknown_run_evidence", rel
+				}
+				if code, ref := validateVerificationLayout(ctx, adapter, roots, runEntry.Path, allowed); code != "" {
+					return code, ref
+				}
+			default:
+				return "unknown_run_evidence", rel
+			}
+		}
+	}
+	return "", ""
+}
+
+func validateVerificationLayout(ctx context.Context, adapter filesystem.Adapter, roots Roots, dir contracts.AbsolutePath, allowed map[string]bool) (string, string) {
+	entries, err := adapter.ListNoFollow(ctx, dir)
+	if err != nil {
+		return "run_layout_read_failed", relativeStateRef(roots, dir)
+	}
+	for _, entry := range entries {
+		rel := relativeStateRef(roots, entry.Path)
+		if entry.Kind != "file" || !allowed[rel] {
+			return "unreferenced_run_artifact", rel
+		}
+	}
+	return "", ""
 }
 
 func collectJournalFiles(ctx context.Context, adapter filesystem.Adapter, dir contracts.AbsolutePath, out *[]contracts.AbsolutePath) error {
@@ -161,6 +258,14 @@ func validateCommittedRecoveryDAG(ctx context.Context, adapter filesystem.Adapte
 	}
 	if contracts.SHA256(receiptBytes) != last.ReceiptSHA256 {
 		return "terminal_receipt_digest_mismatch"
+	}
+	draftPath := contracts.AbsolutePath(filepath.Join(runDir, "receipt.json.draft"))
+	if draftBytes, err := adapter.ReadFile(ctx, draftPath); err == nil {
+		if !bytes.Equal(draftBytes, receiptBytes) || contracts.SHA256(draftBytes) != last.ReceiptSHA256 {
+			return "receipt_draft_final_mismatch"
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "receipt_draft_read_failed"
 	}
 	if err := contracts.ValidateSchema(contracts.SchemaReceipt, receiptBytes); err != nil {
 		return "receipt_invalid"

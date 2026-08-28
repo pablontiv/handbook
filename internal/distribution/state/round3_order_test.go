@@ -32,6 +32,7 @@ func TestRound3PublishReceiptUsesDistinctPrefixesAndNormativeDurabilityOrder(t *
 	}
 	record := ownershipRecord("install", string(op), "applied_unverified")
 	record.JournalRef = ledgerPrefix
+	publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &record)
 	ledgerHash, err := ledger.Append(ctx, record)
 	if err != nil {
 		t.Fatalf("Append(ledger) error = %v", err)
@@ -48,9 +49,7 @@ func TestRound3PublishReceiptUsesDistinctPrefixesAndNormativeDurabilityOrder(t *
 		t.Fatalf("ready_journal_ref must bind a later prefix than ledger journal_ref")
 	}
 
-	receipt := receiptForTest(op)
-	receipt.ReadyJournalRef = ready
-	receipt.LedgerRecordHash = ledgerHash
+	receipt := receiptFromRecordForStateTest(record, ledgerHash, ready)
 	ref, err := store.PublishReceipt(ctx, roots, op, receipt)
 	if err != nil {
 		t.Fatalf("PublishReceipt() error = %v", err)

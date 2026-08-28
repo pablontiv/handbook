@@ -42,6 +42,9 @@ func (s *store) PublishReceipt(ctx context.Context, roots Roots, op contracts.Op
 	if err := contracts.ValidateReceipt(receipt); err != nil {
 		return contracts.ArtifactRef{}, err
 	}
+	if err := validateReceiptContext(ctx, s.fs, roots, receipt); err != nil {
+		return contracts.ArtifactRef{}, err
+	}
 	if err := validateReceiptMatchesLedgerAggregate(receipt, ledgerRecord); err != nil {
 		return contracts.ArtifactRef{}, err
 	}

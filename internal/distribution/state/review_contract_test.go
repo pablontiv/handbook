@@ -167,6 +167,7 @@ func TestPublishReceiptRequiresReadyLedgerAndPublishesThroughTerminalProtocol(t 
 	}
 	record := ownershipRecord("install", string(op), "applied_unverified")
 	record.JournalRef = ledgerRef
+	publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &record)
 	ledgerHash, err := ledger.Append(ctx, record)
 	if err != nil {
 		t.Fatal(err)
@@ -178,8 +179,7 @@ func TestPublishReceiptRequiresReadyLedgerAndPublishesThroughTerminalProtocol(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt.ReadyJournalRef = ready
-	receipt.LedgerRecordHash = ledgerHash
+	receipt = receiptFromRecordForStateTest(record, ledgerHash, ready)
 	ref, err := store.PublishReceipt(ctx, roots, op, receipt)
 	if err != nil {
 		t.Fatalf("PublishReceipt() error = %v", err)

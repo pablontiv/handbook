@@ -157,7 +157,7 @@ func receiptFixture(t *testing.T) contracts.Receipt {
 func exactAggregateOwnershipFixture(t *testing.T) contracts.OwnershipRecord {
 	t.Helper()
 	record := ownershipRecordFixture(t)
-	record.DeploymentIDs = contracts.V1AggregateDeploymentIDs()
+	record.DeploymentIDs = round3AggregateDeploymentIDs()
 	record.Deployments = exactOwnershipDeployments(record.PlanRef)
 	return record
 }
@@ -170,8 +170,8 @@ func exactAggregateReceiptFixture(t *testing.T) contracts.Receipt {
 }
 
 func exactOwnershipDeployments(artifact contracts.ArtifactRef) []contracts.OwnershipDeploymentRecord {
-	ids := contracts.V1AggregateDeploymentIDs()
-	bindings := contracts.V1AggregateRuntimeBindings()
+	ids := round3AggregateDeploymentIDs()
+	bindings := round3AggregateRuntimeBindings()
 	out := make([]contracts.OwnershipDeploymentRecord, 0, len(ids))
 	for _, id := range ids {
 		before := contracts.DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/" + id, GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "missing"}
@@ -183,6 +183,27 @@ func exactOwnershipDeployments(artifact contracts.ArtifactRef) []contracts.Owner
 			}
 		}
 		out = append(out, deployment)
+	}
+	return out
+}
+
+func round3AggregateDeploymentIDs() []string {
+	ids := make([]string, 10)
+	for i := range ids {
+		ids[i] = string(contracts.SHA256([]byte("round3-contract-deployment-" + string(rune('a'+i)))))
+	}
+	return ids
+}
+
+func round3AggregateRuntimeBindings() []contracts.RuntimeBinding {
+	ids := round3AggregateDeploymentIDs()
+	out := make([]contracts.RuntimeBinding, 0, 15)
+	for i, id := range ids {
+		name := "skill-" + string(rune('a'+i))
+		out = append(out, contracts.RuntimeBinding{DeploymentID: id, Runtime: "pi", Root: ".agents/skills", Name: name, Target: "skills/" + name})
+		if i < 5 {
+			out = append(out, contracts.RuntimeBinding{DeploymentID: id, Runtime: "opencode", Root: ".agents/skills", Name: name, Target: "skills/" + name})
+		}
 	}
 	return out
 }

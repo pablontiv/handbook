@@ -23,7 +23,7 @@ func TestOwnershipRecordRequiresAggregateOwnedEvidenceFields(t *testing.T) {
 		JournalRef:             journal,
 		BackupSetRef:           &contracts.BackupSetRef{BackupSetID: "backup-round2", SHA256: sha},
 		VerificationRef:        nil,
-		DeploymentIDs:          contracts.V1AggregateDeploymentIDs(),
+		DeploymentIDs:          round3AggregateDeploymentIDs(),
 		Deployments:            deployments,
 		AggregateEvent:         "applied_unverified",
 		OperationResult:        "verification_required",

@@ -154,41 +154,22 @@ func validateReceiptAggregateAuthority(results []OperationDeploymentResult) erro
 	if len(results) != v1DeploymentCount {
 		return fmt.Errorf("receipt deployment result count = %d, want %d", len(results), v1DeploymentCount)
 	}
-	expectedIDs := map[string]bool{}
-	for _, id := range v1AggregateDeploymentIDs {
-		expectedIDs[id] = true
-	}
-	expectedBindings := expectedV1BindingSummariesByDeployment()
+	ids := make([]string, 0, len(results))
 	seenIDs := map[string]bool{}
-	bindingCount := 0
 	for _, result := range results {
-		if !expectedIDs[result.DeploymentID] {
-			return fmt.Errorf("unexpected deployment result %s", result.DeploymentID)
+		if !sha256Pattern.MatchString(result.DeploymentID) {
+			return fmt.Errorf("deployment result deployment_id must be lower-case hex SHA-256")
 		}
 		if seenIDs[result.DeploymentID] {
 			return fmt.Errorf("duplicate deployment result")
 		}
 		seenIDs[result.DeploymentID] = true
-		want := expectedBindings[result.DeploymentID]
-		if len(result.RuntimeBindingSummaries) != len(want) {
-			return fmt.Errorf("runtime binding count for deployment %s = %d, want %d", result.DeploymentID, len(result.RuntimeBindingSummaries), len(want))
-		}
-		for i, binding := range result.RuntimeBindingSummaries {
-			wantBinding := want[i]
-			wantIdentity := wantBinding.Runtime + ":" + wantBinding.Name
-			if binding.Runtime != wantBinding.Runtime || binding.BindingIdentity != wantIdentity {
-				return fmt.Errorf("runtime binding summary %s[%d] = %s/%s, want %s/%s", result.DeploymentID, i, binding.Runtime, binding.BindingIdentity, wantBinding.Runtime, wantIdentity)
-			}
-			bindingCount++
-		}
+		ids = append(ids, result.DeploymentID)
 	}
-	if len(seenIDs) != v1DeploymentCount {
-		return fmt.Errorf("receipt deployment result set is incomplete")
+	if err := validateDeploymentIDArray(ids); err != nil {
+		return err
 	}
-	if bindingCount != v1RuntimeBindingCount {
-		return fmt.Errorf("receipt runtime binding count = %d, want %d", bindingCount, v1RuntimeBindingCount)
-	}
-	return nil
+	return validateReceiptAggregateBindingSummaries(results)
 }
 
 func validateOperationDeploymentResult(result OperationDeploymentResult, receipt Receipt) error {

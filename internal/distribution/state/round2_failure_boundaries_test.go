@@ -69,6 +69,7 @@ func TestTask6DurabilityBoundaryFailureInjection(t *testing.T) {
 				}
 				record := ownershipRecord("install-ledger", op, "applied_unverified")
 				record.JournalRef = ledgerRef
+				publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &record)
 				_, err = ledger.Append(ctx, record)
 				return err
 			},
@@ -94,7 +95,7 @@ func TestTask6DurabilityBoundaryFailureInjection(t *testing.T) {
 			name: "receipt draft written but error",
 			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) error {
 				op := contracts.OperationID(opID("round2-draft-fail"))
-				receipt := prepareReceiptProtocol(ctx, t, store, roots, op)
+				receipt := prepareReceiptProtocol(ctx, t, adapter, store, roots, op)
 				draftPath := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs", string(op), "receipt.json.draft"))
 				adapter.SetWriteFailure("write-no-replace", draftPath, filesystem.FailAfterWrite, ambiguous)
 				_, err := store.PublishReceipt(ctx, roots, op, receipt)
@@ -105,7 +106,7 @@ func TestTask6DurabilityBoundaryFailureInjection(t *testing.T) {
 			name: "terminal append written but error",
 			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) error {
 				op := contracts.OperationID(opID("round2-terminal-fail"))
-				receipt := prepareReceiptProtocol(ctx, t, store, roots, op)
+				receipt := prepareReceiptProtocol(ctx, t, adapter, store, roots, op)
 				journalPath := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs", string(op), "journal.ndjson"))
 				adapter.SetWriteFailure("append", journalPath, filesystem.FailAfterWrite, ambiguous)
 				_, err := store.PublishReceipt(ctx, roots, op, receipt)
@@ -116,7 +117,7 @@ func TestTask6DurabilityBoundaryFailureInjection(t *testing.T) {
 			name: "final no-replace receipt publication written but error",
 			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) error {
 				op := contracts.OperationID(opID("round2-final-fail"))
-				receipt := prepareReceiptProtocol(ctx, t, store, roots, op)
+				receipt := prepareReceiptProtocol(ctx, t, adapter, store, roots, op)
 				finalPath := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs", string(op), "receipt.json"))
 				adapter.SetWriteFailure("write-no-replace", finalPath, filesystem.FailAfterWrite, ambiguous)
 				_, err := store.PublishReceipt(ctx, roots, op, receipt)
@@ -127,7 +128,7 @@ func TestTask6DurabilityBoundaryFailureInjection(t *testing.T) {
 			name: "run directory sync after receipt publication error",
 			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) error {
 				op := contracts.OperationID(opID("round2-run-sync-fail"))
-				receipt := prepareReceiptProtocol(ctx, t, store, roots, op)
+				receipt := prepareReceiptProtocol(ctx, t, adapter, store, roots, op)
 				runDir := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs", string(op)))
 				adapter.SetWriteFailure("sync-dir", runDir, filesystem.FailAfterWrite, ambiguous)
 				_, err := store.PublishReceipt(ctx, roots, op, receipt)
@@ -142,7 +143,8 @@ func TestTask6DurabilityBoundaryFailureInjection(t *testing.T) {
 			if err := tc.seed(ctx, t, adapter, store, roots); !errors.Is(err, ambiguous) {
 				t.Fatalf("seed error = %v, want ambiguous injected failure", err)
 			}
-			status, err := store.ClassifyRecovery(ctx, roots)
+			restartedStore := state.NewStore(adapter.CrashClone())
+			status, err := restartedStore.ClassifyRecovery(ctx, roots)
 			if err != nil {
 				t.Fatalf("ClassifyRecovery() error = %v", err)
 			}

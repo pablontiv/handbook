@@ -306,7 +306,7 @@ func validateObservation(observation DeploymentObservation, allowZero bool) erro
 }
 
 func validateDeploymentCardinality(ids []string, deployments []OwnershipDeploymentRecord) error {
-	if err := validateExactDeploymentIDArray(ids); err != nil {
+	if err := validateDeploymentIDArray(ids); err != nil {
 		return err
 	}
 	if len(deployments) != v1DeploymentCount {
@@ -314,18 +314,12 @@ func validateDeploymentCardinality(ids []string, deployments []OwnershipDeployme
 	}
 	seenIDs := map[string]bool{}
 	for _, id := range ids {
-		if id == "" {
-			return fmt.Errorf("deployment_ids must not contain empty values")
-		}
-		if seenIDs[id] {
-			return fmt.Errorf("duplicate deployment_id")
-		}
 		seenIDs[id] = true
 	}
 	seenDeployments := map[string]bool{}
 	for _, deployment := range deployments {
-		if deployment.DeploymentID == "" {
-			return fmt.Errorf("deployment record requires deployment_id")
+		if !sha256Pattern.MatchString(deployment.DeploymentID) {
+			return fmt.Errorf("deployment record deployment_id must be lower-case hex SHA-256")
 		}
 		if seenDeployments[deployment.DeploymentID] {
 			return fmt.Errorf("duplicate deployment identity")
@@ -342,33 +336,7 @@ func validateDeploymentCardinality(ids []string, deployments []OwnershipDeployme
 }
 
 func validateOwnershipRuntimeBindingAuthority(deployments []OwnershipDeploymentRecord) error {
-	expected := expectedV1BindingSummariesByDeployment()
-	count := 0
-	seenDeployments := map[string]bool{}
-	for _, deployment := range deployments {
-		seenDeployments[deployment.DeploymentID] = true
-		want := expected[deployment.DeploymentID]
-		if len(deployment.RuntimeBindingSummaries) != len(want) {
-			return fmt.Errorf("runtime binding count for deployment %s = %d, want %d", deployment.DeploymentID, len(deployment.RuntimeBindingSummaries), len(want))
-		}
-		for i, binding := range deployment.RuntimeBindingSummaries {
-			wantBinding := want[i]
-			wantIdentity := wantBinding.Runtime + ":" + wantBinding.Name
-			if binding.Runtime != wantBinding.Runtime || binding.BindingIdentity != wantIdentity {
-				return fmt.Errorf("runtime binding summary %s[%d] = %s/%s, want %s/%s", deployment.DeploymentID, i, binding.Runtime, binding.BindingIdentity, wantBinding.Runtime, wantIdentity)
-			}
-			count++
-		}
-	}
-	for _, id := range v1AggregateDeploymentIDs {
-		if !seenDeployments[id] {
-			return fmt.Errorf("missing deployment %s", id)
-		}
-	}
-	if count != v1RuntimeBindingCount {
-		return fmt.Errorf("aggregate runtime binding count = %d, want %d", count, v1RuntimeBindingCount)
-	}
-	return nil
+	return validateAggregateBindingSummaries(deployments)
 }
 
 func allowedDeploymentResult(operationResult, result string) bool {

@@ -51,6 +51,9 @@ func (l *ledger) Append(ctx context.Context, record contracts.OwnershipRecord) (
 	if err := contracts.ValidateOwnershipRecord(record); err != nil {
 		return "", err
 	}
+	if err := validateOwnershipRecordContext(ctx, l.fs, l.roots, record); err != nil {
+		return "", err
+	}
 	if err := l.validateCurrentJournalPrefix(ctx, record.JournalRef); err != nil {
 		return "", err
 	}
@@ -140,6 +143,9 @@ func readLedger(ctx context.Context, adapter filesystem.Adapter, roots Roots) ([
 			return nil, err
 		}
 		if err := contracts.ValidateOwnershipRecord(record); err != nil {
+			return nil, err
+		}
+		if err := validateOwnershipRecordContext(ctx, adapter, roots, record); err != nil {
 			return nil, err
 		}
 		if record.RecordHash == "" {

@@ -212,12 +212,14 @@ func TestLedgerAppendCanonicalHashChainRejectsPartialAndMismatch(t *testing.T) {
 
 	firstRecord := ownershipRecord("install-1", opID("op-1"), "applied_unverified")
 	firstRecord.JournalRef = appendStartedJournalForTest(ctx, t, store, roots, firstRecord.OperationID)
+	publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &firstRecord)
 	firstHash, err := ledger.Append(ctx, firstRecord)
 	if err != nil {
 		t.Fatalf("Append(first) error = %v", err)
 	}
 	secondRecord := ownershipRecord("install-1", opID("op-2"), "restored_unverified")
 	secondRecord.JournalRef = appendStartedJournalForTest(ctx, t, store, roots, secondRecord.OperationID)
+	publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &secondRecord)
 	secondHash, err := ledger.Append(ctx, secondRecord)
 	if err != nil {
 		t.Fatalf("Append(second) error = %v", err)
@@ -323,18 +325,18 @@ func TestRunArtifactAndReceiptPublication(t *testing.T) {
 	roots := tempRoots(t)
 	op := contracts.OperationID(opID("op-artifacts"))
 
-	ref, err := store.PublishRunArtifact(ctx, roots, op, "plan.json", []byte("{\"schema\":\"example\"}"))
+	ref, err := store.PublishRunArtifact(ctx, roots, op, "example.json", []byte("{\"schema\":\"example\"}"))
 	if err != nil {
 		t.Fatalf("PublishRunArtifact() error = %v", err)
 	}
-	if ref.Path != "runs/"+string(op)+"/plan.json" || ref.SHA256 != contracts.SHA256([]byte("{\"schema\":\"example\"}")) || ref.Bytes != strconv.Itoa(len("{\"schema\":\"example\"}")) {
+	if ref.Path != "runs/"+string(op)+"/example.json" || ref.SHA256 != contracts.SHA256([]byte("{\"schema\":\"example\"}")) || ref.Bytes != strconv.Itoa(len("{\"schema\":\"example\"}")) {
 		t.Fatalf("artifact ref = %#v", ref)
 	}
 	if _, err := store.PublishRunArtifact(ctx, roots, op, "../escape", []byte("x")); err == nil {
 		t.Fatalf("PublishRunArtifact accepted escaping name")
 	}
 
-	receipt := prepareReceiptProtocol(ctx, t, store, roots, op)
+	receipt := prepareReceiptProtocol(ctx, t, adapter, store, roots, op)
 	receiptRef, err := store.PublishReceipt(ctx, roots, op, receipt)
 	if err != nil {
 		t.Fatalf("PublishReceipt() error = %v", err)
@@ -428,7 +430,7 @@ func ownershipRecord(installationID, operationID, event string) contracts.Owners
 		RecordID:               "record-" + operationID,
 		OperationID:            contracts.OperationID(operationID),
 		InstallationID:         contracts.InstallationID(installationID),
-		DeploymentIDs:          contracts.V1AggregateDeploymentIDs(),
+		DeploymentIDs:          stateAggregateDeploymentIDsForTest(),
 		Deployments:            deployments,
 		PreviousHash:           nil,
 		PlanRef:                artifact,
@@ -460,7 +462,7 @@ func ownershipRecord(installationID, operationID, event string) contracts.Owners
 		failure := "state_or_io_failure_preterminal"
 		record.OperationResult = "rolled_back"
 		record.FailureCode = &failure
-		record.CompensatingPriorState = &contracts.CompensatingPriorState{AggregateEvent: "applied_unverified", DeploymentIDs: contracts.V1AggregateDeploymentIDs(), LedgerRecordHash: sha}
+		record.CompensatingPriorState = &contracts.CompensatingPriorState{AggregateEvent: "applied_unverified", DeploymentIDs: stateAggregateDeploymentIDsForTest(), LedgerRecordHash: sha}
 		for i := range record.Deployments {
 			record.Deployments[i].Result = "rolled_back"
 		}
@@ -481,7 +483,7 @@ func appendStartedJournalForTest(ctx context.Context, t *testing.T, store state.
 	return ref
 }
 
-func prepareReceiptProtocol(ctx context.Context, t *testing.T, store state.Store, roots state.Roots, op contracts.OperationID) contracts.Receipt {
+func prepareReceiptProtocol(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots, op contracts.OperationID) contracts.Receipt {
 	t.Helper()
 	journal, err := store.OpenJournal(ctx, roots, op, contracts.CommandName("apply"))
 	if err != nil {
@@ -497,6 +499,7 @@ func prepareReceiptProtocol(ctx context.Context, t *testing.T, store state.Store
 	}
 	record := ownershipRecord("install", string(op), "applied_unverified")
 	record.JournalRef = ledgerRef
+	publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &record)
 	ledgerHash, err := ledger.Append(ctx, record)
 	if err != nil {
 		t.Fatal(err)
@@ -508,10 +511,78 @@ func prepareReceiptProtocol(ctx context.Context, t *testing.T, store state.Store
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt := receiptForTest(op)
-	receipt.ReadyJournalRef = ready
-	receipt.LedgerRecordHash = ledgerHash
-	return receipt
+	return receiptFromRecordForStateTest(record, ledgerHash, ready)
+}
+
+func receiptFromRecordForStateTest(record contracts.OwnershipRecord, ledgerHash contracts.SHA256Hex, ready contracts.JournalRef) contracts.Receipt {
+	approval := record.PlanRef.SHA256
+	results := make([]contracts.OperationDeploymentResult, 0, len(record.Deployments))
+	for _, deployment := range record.Deployments {
+		before := deployment.BeforeObservation
+		after := deployment.AfterObservation
+		results = append(results, contracts.OperationDeploymentResult{DeploymentID: deployment.DeploymentID, Result: deployment.Result, BeforeObservation: &before, AfterObservation: &after, RuntimeBindingSummaries: deployment.RuntimeBindingSummaries, BackupEntryRef: deployment.BackupEntryRef, VerificationRef: deployment.VerificationRef, CleanupEvidenceRef: deployment.CleanupEvidenceRef, RollbackAuthorityRefs: deployment.RollbackAuthorityRefs})
+	}
+	return contracts.Receipt{Schema: contracts.SchemaReceipt, ReceiptID: "receipt-" + string(record.OperationID), OperationID: string(record.OperationID), Command: "apply", ApprovalDigest: &approval, LedgerRecordHash: ledgerHash, ReadyJournalRef: ready, PlanRef: &record.PlanRef, InventoryRef: &record.InventoryRef, BackupSetRef: record.BackupSetRef, VerificationRef: record.VerificationRef, Preconditions: []contracts.Precondition{}, DeploymentResults: results, RollbackResults: []contracts.OperationDeploymentResult{}, CleanupEvidenceRef: results[0].CleanupEvidenceRef, RequiredVerificationStatus: "verification_required", OperationResult: record.OperationResult}
+}
+
+func publishAuthorityArtifactsForStateTest(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots, record *contracts.OwnershipRecord) {
+	t.Helper()
+	ids := append([]string(nil), record.DeploymentIDs...)
+	deployments := make([]contracts.Deployment, 0, len(ids))
+	bindingsByID := map[string][]contracts.RuntimeBinding{}
+	for _, binding := range stateAggregateRuntimeBindingsForTest() {
+		bindingsByID[binding.DeploymentID] = append(bindingsByID[binding.DeploymentID], binding)
+	}
+	for i, id := range ids {
+		deployments = append(deployments, contracts.Deployment{DeploymentID: id, SkillID: "skill-" + string(rune('a'+i)), SourcePath: "/repo/skills/" + id, SourceIdentity: "source-" + id, GovernedPath: "/runtime/" + id, GovernedSlotIdentity: "slot-" + id, LinkStrategy: "symlink", RuntimeBindings: bindingsByID[id]})
+	}
+	inventory := contracts.Inventory{Schema: contracts.SchemaInventory, ManifestDigest: contracts.SHA256([]byte("manifest")), Sources: []contracts.SourceObservation{}, Deployments: deployments, RuntimeBindings: flattenStateRuntimeBindings(deployments), Ownership: []contracts.OwnershipSnapshot{}, Backups: []contracts.BackupSetSnapshot{}, Blockers: []contracts.Blocker{}}
+	inventoryBytes, err := contracts.CanonicalBytes(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventoryRef, err := store.PublishRunArtifact(ctx, roots, record.OperationID, "inventory.json", inventoryBytes)
+	if err != nil && !errors.Is(err, filesystem.ErrDestinationExists) {
+		t.Fatal(err)
+	}
+	if errors.Is(err, filesystem.ErrDestinationExists) {
+		inventoryRef = contracts.ArtifactRef{Path: "runs/" + string(record.OperationID) + "/inventory.json", SHA256: contracts.SHA256(inventoryBytes), Bytes: fmt.Sprintf("%d", len(inventoryBytes))}
+	}
+	payload := contracts.PlanPayload{Inventory: inventory, InventoryDigest: contracts.SHA256(inventoryBytes), Intent: contracts.IntentInstall, Selector: nil, Deployments: deployments, Blockers: []contracts.Blocker{}, Preconditions: []contracts.Precondition{}, BackupRequirement: contracts.BackupRequirement{Required: true, Reason: "install requires backup set"}, VerificationRequirements: []contracts.VerificationRequirement{}, RollbackStrategy: "rollback_on_preterminal_failure", LineageTransition: contracts.LineageTransition{From: "absent", To: "applied_unverified"}}
+	approval, err := contracts.PayloadDigest(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planBytes, err := contracts.CanonicalBytes(contracts.PlanEnvelope{Schema: contracts.SchemaPlan, ApprovalDigest: approval, Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planRef, err := store.PublishRunArtifact(ctx, roots, record.OperationID, "plan.json", planBytes)
+	if err != nil && !errors.Is(err, filesystem.ErrDestinationExists) {
+		t.Fatal(err)
+	}
+	if errors.Is(err, filesystem.ErrDestinationExists) {
+		planRef = contracts.ArtifactRef{Path: "runs/" + string(record.OperationID) + "/plan.json", SHA256: contracts.SHA256(planBytes), Bytes: fmt.Sprintf("%d", len(planBytes))}
+	}
+	record.PlanRef = planRef
+	record.InventoryRef = inventoryRef
+	if record.BackupSetRef != nil {
+		manifest := contracts.BackupManifest{Schema: contracts.SchemaBackupManifest, BackupSetID: record.BackupSetRef.BackupSetID, InstallationID: string(record.InstallationID), Operation: "apply", Entries: []contracts.BackupEntry{}, Verified: true}
+		manifestBytes, err := contracts.CanonicalBytes(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		adapter.PutFile(contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "backups", record.BackupSetRef.BackupSetID, "manifest.json")), manifestBytes)
+		record.BackupSetRef.SHA256 = contracts.SHA256(manifestBytes)
+	}
+}
+
+func flattenStateRuntimeBindings(deployments []contracts.Deployment) []contracts.RuntimeBinding {
+	var out []contracts.RuntimeBinding
+	for _, deployment := range deployments {
+		out = append(out, deployment.RuntimeBindings...)
+	}
+	return out
 }
 
 func receiptForTest(op contracts.OperationID) contracts.Receipt {
@@ -542,10 +613,10 @@ func receiptForTest(op contracts.OperationID) contracts.Receipt {
 
 func ownershipDeploymentsForStateTest(artifact contracts.ArtifactRef, sha contracts.SHA256Hex) []contracts.OwnershipDeploymentRecord {
 	bindings := map[string][]contracts.RuntimeBinding{}
-	for _, binding := range contracts.V1AggregateRuntimeBindings() {
+	for _, binding := range stateAggregateRuntimeBindingsForTest() {
 		bindings[binding.DeploymentID] = append(bindings[binding.DeploymentID], binding)
 	}
-	ids := contracts.V1AggregateDeploymentIDs()
+	ids := stateAggregateDeploymentIDsForTest()
 	out := make([]contracts.OwnershipDeploymentRecord, 0, len(ids))
 	for _, id := range ids {
 		before := contracts.DeploymentObservation{ObservedType: "typed_missing", Path: "/runtime/" + id, GovernedSlotIdentity: "slot-" + id, ManagedObjectIdentity: "missing", AttributesFingerprint: "attrs-before"}
@@ -555,6 +626,27 @@ func ownershipDeploymentsForStateTest(artifact contracts.ArtifactRef, sha contra
 			summaries = append(summaries, contracts.RuntimeBindingSummary{Runtime: binding.Runtime, BindingIdentity: binding.Runtime + ":" + binding.Name, Status: "verification_required", EvidenceRef: &artifact})
 		}
 		out = append(out, contracts.OwnershipDeploymentRecord{DeploymentID: id, BeforeObservation: before, AfterObservation: after, RuntimeBindingSummaries: summaries, OriginalPreimage: before, InstalledPostimage: &after, BackupEntryRef: &artifact, VerificationRef: nil, CleanupEvidenceRef: &artifact, RollbackAuthorityRefs: []contracts.ArtifactRef{artifact}, Result: "verification_required"})
+	}
+	return out
+}
+
+func stateAggregateDeploymentIDsForTest() []string {
+	ids := make([]string, 10)
+	for i := range ids {
+		ids[i] = string(contracts.SHA256([]byte("state-test-deployment-" + string(rune('a'+i)))))
+	}
+	return ids
+}
+
+func stateAggregateRuntimeBindingsForTest() []contracts.RuntimeBinding {
+	ids := stateAggregateDeploymentIDsForTest()
+	out := make([]contracts.RuntimeBinding, 0, 15)
+	for i, id := range ids {
+		name := "skill-" + string(rune('a'+i))
+		out = append(out, contracts.RuntimeBinding{DeploymentID: id, Runtime: "pi", Root: ".agents/skills", Name: name, Target: "skills/" + name})
+		if i < 5 {
+			out = append(out, contracts.RuntimeBinding{DeploymentID: id, Runtime: "opencode", Root: ".agents/skills", Name: name, Target: "skills/" + name})
+		}
 	}
 	return out
 }
