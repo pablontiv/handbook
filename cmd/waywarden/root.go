@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
@@ -16,6 +17,10 @@ func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 	cmd := newRootCommand(stdout, stderr)
 	cmd.SetArgs(args)
 	if err := cmd.Execute(); err != nil {
+		var exitErr exitError
+		if errors.As(err, &exitErr) {
+			return exitErr.code
+		}
 		return cli.ExitUsage
 	}
 	return cli.ExitOK
@@ -45,7 +50,7 @@ func newRootCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd.SetErr(stderr)
 	cmd.PersistentFlags().StringVar(&outputFormat, "output", contracts.OutputHuman, "output format (human|json)")
 	cmd.PersistentFlags().BoolVar(&versionFlag, "version", false, "print version")
-	cmd.AddCommand(newStubCommand("inventory"), newStubCommand("plan"), newStubCommand("apply"), newStubCommand("verify"), newStubCommand("uninstall"), newStubCommand("restore"))
+	cmd.AddCommand(newInventoryCommand(stdout, stderr, &outputFormat), newStubCommand("plan"), newStubCommand("apply"), newStubCommand("verify"), newStubCommand("uninstall"), newStubCommand("restore"))
 	return cmd
 }
 
