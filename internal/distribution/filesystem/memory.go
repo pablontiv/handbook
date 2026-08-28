@@ -17,9 +17,16 @@ type MemoryAdapter struct {
 	env       PlatformEnv
 	files     map[string][]byte
 	trees     map[string]TreeSnapshot
+	locks     map[string]memoryLockState
 	shared    []string
 	exclusive []string
+	released  []string
 	writeLog  []string
+}
+
+type memoryLockState struct {
+	shared    int
+	exclusive int
 }
 
 func NewMemoryAdapter() *MemoryAdapter {
@@ -28,6 +35,7 @@ func NewMemoryAdapter() *MemoryAdapter {
 		env:      PlatformEnv{Home: "/memory/home", XDGStateHome: "/memory/state", LocalAppData: "C:/memory/local"},
 		files:    map[string][]byte{},
 		trees:    map[string]TreeSnapshot{},
+		locks:    map[string]memoryLockState{},
 	}
 }
 
@@ -70,10 +78,31 @@ func (m *MemoryAdapter) ExclusiveLockKeys() []string {
 	return append([]string(nil), m.exclusive...)
 }
 
+func (m *MemoryAdapter) ReleaseLockKeys() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.released...)
+}
+
 func (m *MemoryAdapter) WriteLog() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.writeLog...)
+}
+
+func (m *MemoryAdapter) FilePaths() []contracts.AbsolutePath {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	paths := make([]string, 0, len(m.files))
+	for path := range m.files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	out := make([]contracts.AbsolutePath, 0, len(paths))
+	for _, path := range paths {
+		out = append(out, contracts.AbsolutePath(path))
+	}
+	return out
 }
 
 func (m *MemoryAdapter) Platform() string {
@@ -124,15 +153,57 @@ func (m *MemoryAdapter) HashFileByHandle(_ context.Context, path contracts.Absol
 func (m *MemoryAdapter) LockShared(_ context.Context, path contracts.AbsolutePath, _ string) (LockHandle, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.shared = append(m.shared, cleanMemoryPath(string(path)))
-	return &memoryLockHandle{}, nil
+	clean := cleanMemoryPath(string(path))
+	state := m.locks[clean]
+	if state.exclusive > 0 {
+		return nil, ErrLockConflict
+	}
+	state.shared++
+	m.locks[clean] = state
+	m.shared = append(m.shared, clean)
+	return &memoryLockHandle{onClose: func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		state := m.locks[clean]
+		if state.shared > 0 {
+			state.shared--
+		}
+		if state.shared == 0 && state.exclusive == 0 {
+			delete(m.locks, clean)
+		} else {
+			m.locks[clean] = state
+		}
+		m.released = append(m.released, clean)
+		return nil
+	}}, nil
 }
 
 func (m *MemoryAdapter) LockExclusive(_ context.Context, path contracts.AbsolutePath, _ string) (LockHandle, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.exclusive = append(m.exclusive, cleanMemoryPath(string(path)))
-	return &memoryLockHandle{}, nil
+	clean := cleanMemoryPath(string(path))
+	state := m.locks[clean]
+	if state.shared > 0 || state.exclusive > 0 {
+		return nil, ErrLockConflict
+	}
+	state.exclusive++
+	m.locks[clean] = state
+	m.exclusive = append(m.exclusive, clean)
+	return &memoryLockHandle{onClose: func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		state := m.locks[clean]
+		if state.exclusive > 0 {
+			state.exclusive--
+		}
+		if state.shared == 0 && state.exclusive == 0 {
+			delete(m.locks, clean)
+		} else {
+			m.locks[clean] = state
+		}
+		m.released = append(m.released, clean)
+		return nil
+	}}, nil
 }
 
 func (m *MemoryAdapter) AppendFileSync(_ context.Context, path contracts.AbsolutePath, data []byte) error {
@@ -181,14 +252,30 @@ func (m *MemoryAdapter) PublishNoReplace(_ context.Context, destination contract
 }
 
 func (m *MemoryAdapter) OwnerPrivateLockRoot(env PlatformEnv) (contracts.AbsolutePath, error) {
-	base := env.XDGStateHome
-	if base == "" {
-		if env.Home == "" {
-			return "", fmt.Errorf("HOME or XDG_STATE_HOME is required for lock root")
+	m.mu.Lock()
+	platform := m.platform
+	m.mu.Unlock()
+	switch platform {
+	case "windows":
+		if env.LocalAppData == "" {
+			return "", fmt.Errorf("LOCALAPPDATA is required for lock root")
 		}
-		base = filepath.Join(env.Home, ".local", "state")
+		return contracts.AbsolutePath(filepath.Join(env.LocalAppData, "waywarden", "locks")), nil
+	case "darwin":
+		if env.Home == "" {
+			return "", fmt.Errorf("HOME is required for lock root")
+		}
+		return contracts.AbsolutePath(filepath.Join(env.Home, "Library", "Application Support", "waywarden", "locks")), nil
+	default:
+		base := env.XDGStateHome
+		if base == "" {
+			if env.Home == "" {
+				return "", fmt.Errorf("HOME or XDG_STATE_HOME is required for lock root")
+			}
+			base = filepath.Join(env.Home, ".local", "state")
+		}
+		return contracts.AbsolutePath(filepath.Join(base, "waywarden", "locks")), nil
 	}
-	return contracts.AbsolutePath(filepath.Join(base, "waywarden", "locks")), nil
 }
 
 func cleanMemoryPath(path string) string {

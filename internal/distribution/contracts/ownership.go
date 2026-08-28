@@ -3,13 +3,17 @@ package contracts
 type OwnershipRecord struct {
 	Schema          SchemaID       `json:"schema"`
 	RecordID        string         `json:"record_id"`
-	InstallationID  string         `json:"installation_id"`
+	OperationID     OperationID    `json:"operation_id,omitempty"`
+	InstallationID  InstallationID `json:"installation_id"`
+	Sequence        int64          `json:"sequence,omitempty"`
 	PreviousHash    *SHA256Hex     `json:"previous_hash"`
+	RecordHash      SHA256Hex      `json:"record_hash,omitempty"`
 	PlanRef         ArtifactRef    `json:"plan_ref"`
 	InventoryRef    ArtifactRef    `json:"inventory_ref"`
 	JournalRef      JournalRef     `json:"journal_ref"`
 	BackupSetRef    *BackupSetRef  `json:"backup_set_ref"`
 	VerificationRef *ArtifactRef   `json:"verification_ref"`
+	DeploymentIDs   []string       `json:"deployment_ids,omitempty"`
 	Entries         []JournalEntry `json:"entries"`
 	AggregateEvent  string         `json:"aggregate_event"`
 	OperationResult string         `json:"operation_result"`

@@ -19,6 +19,34 @@ const (
 // SHA256Hex is a lower-case hexadecimal SHA-256 digest.
 type SHA256Hex string
 
+// OperationID identifies one mutating or verifying command invocation.
+type OperationID = string
+
+// InstallationID identifies one aggregate installation lineage.
+type InstallationID = string
+
+// BackupSetID identifies one complete backup set.
+type BackupSetID = string
+
+// GovernedSlotIdentity is the canonical slot identity used for slot locks.
+type GovernedSlotIdentity = string
+
+// CommandName is the stable public command name recorded in journals.
+type CommandName = string
+
+const (
+	RecoveryClean    = "clean"
+	RecoveryRequired = "recovery_required"
+)
+
+// RecoveryStatus summarizes whether persisted state is clean or requires
+// explicit operator recovery before further mutation.
+type RecoveryStatus struct {
+	Status   string        `json:"status"`
+	Code     string        `json:"code,omitempty"`
+	Evidence []EvidenceRef `json:"evidence"`
+}
+
 // ArtifactRef references an immutable artifact under a selected state/run root.
 type ArtifactRef struct {
 	Path   string    `json:"path"`
