@@ -78,6 +78,9 @@ func (s service) Inventory(ctx context.Context, options Options) (contracts.Arti
 
 	state, err := snapshotState(ctx, s.adapter, stateRoot, lockRoot)
 	if err != nil {
+		if errors.Is(err, filesystem.ErrUnsupportedCapability) {
+			return contracts.ArtifactResult{}, Error{Code: "runtime_contract_missing", Message: "ownership ledger snapshot is unsupported", Exit: contracts.ExitUnsupported}
+		}
 		blockers = append(blockers, contracts.Blocker{Code: "runtime_contract_missing", Severity: "error", Message: "ownership ledger snapshot is unsupported"})
 		state = stateSnapshot{Ownership: []contracts.OwnershipSnapshot{}, Backups: []contracts.BackupSetSnapshot{}}
 	}

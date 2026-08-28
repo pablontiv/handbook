@@ -20,6 +20,10 @@ type exitError struct {
 
 func (e exitError) Error() string { return fmt.Sprintf("exit %d", e.code) }
 
+var inventoryAdapterFactory = func() filesystem.Adapter {
+	return filesystem.NewLocalAdapter()
+}
+
 func newInventoryCommand(stdout io.Writer, stderr io.Writer, outputFormat *string) *cobra.Command {
 	var out string
 	var manifestPath string
@@ -34,7 +38,7 @@ func newInventoryCommand(stdout io.Writer, stderr io.Writer, outputFormat *strin
 			if *outputFormat == contracts.OutputJSON && out == "-" {
 				return exitError{code: contracts.ExitInvalidInput}
 			}
-			adapter := filesystem.NewLocalAdapter()
+			adapter := inventoryAdapterFactory()
 			if out != "-" {
 				if !filepath.IsAbs(out) {
 					return exitError{code: contracts.ExitInvalidInput}

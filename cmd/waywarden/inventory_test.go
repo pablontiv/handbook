@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"waywarden/internal/distribution/contracts"
+	"waywarden/internal/distribution/filesystem"
 )
 
 func TestInventoryOutStdoutWritesArtifactAndHumanSummaryToStderr(t *testing.T) {
@@ -80,6 +82,21 @@ func TestInventoryRejectsJSONOutputWhenArtifactUsesStdout(t *testing.T) {
 	}
 }
 
+func TestInventoryLocalUnsupportedSnapshotLockExitsThreeAndEmitsNoArtifact(t *testing.T) {
+	fixture := writeInventoryCommandFixtureFiles(t)
+	useInventoryAdapter(t, filesystem.NewLocalAdapter())
+	var stdout, stderr bytes.Buffer
+
+	exitCode := Execute([]string{"inventory", "--manifest", fixture.manifestPath, "--state-root", fixture.stateRoot, "--out", "-"}, &stdout, &stderr)
+
+	if exitCode != contracts.ExitUnsupported {
+		t.Fatalf("exit code = %d, want %d; stderr=%s stdout=%s", exitCode, contracts.ExitUnsupported, stderr.String(), stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
 func TestInventoryRejectsRelativeManifestOverride(t *testing.T) {
 	fixture := writeInventoryCommandFixture(t)
 	var stdout, stderr bytes.Buffer
@@ -135,7 +152,37 @@ func realTempDir(t *testing.T) string {
 	return resolved
 }
 
+type inventoryCommandLockAdapter struct {
+	filesystem.Adapter
+}
+
+func (a inventoryCommandLockAdapter) LockShared(context.Context, contracts.AbsolutePath, string) (filesystem.LockHandle, error) {
+	return inventoryCommandNoopLock{}, nil
+}
+
+func (a inventoryCommandLockAdapter) LockExclusive(context.Context, contracts.AbsolutePath, string) (filesystem.LockHandle, error) {
+	return inventoryCommandNoopLock{}, nil
+}
+
+type inventoryCommandNoopLock struct{}
+
+func (inventoryCommandNoopLock) Close() error { return nil }
+
+func useInventoryAdapter(t *testing.T, adapter filesystem.Adapter) {
+	t.Helper()
+	old := inventoryAdapterFactory
+	inventoryAdapterFactory = func() filesystem.Adapter { return adapter }
+	t.Cleanup(func() { inventoryAdapterFactory = old })
+}
+
 func writeInventoryCommandFixture(t *testing.T) inventoryCommandFixture {
+	t.Helper()
+	fixture := writeInventoryCommandFixtureFiles(t)
+	useInventoryAdapter(t, inventoryCommandLockAdapter{Adapter: filesystem.NewLocalAdapter()})
+	return fixture
+}
+
+func writeInventoryCommandFixtureFiles(t *testing.T) inventoryCommandFixture {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)

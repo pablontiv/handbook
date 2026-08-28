@@ -134,12 +134,12 @@ func (localAdapter) HashFileByHandle(_ context.Context, path contracts.AbsoluteP
 	return hashFile(string(path))
 }
 
-func (localAdapter) LockShared(_ context.Context, path contracts.AbsolutePath, _ string) (LockHandle, error) {
-	return openLockFile(path)
+func (localAdapter) LockShared(context.Context, contracts.AbsolutePath, string) (LockHandle, error) {
+	return nil, ErrUnsupportedCapability
 }
 
-func (localAdapter) LockExclusive(_ context.Context, path contracts.AbsolutePath, _ string) (LockHandle, error) {
-	return openLockFile(path)
+func (localAdapter) LockExclusive(context.Context, contracts.AbsolutePath, string) (LockHandle, error) {
+	return nil, ErrUnsupportedCapability
 }
 
 func (localAdapter) AppendFileSync(_ context.Context, path contracts.AbsolutePath, data []byte) error {
@@ -209,14 +209,6 @@ func (localAdapter) OwnerPrivateLockRoot(env PlatformEnv) (contracts.AbsolutePat
 		}
 		return contracts.AbsolutePath(filepath.Join(base, "waywarden", "locks")), nil
 	}
-}
-
-func openLockFile(path contracts.AbsolutePath) (LockHandle, error) {
-	p := filepath.Clean(string(path))
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return nil, err
-	}
-	return os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o600)
 }
 
 func hashFile(path string) (contracts.SHA256Hex, error) {

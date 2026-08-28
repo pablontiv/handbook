@@ -3,6 +3,8 @@ package inventory_test
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +46,39 @@ func TestInventoryServiceAcquiresOnlySharedLedgerLock(t *testing.T) {
 	}
 	if got := adapter.WriteLog(); len(got) != 0 {
 		t.Fatalf("writes = %v, want inventory to be read-only", got)
+	}
+}
+
+func TestInventoryServiceDoesNotEmitArtifactWhenSharedSnapshotLockUnsupported(t *testing.T) {
+	fixture := writeInventoryServiceFixture(t, []contracts.ManifestSkill{{SkillID: "alpha", SourcePath: "skills/alpha", EntryFiles: []string{"SKILL.md"}}})
+	memory := filesystem.NewMemoryAdapter()
+	memory.SetEnvironment(filesystem.PlatformEnv{Home: fixture.home, XDGStateHome: filepath.Join(fixture.home, ".local", "state"), LocalAppData: filepath.Join(fixture.home, "AppData", "Local")})
+	memory.SetTreeSnapshot(fixture.sourceIdentities["alpha"], filesystem.TreeSnapshot{Root: contracts.AbsolutePath(fixture.sourceIdentities["alpha"]), Entries: []filesystem.TreeEntry{{Path: "SKILL.md", SHA256: contracts.SHA256([]byte("# alpha\n"))}}})
+	adapter := unsupportedSharedLockAdapter{MemoryAdapter: memory}
+	ctx := context.Background()
+	destination := contracts.AbsolutePath("/artifacts/inventory.json")
+	sinkCalled := false
+
+	_, err := inventory.NewService(adapter).Inventory(ctx, inventory.Options{
+		CWD:          fixture.repo,
+		ManifestPath: fixture.manifestPath,
+		StateRoot:    contracts.AbsolutePath(fixture.stateRoot),
+		Destination:  destination,
+		ArtifactSink: func(data []byte) error {
+			sinkCalled = true
+			return nil
+		},
+	})
+
+	var invErr inventory.Error
+	if !errors.As(err, &invErr) || invErr.Exit != contracts.ExitUnsupported {
+		t.Fatalf("Inventory() error = %v, want unsupported inventory error", err)
+	}
+	if sinkCalled {
+		t.Fatalf("artifact sink was called despite unsupported shared snapshot lock")
+	}
+	if _, err := memory.ReadFile(ctx, destination); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("destination read error = %v, want artifact not published", err)
 	}
 }
 
@@ -109,6 +144,14 @@ func TestInventoryServiceRepeatedEvidenceIsByteIdentical(t *testing.T) {
 	if !bytes.Equal(first, second) {
 		t.Fatalf("inventory bytes changed:\nfirst:  %s\nsecond: %s", first, second)
 	}
+}
+
+type unsupportedSharedLockAdapter struct {
+	*filesystem.MemoryAdapter
+}
+
+func (a unsupportedSharedLockAdapter) LockShared(context.Context, contracts.AbsolutePath, string) (filesystem.LockHandle, error) {
+	return nil, filesystem.ErrUnsupportedCapability
 }
 
 func runInventoryForBytes(t *testing.T, adapter *filesystem.MemoryAdapter, fixture inventoryServiceFixture) []byte {
