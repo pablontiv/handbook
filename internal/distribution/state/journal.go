@@ -27,21 +27,20 @@ type journal struct {
 	entries []contracts.JournalEntry
 }
 
-func OpenJournal(ctx context.Context, adapter filesystem.Adapter, roots Roots, op contracts.OperationID, command contracts.CommandName) (Journal, error) {
-	if err := validateRoots(roots); err != nil {
+func (s *store) OpenJournal(ctx context.Context, roots Roots, op contracts.OperationID, command contracts.CommandName) (Journal, error) {
+	if err := validateRoots(ctx, s.fs, roots); err != nil {
 		return nil, err
 	}
-	j := &journal{fs: adapter, roots: roots, op: op, command: command, path: filepath.ToSlash(filepath.Join("runs", string(op), "journal.ndjson"))}
+	if err := contracts.ValidateOperationID(op); err != nil {
+		return nil, err
+	}
+	j := &journal{fs: s.fs, roots: roots, op: op, command: command, path: filepath.ToSlash(filepath.Join("runs", string(op), "journal.ndjson"))}
 	entries, err := j.read(ctx)
 	if err != nil {
 		return nil, err
 	}
 	j.entries = entries
 	return j, nil
-}
-
-func (s *store) OpenJournal(ctx context.Context, roots Roots, op contracts.OperationID, command contracts.CommandName) (Journal, error) {
-	return OpenJournal(ctx, s.fs, roots, op, command)
 }
 
 func (j *journal) Append(ctx context.Context, entry contracts.JournalEntry) (contracts.JournalRef, error) {
@@ -55,7 +54,7 @@ func (j *journal) Append(ctx context.Context, entry contracts.JournalEntry) (con
 	if entry.OperationID != string(j.op) {
 		return contracts.JournalRef{}, fmt.Errorf("journal entry operation_id = %q, want %q", entry.OperationID, j.op)
 	}
-	if err := validateJournalTransition(entries, entry.Boundary); err != nil {
+	if err := validateJournalTransition(entries, entry); err != nil {
 		return contracts.JournalRef{}, err
 	}
 	line, err := contracts.CanonicalBytes(entry)
@@ -111,7 +110,7 @@ func (j *journal) read(ctx context.Context) ([]contracts.JournalEntry, error) {
 		if entry.OperationID != string(j.op) {
 			return nil, fmt.Errorf("journal operation_id mismatch")
 		}
-		if err := validateJournalTransition(entries, entry.Boundary); err != nil {
+		if err := validateJournalTransition(entries, entry); err != nil {
 			return nil, err
 		}
 		entries = append(entries, entry)
@@ -119,7 +118,8 @@ func (j *journal) read(ctx context.Context) ([]contracts.JournalEntry, error) {
 	return entries, nil
 }
 
-func validateJournalTransition(entries []contracts.JournalEntry, next string) error {
+func validateJournalTransition(entries []contracts.JournalEntry, entry contracts.JournalEntry) error {
+	next := entry.Boundary
 	if next == "" {
 		return fmt.Errorf("journal boundary is required")
 	}
@@ -143,6 +143,9 @@ func validateJournalTransition(entries []contracts.JournalEntry, next string) er
 	case "committed":
 		if last != "ready_to_commit" {
 			return fmt.Errorf("committed must follow ready_to_commit")
+		}
+		if entry.ReceiptSHA256 == "" || entry.FinalArtifactPath == "" {
+			return fmt.Errorf("committed journal entry requires receipt digest and final artifact path")
 		}
 	case "rolled_back", "rollback_failed":
 		if last == "committed" {

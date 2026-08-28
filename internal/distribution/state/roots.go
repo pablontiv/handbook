@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"runtime"
 
 	"waywarden/internal/distribution/contracts"
 	"waywarden/internal/distribution/filesystem"
@@ -19,16 +18,19 @@ func (r Roots) LedgerPath() contracts.AbsolutePath {
 	return contracts.AbsolutePath(filepath.Join(string(r.StateRoot), "ownership", "installations.ndjson"))
 }
 
-func ResolveRoots(env filesystem.PlatformEnv, override contracts.AbsolutePath) (Roots, error) {
-	return resolveRoots(runtime.GOOS, env, override, ownerPrivateLockRoot)
-}
-
 func (s *store) ResolveRoots(ctx context.Context, override contracts.AbsolutePath) (Roots, error) {
 	env, err := s.fs.Environment(ctx)
 	if err != nil {
 		return Roots{}, err
 	}
-	return resolveRoots(s.fs.Platform(), env, override, s.fs.OwnerPrivateLockRoot)
+	roots, err := resolveRoots(s.fs.Platform(), env, override, s.fs.OwnerPrivateLockRoot)
+	if err != nil {
+		return Roots{}, err
+	}
+	if err := validateRoots(ctx, s.fs, roots); err != nil {
+		return Roots{}, err
+	}
+	return roots, nil
 }
 
 func resolveRoots(platform string, env filesystem.PlatformEnv, override contracts.AbsolutePath, lockRoot func(filesystem.PlatformEnv) (contracts.AbsolutePath, error)) (Roots, error) {
@@ -46,13 +48,11 @@ func resolveRoots(platform string, env filesystem.PlatformEnv, override contract
 	if err != nil {
 		return Roots{}, err
 	}
-	if !filepath.IsAbs(string(selected)) {
-		return Roots{}, fmt.Errorf("state root must be absolute")
+	roots := Roots{StateRoot: contracts.AbsolutePath(filepath.Clean(string(selected))), LockRoot: contracts.AbsolutePath(filepath.Clean(string(lock)))}
+	if err := validateRootsBasic(roots); err != nil {
+		return Roots{}, err
 	}
-	if !filepath.IsAbs(string(lock)) {
-		return Roots{}, fmt.Errorf("lock root must be absolute")
-	}
-	return Roots{StateRoot: contracts.AbsolutePath(filepath.Clean(string(selected))), LockRoot: contracts.AbsolutePath(filepath.Clean(string(lock)))}, nil
+	return roots, nil
 }
 
 func defaultStateRoot(platform string, env filesystem.PlatformEnv) (contracts.AbsolutePath, error) {
@@ -77,8 +77,4 @@ func defaultStateRoot(platform string, env filesystem.PlatformEnv) (contracts.Ab
 		}
 		return contracts.AbsolutePath(filepath.Join(base, "waywarden")), nil
 	}
-}
-
-func ownerPrivateLockRoot(env filesystem.PlatformEnv) (contracts.AbsolutePath, error) {
-	return filesystem.NewLocalAdapter().OwnerPrivateLockRoot(env)
 }

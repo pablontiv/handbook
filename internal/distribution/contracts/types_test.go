@@ -39,8 +39,9 @@ type canonicalArtifactForTest struct {
 
 func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 	sha := SHA256([]byte("artifact"))
-	artifact := ArtifactRef{Path: "runs/op/artifact.json", SHA256: sha, Bytes: "2"}
-	journal := JournalRef{OperationID: "op", Path: "runs/op/journal.ndjson", SHA256: sha}
+	op := string(SHA256([]byte("operation")))
+	artifact := ArtifactRef{Path: "runs/" + op + "/artifact.json", SHA256: sha, Bytes: "2"}
+	journal := JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: sha}
 	approval := sha
 	payload := MinimalPlanPayloadForTest()
 	payloadDigest, err := PayloadDigest(payload)
@@ -55,9 +56,9 @@ func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 		{SchemaInventory, payload.Inventory},
 		{SchemaPlan, PlanEnvelope{Schema: SchemaPlan, ApprovalDigest: payloadDigest, Payload: payload}},
 		{SchemaBackupManifest, BackupManifest{Schema: SchemaBackupManifest, BackupSetID: "backup", InstallationID: "install", Operation: "apply", Entries: []BackupEntry{}, Verified: true}},
-		{SchemaOwnership, OwnershipRecord{Schema: SchemaOwnership, RecordID: "record", InstallationID: "install", PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: journal, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, Entries: []JournalEntry{}, AggregateEvent: "applied_unverified", OperationResult: "verification_required"}},
-		{SchemaReceipt, Receipt{Schema: SchemaReceipt, ReceiptID: "receipt", OperationID: "op", Command: "apply", ApprovalDigest: &approval, LedgerRecordHash: sha, ReadyJournalRef: journal, TerminalJournalRef: &journal, PlanRef: &artifact, InventoryRef: &artifact, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, Preconditions: []Precondition{}, Results: []JournalEntry{}, OperationResult: "verification_required"}},
-		{SchemaVerification, Verification{Schema: SchemaVerification, VerificationID: "verification", OperationID: "op", Selector: Selector{Kind: SelectorInstallation, InstallationID: "install"}, Assertions: []VerificationAssertion{}, Status: "verified", OperatorRef: nil}},
+		{SchemaOwnership, OwnershipRecord{Schema: SchemaOwnership, RecordID: "record", OperationID: OperationID(op), InstallationID: "install", DeploymentIDs: []string{"deployment"}, PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: journal, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, Entries: []JournalEntry{}, AggregateEvent: "applied_unverified", OperationResult: "verification_required"}},
+		{SchemaReceipt, Receipt{Schema: SchemaReceipt, ReceiptID: "receipt", OperationID: op, Command: "apply", ApprovalDigest: &approval, LedgerRecordHash: sha, ReadyJournalRef: journal, PlanRef: &artifact, InventoryRef: &artifact, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, Preconditions: []Precondition{}, Results: []JournalEntry{}, OperationResult: "verification_required"}},
+		{SchemaVerification, Verification{Schema: SchemaVerification, VerificationID: "verification", OperationID: op, Selector: Selector{Kind: SelectorInstallation, InstallationID: "install"}, Assertions: []VerificationAssertion{}, Status: "verified", OperatorRef: nil}},
 		{SchemaOperatorObservation, OperatorObservation{Schema: SchemaOperatorObservation, ObservationID: "observation", Runtime: "claude", Challenge: "challenge", Declaration: "visible", Freshness: "fresh"}},
 		{SchemaCommandResult, CommandResult{Schema: SchemaCommandResult, Kind: ResultArtifact, Command: "inventory", Status: ResultStatusSuccess, Artifact: &ArtifactResult{Schema: SchemaInventory, SHA256: sha, Bytes: "2", Label: "stdout"}}},
 		{SchemaError, PublicError{Schema: SchemaError, Code: "invalid_input", Message: "Invalid input.", Exit: ExitInvalidInput, Command: "plan", Evidence: []EvidenceRef{}}},
@@ -74,7 +75,8 @@ func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 }
 
 func TestArtifactRefUsesRelativePathSHA256AndDecimalByteLength(t *testing.T) {
-	ref := ArtifactRef{Path: "runs/op/inventory.json", SHA256: SHA256([]byte("payload")), Bytes: "7"}
+	op := string(SHA256([]byte("artifact-ref-op")))
+	ref := ArtifactRef{Path: "runs/" + op + "/inventory.json", SHA256: SHA256([]byte("payload")), Bytes: "7"}
 	data, err := CanonicalBytes(ref)
 	if err != nil {
 		t.Fatalf("CanonicalBytes() error = %v", err)
@@ -83,7 +85,7 @@ func TestArtifactRefUsesRelativePathSHA256AndDecimalByteLength(t *testing.T) {
 		t.Fatalf("ValidateArtifactRef() error = %v; data=%s", err, data)
 	}
 	bad := []ArtifactRef{
-		{Path: "/private/runs/op/inventory.json", SHA256: ref.SHA256, Bytes: ref.Bytes},
+		{Path: "/private/runs/" + op + "/inventory.json", SHA256: ref.SHA256, Bytes: ref.Bytes},
 		{Path: "../escape", SHA256: ref.SHA256, Bytes: ref.Bytes},
 		{Path: ref.Path, SHA256: "not-a-sha", Bytes: ref.Bytes},
 		{Path: ref.Path, SHA256: ref.SHA256, Bytes: "01"},

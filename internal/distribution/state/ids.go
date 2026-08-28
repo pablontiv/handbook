@@ -10,8 +10,8 @@ import (
 
 const randomIDBytes = 32
 
-func GenerateInstallIDs(reader io.Reader) (contracts.OperationID, contracts.InstallationID, contracts.BackupSetID, error) {
-	op, err := GenerateOperationID(reader)
+func (s *store) GenerateInstallIDs(reader io.Reader) (contracts.OperationID, contracts.InstallationID, contracts.BackupSetID, error) {
+	op, err := generateOperationID(reader)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -26,17 +26,13 @@ func GenerateInstallIDs(reader io.Reader) (contracts.OperationID, contracts.Inst
 	return op, contracts.InstallationID(installation), contracts.BackupSetID(backup), nil
 }
 
-func (s *store) GenerateInstallIDs(reader io.Reader) (contracts.OperationID, contracts.InstallationID, contracts.BackupSetID, error) {
-	return GenerateInstallIDs(reader)
+func (s *store) GenerateOperationID(reader io.Reader) (contracts.OperationID, error) {
+	return generateOperationID(reader)
 }
 
-func GenerateOperationID(reader io.Reader) (contracts.OperationID, error) {
+func generateOperationID(reader io.Reader) (contracts.OperationID, error) {
 	id, err := generateOpaqueID(reader)
 	return contracts.OperationID(id), err
-}
-
-func (s *store) GenerateOperationID(reader io.Reader) (contracts.OperationID, error) {
-	return GenerateOperationID(reader)
 }
 
 func generateOpaqueID(reader io.Reader) (string, error) {

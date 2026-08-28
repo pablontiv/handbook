@@ -17,6 +17,9 @@ import (
 type Adapter interface {
 	Platform() string
 	Environment(context.Context) (PlatformEnv, error)
+	SafeRoot(context.Context, contracts.AbsolutePath) (SafeRoot, error)
+	PhysicalIdentity(context.Context, contracts.AbsolutePath) (PhysicalIdentity, error)
+	ListNoFollow(context.Context, contracts.AbsolutePath) ([]DirEntry, error)
 	ObserveNoFollow(context.Context, contracts.AbsolutePath) (Observation, error)
 	SnapshotTree(context.Context, contracts.AbsolutePath) (TreeSnapshot, error)
 	HashFileByHandle(context.Context, contracts.AbsolutePath) (contracts.SHA256Hex, error)
@@ -25,6 +28,7 @@ type Adapter interface {
 	AppendFileSync(context.Context, contracts.AbsolutePath, []byte) error
 	WriteFileNoReplaceSync(context.Context, contracts.AbsolutePath, []byte) error
 	ReadFile(context.Context, contracts.AbsolutePath) ([]byte, error)
+	SyncDirectory(context.Context, contracts.AbsolutePath) error
 	PublishNoReplace(context.Context, contracts.AbsolutePath, []byte, ForbiddenRoots) error
 	OwnerPrivateLockRoot(PlatformEnv) (contracts.AbsolutePath, error)
 }
@@ -33,6 +37,19 @@ type PlatformEnv struct {
 	Home         string
 	XDGStateHome string
 	LocalAppData string
+}
+
+type SafeRoot struct {
+	Path     contracts.AbsolutePath
+	Identity PhysicalIdentity
+}
+
+type PhysicalIdentity string
+
+type DirEntry struct {
+	Name string
+	Kind string
+	Path contracts.AbsolutePath
 }
 
 type Observation struct {
@@ -65,6 +82,18 @@ func (localAdapter) Platform() string { return runtime.GOOS }
 
 func (localAdapter) Environment(context.Context) (PlatformEnv, error) {
 	return PlatformEnv{Home: os.Getenv("HOME"), XDGStateHome: os.Getenv("XDG_STATE_HOME"), LocalAppData: os.Getenv("LOCALAPPDATA")}, nil
+}
+
+func (localAdapter) SafeRoot(context.Context, contracts.AbsolutePath) (SafeRoot, error) {
+	return SafeRoot{}, ErrUnsupportedCapability
+}
+
+func (localAdapter) PhysicalIdentity(context.Context, contracts.AbsolutePath) (PhysicalIdentity, error) {
+	return "", ErrUnsupportedCapability
+}
+
+func (localAdapter) ListNoFollow(context.Context, contracts.AbsolutePath) ([]DirEntry, error) {
+	return nil, ErrUnsupportedCapability
 }
 
 func (localAdapter) ObserveNoFollow(_ context.Context, path contracts.AbsolutePath) (Observation, error) {
@@ -179,6 +208,10 @@ func (localAdapter) WriteFileNoReplaceSync(_ context.Context, path contracts.Abs
 
 func (localAdapter) ReadFile(_ context.Context, path contracts.AbsolutePath) ([]byte, error) {
 	return os.ReadFile(filepath.Clean(string(path)))
+}
+
+func (localAdapter) SyncDirectory(context.Context, contracts.AbsolutePath) error {
+	return ErrUnsupportedCapability
 }
 
 func (a localAdapter) PublishNoReplace(ctx context.Context, destination contracts.AbsolutePath, canonical []byte, forbiddenRoots ForbiddenRoots) error {

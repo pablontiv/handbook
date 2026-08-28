@@ -19,19 +19,21 @@ type heldLockSet struct {
 	handles []filesystem.LockHandle
 }
 
-func AcquireMutationLocks(ctx context.Context, fs filesystem.Adapter, roots Roots, slots []contracts.GovernedSlotIdentity) (LockSet, error) {
+func (s *store) AcquireMutationLocks(ctx context.Context, roots Roots, slots []contracts.GovernedSlotIdentity) (LockSet, error) {
+	if err := validateRoots(ctx, s.fs, roots); err != nil {
+		return nil, err
+	}
 	var handles []filesystem.LockHandle
 	acquire := func(path contracts.AbsolutePath, reason string) error {
-		handle, err := fs.LockExclusive(ctx, path, reason)
+		handle, err := s.fs.LockExclusive(ctx, path, reason)
 		if err != nil {
 			return err
 		}
 		handles = append(handles, handle)
 		return nil
 	}
-	cleanup := func(err error) (LockSet, error) {
-		_ = releaseHandlesReverse(handles)
-		return nil, err
+	cleanup := func(primary error) (LockSet, error) {
+		return nil, errors.Join(primary, releaseHandlesReverse(handles))
 	}
 	if err := acquire(globalMutationLockPath(roots), "waywarden global mutation"); err != nil {
 		return cleanup(err)
@@ -41,28 +43,34 @@ func AcquireMutationLocks(ctx context.Context, fs filesystem.Adapter, roots Root
 			return cleanup(err)
 		}
 	}
-	if err := acquire(ledgerLockPath(roots), "waywarden selected ledger mutation"); err != nil {
+	ledgerPath, err := ledgerLockPath(ctx, s.fs, roots)
+	if err != nil {
+		return cleanup(err)
+	}
+	if err := acquire(ledgerPath, "waywarden selected ledger mutation"); err != nil {
 		return cleanup(err)
 	}
 	return &heldLockSet{handles: handles}, nil
 }
 
-func (s *store) AcquireMutationLocks(ctx context.Context, roots Roots, slots []contracts.GovernedSlotIdentity) (LockSet, error) {
-	return AcquireMutationLocks(ctx, s.fs, roots, slots)
-}
-
-func AcquireVerificationLocks(ctx context.Context, fs filesystem.Adapter, roots Roots) (LockSet, error) {
-	var handles []filesystem.LockHandle
-	cleanup := func(err error) (LockSet, error) {
-		_ = releaseHandlesReverse(handles)
+func (s *store) AcquireVerificationLocks(ctx context.Context, roots Roots) (LockSet, error) {
+	if err := validateRoots(ctx, s.fs, roots); err != nil {
 		return nil, err
 	}
-	global, err := fs.LockExclusive(ctx, globalMutationLockPath(roots), "waywarden verification state write")
+	var handles []filesystem.LockHandle
+	cleanup := func(primary error) (LockSet, error) {
+		return nil, errors.Join(primary, releaseHandlesReverse(handles))
+	}
+	global, err := s.fs.LockExclusive(ctx, globalMutationLockPath(roots), "waywarden verification state write")
 	if err != nil {
 		return cleanup(err)
 	}
 	handles = append(handles, global)
-	ledger, err := fs.LockExclusive(ctx, ledgerLockPath(roots), "waywarden selected ledger verification write")
+	ledgerPath, err := ledgerLockPath(ctx, s.fs, roots)
+	if err != nil {
+		return cleanup(err)
+	}
+	ledger, err := s.fs.LockExclusive(ctx, ledgerPath, "waywarden selected ledger verification write")
 	if err != nil {
 		return cleanup(err)
 	}
@@ -70,16 +78,15 @@ func AcquireVerificationLocks(ctx context.Context, fs filesystem.Adapter, roots 
 	return &heldLockSet{handles: handles}, nil
 }
 
-func (s *store) AcquireVerificationLocks(ctx context.Context, roots Roots) (LockSet, error) {
-	return AcquireVerificationLocks(ctx, s.fs, roots)
-}
-
-func AcquireInventoryLedgerSnapshot(ctx context.Context, fs filesystem.Adapter, roots Roots) (filesystem.LockHandle, error) {
-	return fs.LockShared(ctx, ledgerLockPath(roots), "waywarden inventory selected ledger snapshot")
-}
-
 func (s *store) AcquireInventoryLedgerSnapshot(ctx context.Context, roots Roots) (filesystem.LockHandle, error) {
-	return AcquireInventoryLedgerSnapshot(ctx, s.fs, roots)
+	if err := validateRoots(ctx, s.fs, roots); err != nil {
+		return nil, err
+	}
+	ledgerPath, err := ledgerLockPath(ctx, s.fs, roots)
+	if err != nil {
+		return nil, err
+	}
+	return s.fs.LockShared(ctx, ledgerPath, "waywarden inventory selected ledger snapshot")
 }
 
 func (l *heldLockSet) Release() error {
@@ -122,30 +129,42 @@ func governedSlotLockPaths(roots Roots, slots []contracts.GovernedSlotIdentity) 
 	return paths
 }
 
-func ledgerLockPath(roots Roots) contracts.AbsolutePath {
-	identity := canonicalSelectedStateRootIdentity(roots.StateRoot)
+func ledgerLockPath(ctx context.Context, adapter filesystem.Adapter, roots Roots) (contracts.AbsolutePath, error) {
+	identity, err := adapter.PhysicalIdentity(ctx, roots.StateRoot)
+	if err != nil {
+		return "", err
+	}
 	key := contracts.SHA256([]byte(identity))
-	return contracts.AbsolutePath(filepath.Join(string(roots.LockRoot), "ledgers", string(key)+".lock"))
+	return contracts.AbsolutePath(filepath.Join(string(roots.LockRoot), "ledgers", string(key)+".lock")), nil
 }
 
-func canonicalSelectedStateRootIdentity(root contracts.AbsolutePath) string {
-	clean := filepath.Clean(string(root))
-	if clean == "." || !filepath.IsAbs(clean) {
-		return clean
-	}
-	resolved, err := filepath.EvalSymlinks(clean)
-	if err == nil {
-		return filepath.Clean(resolved)
-	}
-	return clean
-}
-
-func validateRoots(roots Roots) error {
+func validateRootsBasic(roots Roots) error {
 	if roots.StateRoot == "" || roots.LockRoot == "" {
 		return fmt.Errorf("state and lock roots are required")
 	}
 	if !filepath.IsAbs(string(roots.StateRoot)) || !filepath.IsAbs(string(roots.LockRoot)) {
 		return fmt.Errorf("state and lock roots must be absolute")
+	}
+	return nil
+}
+
+func validateRoots(ctx context.Context, adapter filesystem.Adapter, roots Roots) error {
+	if err := validateRootsBasic(roots); err != nil {
+		return err
+	}
+	stateRoot, err := adapter.SafeRoot(ctx, roots.StateRoot)
+	if err != nil {
+		return err
+	}
+	lockRoot, err := adapter.SafeRoot(ctx, roots.LockRoot)
+	if err != nil {
+		return err
+	}
+	if stateRoot.Identity == "" || lockRoot.Identity == "" {
+		return fmt.Errorf("state and lock roots require physical identity")
+	}
+	if stateRoot.Identity == lockRoot.Identity {
+		return fmt.Errorf("state and lock roots must be physically disjoint")
 	}
 	return nil
 }

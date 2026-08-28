@@ -22,19 +22,15 @@ type ledger struct {
 	records []contracts.OwnershipRecord
 }
 
-func OpenLedger(ctx context.Context, fs filesystem.Adapter, roots Roots) (Ledger, error) {
-	if err := validateRoots(roots); err != nil {
+func (s *store) OpenLedger(ctx context.Context, roots Roots) (Ledger, error) {
+	if err := validateRoots(ctx, s.fs, roots); err != nil {
 		return nil, err
 	}
-	records, err := readLedger(ctx, fs, roots)
+	records, err := readLedger(ctx, s.fs, roots)
 	if err != nil {
 		return nil, err
 	}
-	return &ledger{fs: fs, roots: roots, records: records}, nil
-}
-
-func (s *store) OpenLedger(ctx context.Context, roots Roots) (Ledger, error) {
-	return OpenLedger(ctx, s.fs, roots)
+	return &ledger{fs: s.fs, roots: roots, records: records}, nil
 }
 
 func (l *ledger) Append(ctx context.Context, record contracts.OwnershipRecord) (contracts.SHA256Hex, error) {
@@ -108,6 +104,9 @@ func readLedger(ctx context.Context, adapter filesystem.Adapter, roots Roots) ([
 		}
 		var record contracts.OwnershipRecord
 		if err := contracts.StrictParseCanonical(line, &record); err != nil {
+			return nil, err
+		}
+		if err := contracts.ValidateOwnershipRecord(record); err != nil {
 			return nil, err
 		}
 		if record.RecordHash == "" {

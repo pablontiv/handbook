@@ -3,6 +3,7 @@ package contracts
 import (
 	"embed"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 )
@@ -64,10 +65,16 @@ func ValidateSchema(schema SchemaID, canonical []byte) error {
 		return StrictParseCanonical(canonical, &v)
 	case SchemaOwnership:
 		var v OwnershipRecord
-		return StrictParseCanonical(canonical, &v)
+		if err := StrictParseCanonical(canonical, &v); err != nil {
+			return err
+		}
+		return ValidateOwnershipRecord(v)
 	case SchemaReceipt:
 		var v Receipt
-		return StrictParseCanonical(canonical, &v)
+		if err := StrictParseCanonical(canonical, &v); err != nil {
+			return err
+		}
+		return ValidateReceipt(v)
 	case SchemaVerification:
 		var v Verification
 		return StrictParseCanonical(canonical, &v)
@@ -96,8 +103,8 @@ var allowedTopLevel = map[SchemaID]map[string]bool{
 	SchemaInventory:           keys("schema", "manifest_digest", "sources", "deployments", "runtime_bindings", "ownership", "backups", "blockers"),
 	SchemaPlan:                keys("schema", "approval_digest", "payload"),
 	SchemaBackupManifest:      keys("schema", "backup_set_id", "installation_id", "operation", "entries", "verified"),
-	SchemaOwnership:           keys("schema", "record_id", "installation_id", "previous_hash", "plan_ref", "inventory_ref", "journal_ref", "backup_set_ref", "verification_ref", "entries", "aggregate_event", "operation_result", "failure_code"),
-	SchemaReceipt:             keys("schema", "receipt_id", "operation_id", "command", "approval_digest", "ledger_record_hash", "ready_journal_ref", "terminal_journal_ref", "plan_ref", "inventory_ref", "backup_set_ref", "verification_ref", "preconditions", "results", "operation_result"),
+	SchemaOwnership:           keys("schema", "record_id", "operation_id", "installation_id", "sequence", "previous_hash", "record_hash", "plan_ref", "inventory_ref", "journal_ref", "backup_set_ref", "verification_ref", "deployment_ids", "entries", "aggregate_event", "operation_result", "failure_code"),
+	SchemaReceipt:             keys("schema", "receipt_id", "operation_id", "command", "approval_digest", "ledger_record_hash", "ready_journal_ref", "plan_ref", "inventory_ref", "backup_set_ref", "verification_ref", "preconditions", "results", "operation_result"),
 	SchemaVerification:        keys("schema", "verification_id", "operation_id", "selector", "assertions", "status", "operator_ref"),
 	SchemaOperatorObservation: keys("schema", "observation_id", "runtime", "challenge", "declaration", "freshness"),
 	SchemaCommandResult:       keys("schema", "kind", "command", "status", "artifact", "operation_id", "installation_id", "backup_set_id", "aggregate_event", "receipt_ref", "receipt_digest", "selector", "verification_ref", "verification_digest", "error"),
@@ -125,9 +132,22 @@ func rejectUnknownTopLevel(schema SchemaID, object map[string]any) error {
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var decimalPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
 
+func ValidateOperationID(id OperationID) error {
+	if !sha256Pattern.MatchString(string(id)) {
+		return fmt.Errorf("operation_id must be generated lower-case SHA-256-shape hex")
+	}
+	return nil
+}
+
 func ValidateArtifactRef(ref ArtifactRef) error {
-	if ref.Path == "" || strings.HasPrefix(ref.Path, "/") || strings.HasPrefix(ref.Path, "../") || strings.Contains(ref.Path, "/../") || ref.Path == ".." {
+	if ref.Path == "" || strings.HasPrefix(ref.Path, "/") || strings.HasPrefix(ref.Path, "../") || strings.Contains(ref.Path, "/../") || ref.Path == ".." || strings.ContainsAny(ref.Path, `\\:`) || path.Clean(ref.Path) != ref.Path || ref.Path == "." {
 		return fmt.Errorf("artifact path must be relative and confined")
+	}
+	parts := strings.Split(ref.Path, "/")
+	if len(parts) >= 2 && parts[0] == "runs" {
+		if err := ValidateOperationID(parts[1]); err != nil {
+			return err
+		}
 	}
 	if !sha256Pattern.MatchString(string(ref.SHA256)) {
 		return fmt.Errorf("artifact sha256 must be lower-case hex SHA-256")

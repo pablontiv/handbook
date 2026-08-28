@@ -210,11 +210,11 @@ func TestLedgerAppendCanonicalHashChainRejectsPartialAndMismatch(t *testing.T) {
 		t.Fatalf("OpenLedger() error = %v", err)
 	}
 
-	firstHash, err := ledger.Append(ctx, ownershipRecord("install-1", "op-1", "applied_unverified"))
+	firstHash, err := ledger.Append(ctx, ownershipRecord("install-1", opID("op-1"), "applied_unverified"))
 	if err != nil {
 		t.Fatalf("Append(first) error = %v", err)
 	}
-	secondHash, err := ledger.Append(ctx, ownershipRecord("install-1", "op-2", "installed_verified"))
+	secondHash, err := ledger.Append(ctx, ownershipRecord("install-1", opID("op-2"), "installed_verified"))
 	if err != nil {
 		t.Fatalf("Append(second) error = %v", err)
 	}
@@ -274,7 +274,7 @@ func TestJournalTransitionsRefsAndTerminality(t *testing.T) {
 	adapter := filesystem.NewMemoryAdapter()
 	store := state.NewStore(adapter)
 	roots := tempRoots(t)
-	op := contracts.OperationID("op-journal")
+	op := contracts.OperationID(opID("op-journal"))
 
 	journal, err := store.OpenJournal(ctx, roots, op, contracts.CommandName("apply"))
 	if err != nil {
@@ -288,11 +288,11 @@ func TestJournalTransitionsRefsAndTerminality(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append(ready) error = %v", err)
 	}
-	committed, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "committed", Result: "verification_required"})
+	committed, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "committed", Result: "verification_required", ReceiptSHA256: contracts.SHA256([]byte("receipt")), FinalArtifactPath: "receipt.json"})
 	if err != nil {
 		t.Fatalf("Append(committed) error = %v", err)
 	}
-	if started.Path != "runs/op-journal/journal.ndjson" || ready.Path != started.Path || committed.OperationID != string(op) {
+	if started.Path != "runs/"+string(op)+"/journal.ndjson" || ready.Path != started.Path || committed.OperationID != string(op) {
 		t.Fatalf("journal refs = %#v %#v %#v", started, ready, committed)
 	}
 	if started.SHA256 == ready.SHA256 || ready.SHA256 == committed.SHA256 {
@@ -302,11 +302,12 @@ func TestJournalTransitionsRefsAndTerminality(t *testing.T) {
 		t.Fatalf("journal accepted append after terminal committed")
 	}
 
-	badJournal, err := store.OpenJournal(ctx, roots, contracts.OperationID("op-bad"), contracts.CommandName("apply"))
+	badOp := contracts.OperationID(opID("op-bad"))
+	badJournal, err := store.OpenJournal(ctx, roots, badOp, contracts.CommandName("apply"))
 	if err != nil {
 		t.Fatalf("OpenJournal(bad) error = %v", err)
 	}
-	if _, err := badJournal.Append(ctx, contracts.JournalEntry{OperationID: "op-bad", Boundary: "committed", Result: "bad"}); err == nil {
+	if _, err := badJournal.Append(ctx, contracts.JournalEntry{OperationID: string(badOp), Boundary: "committed", Result: "bad", ReceiptSHA256: contracts.SHA256([]byte("receipt")), FinalArtifactPath: "receipt.json"}); err == nil {
 		t.Fatalf("journal accepted committed before ready_to_commit")
 	}
 }
@@ -316,25 +317,25 @@ func TestRunArtifactAndReceiptPublication(t *testing.T) {
 	adapter := filesystem.NewMemoryAdapter()
 	store := state.NewStore(adapter)
 	roots := tempRoots(t)
-	op := contracts.OperationID("op-artifacts")
+	op := contracts.OperationID(opID("op-artifacts"))
 
 	ref, err := store.PublishRunArtifact(ctx, roots, op, "plan.json", []byte("{\"schema\":\"example\"}"))
 	if err != nil {
 		t.Fatalf("PublishRunArtifact() error = %v", err)
 	}
-	if ref.Path != "runs/op-artifacts/plan.json" || ref.SHA256 != contracts.SHA256([]byte("{\"schema\":\"example\"}")) || ref.Bytes != strconv.Itoa(len("{\"schema\":\"example\"}")) {
+	if ref.Path != "runs/"+string(op)+"/plan.json" || ref.SHA256 != contracts.SHA256([]byte("{\"schema\":\"example\"}")) || ref.Bytes != strconv.Itoa(len("{\"schema\":\"example\"}")) {
 		t.Fatalf("artifact ref = %#v", ref)
 	}
 	if _, err := store.PublishRunArtifact(ctx, roots, op, "../escape", []byte("x")); err == nil {
 		t.Fatalf("PublishRunArtifact accepted escaping name")
 	}
 
-	receipt := receiptForTest(op)
+	receipt := prepareReceiptProtocol(ctx, t, store, roots, op)
 	receiptRef, err := store.PublishReceipt(ctx, roots, op, receipt)
 	if err != nil {
 		t.Fatalf("PublishReceipt() error = %v", err)
 	}
-	if receiptRef.Path != "runs/op-artifacts/receipt.json" {
+	if receiptRef.Path != "runs/"+string(op)+"/receipt.json" {
 		t.Fatalf("receipt ref path = %s", receiptRef.Path)
 	}
 	if _, err := store.PublishReceipt(ctx, roots, op, receipt); !errors.Is(err, filesystem.ErrDestinationExists) {
@@ -356,11 +357,12 @@ func TestClassifyRecoveryFromLedgerAndJournalState(t *testing.T) {
 		t.Fatalf("clean status = %#v", status)
 	}
 
-	journal, err := store.OpenJournal(ctx, roots, contracts.OperationID("op-started"), contracts.CommandName("apply"))
+	startedOp := contracts.OperationID(opID("op-started"))
+	journal, err := store.OpenJournal(ctx, roots, startedOp, contracts.CommandName("apply"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := journal.Append(ctx, contracts.JournalEntry{OperationID: "op-started", Boundary: "started", Result: "started"}); err != nil {
+	if _, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(startedOp), Boundary: "started", Result: "started"}); err != nil {
 		t.Fatal(err)
 	}
 	status, err = store.ClassifyRecovery(ctx, roots)
@@ -434,28 +436,60 @@ func ownershipRecord(installationID, operationID, event string) contracts.Owners
 	}
 }
 
+func prepareReceiptProtocol(ctx context.Context, t *testing.T, store state.Store, roots state.Roots, op contracts.OperationID) contracts.Receipt {
+	t.Helper()
+	journal, err := store.OpenJournal(ctx, roots, op, contracts.CommandName("apply"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "started", Result: "started"}); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "ready_to_commit", Result: "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := store.OpenLedger(ctx, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := ownershipRecord("install", string(op), "applied_unverified")
+	record.JournalRef = ready
+	ledgerHash, err := ledger.Append(ctx, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt := receiptForTest(op)
+	receipt.ReadyJournalRef = ready
+	receipt.LedgerRecordHash = ledgerHash
+	return receipt
+}
+
 func receiptForTest(op contracts.OperationID) contracts.Receipt {
 	sha := contracts.SHA256([]byte("artifact"))
 	journal := contracts.JournalRef{OperationID: string(op), Path: "runs/" + string(op) + "/journal.ndjson", SHA256: sha}
 	artifact := contracts.ArtifactRef{Path: "runs/" + string(op) + "/plan.json", SHA256: sha, Bytes: "2"}
 	approval := sha
 	return contracts.Receipt{
-		Schema:             contracts.SchemaReceipt,
-		ReceiptID:          "receipt-" + string(op),
-		OperationID:        string(op),
-		Command:            "apply",
-		ApprovalDigest:     &approval,
-		LedgerRecordHash:   sha,
-		ReadyJournalRef:    journal,
-		TerminalJournalRef: &journal,
-		PlanRef:            &artifact,
-		InventoryRef:       &artifact,
-		BackupSetRef:       &contracts.BackupSetRef{BackupSetID: "backup", SHA256: sha},
-		VerificationRef:    nil,
-		Preconditions:      []contracts.Precondition{},
-		Results:            []contracts.JournalEntry{},
-		OperationResult:    "verification_required",
+		Schema:           contracts.SchemaReceipt,
+		ReceiptID:        "receipt-" + string(op),
+		OperationID:      string(op),
+		Command:          "apply",
+		ApprovalDigest:   &approval,
+		LedgerRecordHash: sha,
+		ReadyJournalRef:  journal,
+		PlanRef:          &artifact,
+		InventoryRef:     &artifact,
+		BackupSetRef:     &contracts.BackupSetRef{BackupSetID: "backup", SHA256: sha},
+		VerificationRef:  nil,
+		Preconditions:    []contracts.Precondition{},
+		Results:          []contracts.JournalEntry{},
+		OperationResult:  "verification_required",
 	}
+}
+
+func opID(seed string) string {
+	return string(contracts.SHA256([]byte(seed)))
 }
 
 func equalStrings(a, b []string) bool {
@@ -473,9 +507,10 @@ func equalStrings(a, b []string) bool {
 var _ state.Store = state.NewStore(filesystem.NewMemoryAdapter())
 var _ io.Reader = (*assertLocksHeldReader)(nil)
 
-func ExampleResolveRoots() {
-	env := filesystem.PlatformEnv{Home: "/tmp/home", XDGStateHome: "/tmp/state", LocalAppData: "C:/tmp/local"}
-	roots, _ := state.ResolveRoots(env, "")
+func ExampleStore_ResolveRoots() {
+	adapter := filesystem.NewMemoryAdapter()
+	adapter.SetEnvironment(filesystem.PlatformEnv{Home: "/tmp/home", XDGStateHome: "/tmp/state", LocalAppData: "C:/tmp/local"})
+	roots, _ := state.NewStore(adapter).ResolveRoots(context.Background(), "")
 	fmt.Println(strings.HasSuffix(string(roots.LockRoot), filepath.Join("waywarden", "locks")))
 	// Output: true
 }

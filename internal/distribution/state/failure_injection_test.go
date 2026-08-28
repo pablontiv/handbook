@@ -22,7 +22,7 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		{
 			name: "interrupted after first durable journal boundary",
 			seed: func(ctx context.Context, t *testing.T, _ *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
-				appendJournalBoundary(ctx, t, store, roots, "op-started", "started")
+				appendJournalBoundary(ctx, t, store, roots, opID("op-started"), "started")
 			},
 			wantStatus: contracts.RecoveryRequired,
 			wantCode:   "interrupted_journal",
@@ -34,11 +34,12 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := ledger.Append(ctx, ownershipRecord("install-ready", "op-ready", "applied_unverified")); err != nil {
+				op := opID("op-ready")
+				if _, err := ledger.Append(ctx, ownershipRecord("install-ready", op, "applied_unverified")); err != nil {
 					t.Fatal(err)
 				}
-				appendJournalBoundary(ctx, t, store, roots, "op-ready", "started")
-				appendJournalBoundary(ctx, t, store, roots, "op-ready", "ready_to_commit")
+				appendJournalBoundary(ctx, t, store, roots, op, "started")
+				appendJournalBoundary(ctx, t, store, roots, op, "ready_to_commit")
 			},
 			wantStatus: contracts.RecoveryRequired,
 			wantCode:   "interrupted_journal",
@@ -46,9 +47,10 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		{
 			name: "receipt draft durable before terminal commit",
 			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
-				appendJournalBoundary(ctx, t, store, roots, "op-draft", "started")
-				appendJournalBoundary(ctx, t, store, roots, "op-draft", "ready_to_commit")
-				adapter.PutFile(contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs", "op-draft", "receipt.json.draft")), []byte("draft"))
+				op := opID("op-draft")
+				appendJournalBoundary(ctx, t, store, roots, op, "started")
+				appendJournalBoundary(ctx, t, store, roots, op, "ready_to_commit")
+				adapter.PutFile(contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs", op, "receipt.json.draft")), []byte("draft"))
 			},
 			wantStatus: contracts.RecoveryRequired,
 			wantCode:   "interrupted_journal",
@@ -56,10 +58,11 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		{
 			name: "terminal committed before receipt publication",
 			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
-				appendJournalBoundary(ctx, t, store, roots, "op-pending", "started")
-				appendJournalBoundary(ctx, t, store, roots, "op-pending", "ready_to_commit")
-				appendJournalBoundary(ctx, t, store, roots, "op-pending", "committed")
-				adapter.PutFile(contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs", "op-pending", "receipt.json.draft")), []byte("draft"))
+				op := opID("op-pending")
+				appendJournalBoundary(ctx, t, store, roots, op, "started")
+				appendJournalBoundary(ctx, t, store, roots, op, "ready_to_commit")
+				appendJournalBoundary(ctx, t, store, roots, op, "committed")
+				adapter.PutFile(contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "runs", op, "receipt.json.draft")), []byte("draft"))
 			},
 			wantStatus: contracts.RecoveryRequired,
 			wantCode:   "receipt_publish_pending",
@@ -67,10 +70,11 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		{
 			name: "receipt publication complete",
 			seed: func(ctx context.Context, t *testing.T, _ *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
-				appendJournalBoundary(ctx, t, store, roots, "op-complete", "started")
-				appendJournalBoundary(ctx, t, store, roots, "op-complete", "ready_to_commit")
-				appendJournalBoundary(ctx, t, store, roots, "op-complete", "committed")
-				if _, err := store.PublishReceipt(ctx, roots, contracts.OperationID("op-complete"), receiptForTest(contracts.OperationID("op-complete"))); err != nil {
+				op := opID("op-complete")
+				appendJournalBoundary(ctx, t, store, roots, op, "started")
+				appendJournalBoundary(ctx, t, store, roots, op, "ready_to_commit")
+				appendJournalBoundary(ctx, t, store, roots, op, "committed")
+				if _, err := store.PublishRunArtifact(ctx, roots, contracts.OperationID(op), "receipt.json", []byte("{}")); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -80,8 +84,9 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		{
 			name: "rollback failed terminal boundary",
 			seed: func(ctx context.Context, t *testing.T, _ *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
-				appendJournalBoundary(ctx, t, store, roots, "op-rbf", "started")
-				appendJournalBoundary(ctx, t, store, roots, "op-rbf", "rollback_failed")
+				op := opID("op-rbf")
+				appendJournalBoundary(ctx, t, store, roots, op, "started")
+				appendJournalBoundary(ctx, t, store, roots, op, "rollback_failed")
 			},
 			wantStatus: contracts.RecoveryRequired,
 			wantCode:   "rollback_failed",
@@ -93,7 +98,7 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				record := ownershipRecord("install-rec", "op-rec", "recovery_required")
+				record := ownershipRecord("install-rec", opID("op-rec"), "recovery_required")
 				record.FailureCode = "mutation_unprovable"
 				if _, err := ledger.Append(ctx, record); err != nil {
 					t.Fatal(err)
@@ -126,7 +131,12 @@ func appendJournalBoundary(ctx context.Context, t *testing.T, store state.Store,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := journal.Append(ctx, contracts.JournalEntry{OperationID: op, Boundary: boundary, Result: boundary}); err != nil {
+	entry := contracts.JournalEntry{OperationID: op, Boundary: boundary, Result: boundary}
+	if boundary == "committed" {
+		entry.ReceiptSHA256 = contracts.SHA256([]byte("receipt-" + op))
+		entry.FinalArtifactPath = "receipt.json"
+	}
+	if _, err := journal.Append(ctx, entry); err != nil {
 		t.Fatalf("Append(%s/%s) error = %v", op, boundary, err)
 	}
 }
