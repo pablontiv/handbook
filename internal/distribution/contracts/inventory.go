@@ -48,6 +48,7 @@ type OwnershipSnapshot struct {
 type BackupSetSnapshot struct {
 	BackupSetID    string `json:"backup_set_id"`
 	InstallationID string `json:"installation_id"`
+	Verified       bool   `json:"verified"`
 }
 
 type Blocker struct {

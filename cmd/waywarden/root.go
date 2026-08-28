@@ -50,7 +50,7 @@ func newRootCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd.SetErr(stderr)
 	cmd.PersistentFlags().StringVar(&outputFormat, "output", contracts.OutputHuman, "output format (human|json)")
 	cmd.PersistentFlags().BoolVar(&versionFlag, "version", false, "print version")
-	cmd.AddCommand(newInventoryCommand(stdout, stderr, &outputFormat), newStubCommand("plan"), newStubCommand("apply"), newStubCommand("verify"), newStubCommand("uninstall"), newStubCommand("restore"))
+	cmd.AddCommand(newInventoryCommand(stdout, stderr, &outputFormat), newPlanCommand(stdout, stderr, &outputFormat), newStubCommand("apply"), newStubCommand("verify"), newStubCommand("uninstall"), newStubCommand("restore"))
 	return cmd
 }
 
