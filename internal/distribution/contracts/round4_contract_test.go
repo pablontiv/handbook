@@ -57,7 +57,7 @@ func round4OwnershipRecord(op string, ids []string, artifact contracts.ArtifactR
 	}
 	approval := artifact.SHA256
 	_ = approval
-	return contracts.OwnershipRecord{Schema: contracts.SchemaOwnership, RecordID: "record-" + op, OperationID: contracts.OperationID(op), InstallationID: "install", PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: contracts.JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: artifact.SHA256}, BackupSetRef: &contracts.BackupSetRef{BackupSetID: "backup", SHA256: artifact.SHA256}, DeploymentIDs: append([]string(nil), ids...), Deployments: deployments, AggregateEvent: "applied_unverified", OperationResult: "verification_required"}
+	return contracts.OwnershipRecord{Schema: contracts.SchemaOwnership, RecordID: "record-" + op, OperationID: contracts.OperationID(op), InstallationID: "install", PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: contracts.JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: artifact.SHA256}, BackupSetRef: &contracts.BackupSetRef{BackupSetID: string(contracts.SHA256([]byte("backup"))), SHA256: artifact.SHA256}, DeploymentIDs: append([]string(nil), ids...), Deployments: deployments, AggregateEvent: "applied_unverified", OperationResult: "verification_required"}
 }
 
 func round4Receipt(record contracts.OwnershipRecord, artifact contracts.ArtifactRef) contracts.Receipt {

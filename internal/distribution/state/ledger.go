@@ -86,7 +86,7 @@ func (l *ledger) Records() []contracts.OwnershipRecord {
 
 func (l *ledger) validateCurrentJournalPrefix(ctx context.Context, ref contracts.JournalRef) error {
 	journalPath := contracts.AbsolutePath(filepath.Join(string(l.roots.StateRoot), filepath.FromSlash(ref.Path)))
-	data, err := l.fs.ReadFile(ctx, journalPath)
+	data, err := l.fs.ReadFileNoFollow(ctx, journalPath)
 	if err != nil {
 		return fmt.Errorf("journal_ref is not durable: %w", err)
 	}
@@ -108,7 +108,7 @@ func (l *ledger) validateCurrentJournalPrefix(ctx context.Context, ref contracts
 }
 
 func readLedger(ctx context.Context, adapter filesystem.Adapter, roots Roots) ([]contracts.OwnershipRecord, error) {
-	data, err := adapter.ReadFile(ctx, roots.LedgerPath())
+	data, err := adapter.ReadFileNoFollow(ctx, roots.LedgerPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return []contracts.OwnershipRecord{}, nil
 	}
@@ -148,6 +148,9 @@ func readLedger(ctx context.Context, adapter filesystem.Adapter, roots Roots) ([
 		if err := validateOwnershipRecordContext(ctx, adapter, roots, record); err != nil {
 			return nil, err
 		}
+		if err := validateDurableJournalRef(ctx, adapter, roots, record.JournalRef); err != nil {
+			return nil, err
+		}
 		if record.RecordHash == "" {
 			return nil, fmt.Errorf("ownership record %d is missing record_hash", i+1)
 		}
@@ -172,7 +175,105 @@ func readLedger(ctx context.Context, adapter filesystem.Adapter, roots Roots) ([
 		previous = &current
 		records = append(records, record)
 	}
+	if err := validateLedgerLineage(records); err != nil {
+		return nil, err
+	}
 	return records, nil
+}
+
+func validateDurableJournalRef(ctx context.Context, adapter filesystem.Adapter, roots Roots, ref contracts.JournalRef) error {
+	journalPath := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), filepath.FromSlash(ref.Path)))
+	if !isUnderRoot(string(roots.StateRoot), string(journalPath)) {
+		return fmt.Errorf("journal_ref escapes state root")
+	}
+	data, err := adapter.ReadFileNoFollow(ctx, journalPath)
+	if err != nil {
+		return fmt.Errorf("journal_ref is not durable: %w", err)
+	}
+	prefixes, err := journalPrefixes(data)
+	if err != nil {
+		return err
+	}
+	for _, prefix := range prefixes {
+		if contracts.SHA256(prefix.bytes) == ref.SHA256 {
+			return nil
+		}
+	}
+	return fmt.Errorf("journal_ref does not match any exact durable operation journal prefix")
+}
+
+func validateLedgerLineage(records []contracts.OwnershipRecord) error {
+	stateByInstallation := map[contracts.InstallationID]string{}
+	recordByHash := map[contracts.SHA256Hex]contracts.OwnershipRecord{}
+	opFirst := map[contracts.OperationID]contracts.OwnershipRecord{}
+	opCount := map[contracts.OperationID]int{}
+	for _, record := range records {
+		op := record.OperationID
+		opCount[op]++
+		if opCount[op] > 2 {
+			return fmt.Errorf("operation_id %s appears more than twice", op)
+		}
+		first, seenOp := opFirst[op]
+		if !seenOp {
+			opFirst[op] = record
+		} else if !isCompensatingEvent(record.AggregateEvent) || record.CompensatingPriorState == nil || record.CompensatingPriorState.LedgerRecordHash != first.RecordHash {
+			return fmt.Errorf("operation_id %s repeated without exact compatible compensation pointer", op)
+		}
+		if record.CompensatingPriorState != nil {
+			prior, ok := recordByHash[record.CompensatingPriorState.LedgerRecordHash]
+			if !ok {
+				return fmt.Errorf("compensating prior state does not resolve to earlier ledger record")
+			}
+			if !equalStringSlices(prior.DeploymentIDs, record.CompensatingPriorState.DeploymentIDs) || prior.AggregateEvent != record.CompensatingPriorState.AggregateEvent {
+				return fmt.Errorf("compensating prior state does not match pointed ledger record")
+			}
+		}
+		current := stateByInstallation[record.InstallationID]
+		if err := validateLineageTransition(current, record.AggregateEvent); err != nil {
+			return err
+		}
+		stateByInstallation[record.InstallationID] = record.AggregateEvent
+		recordByHash[record.RecordHash] = record
+	}
+	return nil
+}
+
+func validateLineageTransition(current, next string) error {
+	if current == "" {
+		if next == "applied_unverified" || isCompensatingEvent(next) || next == contracts.RecoveryRequired {
+			return nil
+		}
+		return fmt.Errorf("first ownership event %q is illegal", next)
+	}
+	switch next {
+	case "installed_verified":
+		if current == "applied_unverified" {
+			return nil
+		}
+	case "removed_unverified":
+		if current == "applied_unverified" || current == "installed_verified" {
+			return nil
+		}
+	case "removed_verified":
+		if current == "removed_unverified" {
+			return nil
+		}
+	case "restored_unverified":
+		if current == "removed_verified" {
+			return nil
+		}
+	case "restored_verified":
+		if current == "restored_unverified" {
+			return nil
+		}
+	case "install_rolled_back", "uninstall_rolled_back", "restore_rolled_back", contracts.RecoveryRequired:
+		return nil
+	}
+	return fmt.Errorf("illegal ownership lineage transition %q -> %q", current, next)
+}
+
+func isCompensatingEvent(event string) bool {
+	return event == "install_rolled_back" || event == "uninstall_rolled_back" || event == "restore_rolled_back" || event == contracts.RecoveryRequired
 }
 
 func computeLedgerRecordHash(record contracts.OwnershipRecord) (contracts.SHA256Hex, error) {

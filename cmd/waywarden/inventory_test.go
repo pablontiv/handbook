@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,6 +164,23 @@ func (a inventoryCommandLockAdapter) LockShared(context.Context, contracts.Absol
 
 func (a inventoryCommandLockAdapter) LockExclusive(context.Context, contracts.AbsolutePath, string) (filesystem.LockHandle, error) {
 	return inventoryCommandNoopLock{}, nil
+}
+
+func (a inventoryCommandLockAdapter) ReadFileNoFollow(_ context.Context, path contracts.AbsolutePath) ([]byte, error) {
+	if _, err := os.Lstat(string(path)); err != nil {
+		return nil, err
+	}
+	return nil, filesystem.ErrUnsupportedCapability
+}
+
+func (a inventoryCommandLockAdapter) ListNoFollow(_ context.Context, path contracts.AbsolutePath) ([]filesystem.DirEntry, error) {
+	if _, err := os.Lstat(string(path)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fs.ErrNotExist
+		}
+		return nil, err
+	}
+	return nil, filesystem.ErrUnsupportedCapability
 }
 
 type inventoryCommandNoopLock struct{}

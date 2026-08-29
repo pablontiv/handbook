@@ -141,7 +141,7 @@ func ownershipRecordFixture(t *testing.T) contracts.OwnershipRecord {
 		RollbackAuthorityRefs:   []contracts.ArtifactRef{artifact},
 		Result:                  "verification_required",
 	}
-	return contracts.OwnershipRecord{Schema: contracts.SchemaOwnership, RecordID: "record", OperationID: op, InstallationID: "install", PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: contracts.JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: sha}, BackupSetRef: &contracts.BackupSetRef{BackupSetID: "backup", SHA256: sha}, DeploymentIDs: []string{"deployment-a"}, Deployments: []contracts.OwnershipDeploymentRecord{deployment}, AggregateEvent: "applied_unverified", OperationResult: "verification_required"}
+	return contracts.OwnershipRecord{Schema: contracts.SchemaOwnership, RecordID: "record", OperationID: op, InstallationID: "install", PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: contracts.JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: sha}, BackupSetRef: &contracts.BackupSetRef{BackupSetID: string(contracts.SHA256([]byte("backup"))), SHA256: sha}, DeploymentIDs: []string{"deployment-a"}, Deployments: []contracts.OwnershipDeploymentRecord{deployment}, AggregateEvent: "applied_unverified", OperationResult: "verification_required"}
 }
 
 func receiptFixture(t *testing.T) contracts.Receipt {

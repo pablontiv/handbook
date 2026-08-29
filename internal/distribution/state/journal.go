@@ -72,7 +72,7 @@ func (j *journal) Append(ctx context.Context, entry contracts.JournalEntry) (con
 	if err := j.fs.SyncDirectory(ctx, contracts.AbsolutePath(filepath.Dir(string(j.absolutePath())))); err != nil {
 		return contracts.JournalRef{}, err
 	}
-	data, err := j.fs.ReadFile(ctx, j.absolutePath())
+	data, err := j.fs.ReadFileNoFollow(ctx, j.absolutePath())
 	if err != nil {
 		return contracts.JournalRef{}, err
 	}
@@ -91,7 +91,7 @@ func (j *journal) absolutePath() contracts.AbsolutePath {
 }
 
 func (j *journal) read(ctx context.Context) ([]contracts.JournalEntry, error) {
-	data, err := j.fs.ReadFile(ctx, j.absolutePath())
+	data, err := j.fs.ReadFileNoFollow(ctx, j.absolutePath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return []contracts.JournalEntry{}, nil
 	}

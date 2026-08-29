@@ -1,11 +1,15 @@
 package contracts
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"path"
 	"regexp"
 	"strings"
+	"sync"
+
+	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
 //go:embed schemas/*.schema.json
@@ -37,8 +41,16 @@ func LoadSchema(schema SchemaID) ([]byte, error) {
 }
 
 func ValidateSchema(schema SchemaID, canonical []byte) error {
-	if _, err := LoadSchema(schema); err != nil {
+	compiled, err := compiledSchema(schema)
+	if err != nil {
 		return err
+	}
+	jsonValue, err := jsonschema.UnmarshalJSON(bytes.NewReader(canonical))
+	if err != nil {
+		return err
+	}
+	if err := compiled.Validate(jsonValue); err != nil {
+		return fmt.Errorf("%s schema validation failed: %w", schema, err)
 	}
 	var object map[string]any
 	if err := StrictParseCanonical(canonical, &object); err != nil {
@@ -62,7 +74,10 @@ func ValidateSchema(schema SchemaID, canonical []byte) error {
 		return err
 	case SchemaBackupManifest:
 		var v BackupManifest
-		return StrictParseCanonical(canonical, &v)
+		if err := StrictParseCanonical(canonical, &v); err != nil {
+			return err
+		}
+		return ValidateBackupManifest(v)
 	case SchemaOwnership:
 		var v OwnershipRecord
 		if err := StrictParseCanonical(canonical, &v); err != nil {
@@ -77,7 +92,10 @@ func ValidateSchema(schema SchemaID, canonical []byte) error {
 		return ValidateReceipt(v)
 	case SchemaVerification:
 		var v Verification
-		return StrictParseCanonical(canonical, &v)
+		if err := StrictParseCanonical(canonical, &v); err != nil {
+			return err
+		}
+		return ValidateVerification(v)
 	case SchemaOperatorObservation:
 		var v OperatorObservation
 		return StrictParseCanonical(canonical, &v)
@@ -98,11 +116,57 @@ func ValidateSchema(schema SchemaID, canonical []byte) error {
 	}
 }
 
+var (
+	compileSchemasOnce sync.Once
+	compiledSchemas    map[SchemaID]*jsonschema.Schema
+	compiledSchemasErr error
+)
+
+func compiledSchema(schema SchemaID) (*jsonschema.Schema, error) {
+	compileSchemasOnce.Do(func() {
+		compiler := jsonschema.NewCompiler()
+		compiler.AssertFormat()
+		for _, id := range AllSchemaIDs() {
+			data, err := LoadSchema(id)
+			if err != nil {
+				compiledSchemasErr = err
+				return
+			}
+			doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+			if err != nil {
+				compiledSchemasErr = fmt.Errorf("load %s: %w", id, err)
+				return
+			}
+			if err := compiler.AddResource(string(id), doc); err != nil {
+				compiledSchemasErr = fmt.Errorf("register %s: %w", id, err)
+				return
+			}
+		}
+		compiledSchemas = make(map[SchemaID]*jsonschema.Schema, len(schemaFiles))
+		for _, id := range AllSchemaIDs() {
+			compiled, err := compiler.Compile(string(id))
+			if err != nil {
+				compiledSchemasErr = fmt.Errorf("compile %s: %w", id, err)
+				return
+			}
+			compiledSchemas[id] = compiled
+		}
+	})
+	if compiledSchemasErr != nil {
+		return nil, compiledSchemasErr
+	}
+	compiled, ok := compiledSchemas[schema]
+	if !ok {
+		return nil, fmt.Errorf("unknown schema %q", schema)
+	}
+	return compiled, nil
+}
+
 var allowedTopLevel = map[SchemaID]map[string]bool{
 	SchemaManifest:            keys("schema", "repository", "skills", "runtime_roots", "adapters"),
 	SchemaInventory:           keys("schema", "manifest_digest", "sources", "deployments", "runtime_bindings", "ownership", "backups", "blockers"),
 	SchemaPlan:                keys("schema", "approval_digest", "payload"),
-	SchemaBackupManifest:      keys("schema", "backup_set_id", "installation_id", "operation", "entries", "verified"),
+	SchemaBackupManifest:      keys("schema", "backup_set_id", "installation_id", "operation_id", "operation", "entries", "verified"),
 	SchemaOwnership:           keys("schema", "record_id", "operation_id", "installation_id", "sequence", "previous_hash", "record_hash", "plan_ref", "inventory_ref", "journal_ref", "backup_set_ref", "verification_ref", "deployment_ids", "deployments", "aggregate_event", "operation_result", "failure_code", "compensating_prior_state"),
 	SchemaReceipt:             keys("schema", "receipt_id", "operation_id", "command", "approval_digest", "ledger_record_hash", "ready_journal_ref", "plan_ref", "inventory_ref", "backup_set_ref", "verification_ref", "preconditions", "deployment_results", "rollback_results", "cleanup_evidence_ref", "required_verification_status", "operation_result"),
 	SchemaVerification:        keys("schema", "verification_id", "operation_id", "selector", "assertions", "status", "operator_ref"),
@@ -133,8 +197,28 @@ var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var decimalPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
 
 func ValidateOperationID(id OperationID) error {
-	if !sha256Pattern.MatchString(string(id)) {
-		return fmt.Errorf("operation_id must be generated lower-case SHA-256-shape hex")
+	return validateGeneratedOpaqueID("operation_id", string(id))
+}
+
+func ValidateInstallationID(id InstallationID) error {
+	return validateGeneratedOpaqueID("installation_id", string(id))
+}
+
+func ValidateBackupSetID(id BackupSetID) error {
+	return validateGeneratedOpaqueID("backup_set_id", string(id))
+}
+
+func ValidateDeploymentID(id string) error {
+	return validateGeneratedOpaqueID("deployment_id", id)
+}
+
+func ValidateVerificationID(id string) error {
+	return validateGeneratedOpaqueID("verification_id", id)
+}
+
+func validateGeneratedOpaqueID(field, id string) error {
+	if !sha256Pattern.MatchString(id) {
+		return fmt.Errorf("%s must be generated lower-case SHA-256-shape hex", field)
 	}
 	return nil
 }

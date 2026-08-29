@@ -21,7 +21,7 @@ func TestOwnershipRecordRequiresAggregateOwnedEvidenceFields(t *testing.T) {
 		PlanRef:                artifact,
 		InventoryRef:           artifact,
 		JournalRef:             journal,
-		BackupSetRef:           &contracts.BackupSetRef{BackupSetID: "backup-round2", SHA256: sha},
+		BackupSetRef:           &contracts.BackupSetRef{BackupSetID: string(contracts.SHA256([]byte("backup-round2"))), SHA256: sha},
 		VerificationRef:        nil,
 		DeploymentIDs:          round3AggregateDeploymentIDs(),
 		Deployments:            deployments,
@@ -76,7 +76,7 @@ func TestReceiptRecordsReadyAuthorityAndDeploymentRollbackEvidence(t *testing.T)
 	ready := contracts.JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: sha}
 	deploymentResults := exactReceiptDeploymentResults(artifact)
 	approval := sha
-	receipt := contracts.Receipt{Schema: contracts.SchemaReceipt, ReceiptID: "receipt-round2", OperationID: op, Command: "apply", ApprovalDigest: &approval, LedgerRecordHash: sha, ReadyJournalRef: ready, PlanRef: &artifact, InventoryRef: &artifact, BackupSetRef: &contracts.BackupSetRef{BackupSetID: "backup-round2", SHA256: sha}, VerificationRef: nil, Preconditions: []contracts.Precondition{}, DeploymentResults: deploymentResults, RollbackResults: []contracts.OperationDeploymentResult{}, CleanupEvidenceRef: &artifact, RequiredVerificationStatus: "verification_required", OperationResult: "verification_required"}
+	receipt := contracts.Receipt{Schema: contracts.SchemaReceipt, ReceiptID: "receipt-round2", OperationID: op, Command: "apply", ApprovalDigest: &approval, LedgerRecordHash: sha, ReadyJournalRef: ready, PlanRef: &artifact, InventoryRef: &artifact, BackupSetRef: &contracts.BackupSetRef{BackupSetID: string(contracts.SHA256([]byte("backup-round2"))), SHA256: sha}, VerificationRef: nil, Preconditions: []contracts.Precondition{}, DeploymentResults: deploymentResults, RollbackResults: []contracts.OperationDeploymentResult{}, CleanupEvidenceRef: &artifact, RequiredVerificationStatus: "verification_required", OperationResult: "verification_required"}
 	canonical, err := contracts.CanonicalBytes(receipt)
 	if err != nil {
 		t.Fatal(err)

@@ -29,6 +29,7 @@ type Adapter interface {
 	AppendFileSync(context.Context, contracts.AbsolutePath, []byte) error
 	WriteFileNoReplaceSync(context.Context, contracts.AbsolutePath, []byte) error
 	ReadFile(context.Context, contracts.AbsolutePath) ([]byte, error)
+	ReadFileNoFollow(context.Context, contracts.AbsolutePath) ([]byte, error)
 	SyncDirectory(context.Context, contracts.AbsolutePath) error
 	PublishNoReplace(context.Context, contracts.AbsolutePath, []byte, ForbiddenRoots) error
 	OwnerPrivateLockRoot(PlatformEnv) (contracts.AbsolutePath, error)
@@ -213,6 +214,10 @@ func (localAdapter) WriteFileNoReplaceSync(_ context.Context, path contracts.Abs
 
 func (localAdapter) ReadFile(_ context.Context, path contracts.AbsolutePath) ([]byte, error) {
 	return os.ReadFile(filepath.Clean(string(path)))
+}
+
+func (localAdapter) ReadFileNoFollow(context.Context, contracts.AbsolutePath) ([]byte, error) {
+	return nil, ErrUnsupportedCapability
 }
 
 func (localAdapter) SyncDirectory(context.Context, contracts.AbsolutePath) error {

@@ -143,8 +143,11 @@ func validateBackupSetRef(ref *BackupSetRef) error {
 	if ref == nil {
 		return nil
 	}
-	if ref.BackupSetID == "" || !sha256Pattern.MatchString(string(ref.SHA256)) {
-		return fmt.Errorf("backup_set_ref is invalid")
+	if err := ValidateBackupSetID(ref.BackupSetID); err != nil {
+		return err
+	}
+	if !sha256Pattern.MatchString(string(ref.SHA256)) {
+		return fmt.Errorf("backup_set_ref sha256 must be lower-case hex SHA-256")
 	}
 	return nil
 }

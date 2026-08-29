@@ -42,6 +42,7 @@ func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 	op := string(SHA256([]byte("operation")))
 	artifact := ArtifactRef{Path: "runs/" + op + "/artifact.json", SHA256: sha, Bytes: "2"}
 	journal := JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: sha}
+	backupID := string(SHA256([]byte("backup")))
 	approval := sha
 	payload := MinimalPlanPayloadForTest()
 	payloadDigest, err := PayloadDigest(payload)
@@ -58,10 +59,10 @@ func MinimalCanonicalArtifactsForTest() []canonicalArtifactForTest {
 		{SchemaManifest, Manifest{Schema: SchemaManifest, Skills: []ManifestSkill{}, RuntimeRoots: []RuntimeRoot{}, Adapters: []AdapterBinding{}}},
 		{SchemaInventory, payload.Inventory},
 		{SchemaPlan, PlanEnvelope{Schema: SchemaPlan, ApprovalDigest: payloadDigest, Payload: payload}},
-		{SchemaBackupManifest, BackupManifest{Schema: SchemaBackupManifest, BackupSetID: "backup", InstallationID: "install", Operation: "apply", Entries: []BackupEntry{}, Verified: true}},
-		{SchemaOwnership, OwnershipRecord{Schema: SchemaOwnership, RecordID: "record", OperationID: OperationID(op), InstallationID: "install", DeploymentIDs: deploymentIDs, Deployments: deployments, PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: journal, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, AggregateEvent: "applied_unverified", OperationResult: "verification_required", FailureCode: nil, CompensatingPriorState: nil}},
-		{SchemaReceipt, Receipt{Schema: SchemaReceipt, ReceiptID: "receipt", OperationID: op, Command: "apply", ApprovalDigest: &approval, LedgerRecordHash: sha, ReadyJournalRef: journal, PlanRef: &artifact, InventoryRef: &artifact, BackupSetRef: &BackupSetRef{BackupSetID: "backup", SHA256: sha}, VerificationRef: nil, Preconditions: []Precondition{}, DeploymentResults: results, RollbackResults: []OperationDeploymentResult{}, CleanupEvidenceRef: &artifact, RequiredVerificationStatus: "verification_required", OperationResult: "verification_required"}},
-		{SchemaVerification, Verification{Schema: SchemaVerification, VerificationID: "verification", OperationID: op, Selector: Selector{Kind: SelectorInstallation, InstallationID: "install"}, Assertions: []VerificationAssertion{}, Status: "verified", OperatorRef: nil}},
+		{SchemaBackupManifest, BackupManifest{Schema: SchemaBackupManifest, BackupSetID: backupID, InstallationID: "install", OperationID: OperationID(op), Operation: "apply", Entries: []BackupEntry{}, Verified: true}},
+		{SchemaOwnership, OwnershipRecord{Schema: SchemaOwnership, RecordID: "record", OperationID: OperationID(op), InstallationID: "install", DeploymentIDs: deploymentIDs, Deployments: deployments, PreviousHash: nil, PlanRef: artifact, InventoryRef: artifact, JournalRef: journal, BackupSetRef: &BackupSetRef{BackupSetID: backupID, SHA256: sha}, VerificationRef: nil, AggregateEvent: "applied_unverified", OperationResult: "verification_required", FailureCode: nil, CompensatingPriorState: nil}},
+		{SchemaReceipt, Receipt{Schema: SchemaReceipt, ReceiptID: "receipt", OperationID: op, Command: "apply", ApprovalDigest: &approval, LedgerRecordHash: sha, ReadyJournalRef: journal, PlanRef: &artifact, InventoryRef: &artifact, BackupSetRef: &BackupSetRef{BackupSetID: backupID, SHA256: sha}, VerificationRef: nil, Preconditions: []Precondition{}, DeploymentResults: results, RollbackResults: []OperationDeploymentResult{}, CleanupEvidenceRef: &artifact, RequiredVerificationStatus: "verification_required", OperationResult: "verification_required"}},
+		{SchemaVerification, Verification{Schema: SchemaVerification, VerificationID: string(SHA256([]byte("verification"))), OperationID: op, Selector: Selector{Kind: SelectorInstallation, InstallationID: "install"}, Assertions: []VerificationAssertion{}, Status: "verified", OperatorRef: nil}},
 		{SchemaOperatorObservation, OperatorObservation{Schema: SchemaOperatorObservation, ObservationID: "observation", Runtime: "claude", Challenge: "challenge", Declaration: "visible", Freshness: "fresh"}},
 		{SchemaCommandResult, CommandResult{Schema: SchemaCommandResult, Kind: ResultArtifact, Command: "inventory", Status: ResultStatusSuccess, Artifact: &ArtifactResult{Schema: SchemaInventory, SHA256: sha, Bytes: "2", Label: "stdout"}}},
 		{SchemaError, PublicError{Schema: SchemaError, Code: "invalid_input", Message: "Invalid input.", Exit: ExitInvalidInput, Command: "plan", Evidence: []EvidenceRef{}}},

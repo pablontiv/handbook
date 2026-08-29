@@ -92,16 +92,24 @@ func TestRecoveryClassificationFailureBoundaries(t *testing.T) {
 		{
 			name: "ledger recovery required aggregate event",
 			seed: func(ctx context.Context, t *testing.T, adapter *filesystem.MemoryAdapter, store state.Store, roots state.Roots) {
-				record := ownershipRecord("install-rec", opID("op-rec"), "recovery_required")
-				record.JournalRef = appendStartedJournalForTest(ctx, t, store, roots, record.OperationID)
+				op := opID("op-rec")
+				prior := ownershipRecord("install-rec", op, "applied_unverified")
+				prior.JournalRef = appendStartedJournalForTest(ctx, t, store, roots, prior.OperationID)
 				ledger, err := store.OpenLedger(ctx, roots)
 				if err != nil {
 					t.Fatal(err)
 				}
+				publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &prior)
+				priorHash, err := ledger.Append(ctx, prior)
+				if err != nil {
+					t.Fatal(err)
+				}
+				record := ownershipRecord("install-rec", op, "recovery_required")
+				record.JournalRef = prior.JournalRef
 				failure := "mutation_unprovable"
 				record.FailureCode = &failure
 				record.OperationResult = contracts.RecoveryRequired
-				record.CompensatingPriorState = &contracts.CompensatingPriorState{AggregateEvent: "applied_unverified", DeploymentIDs: record.DeploymentIDs, LedgerRecordHash: contracts.SHA256([]byte("prior"))}
+				record.CompensatingPriorState = &contracts.CompensatingPriorState{AggregateEvent: "applied_unverified", DeploymentIDs: record.DeploymentIDs, LedgerRecordHash: priorHash}
 				for i := range record.Deployments {
 					record.Deployments[i].Result = contracts.RecoveryRequired
 					for j := range record.Deployments[i].RuntimeBindingSummaries {

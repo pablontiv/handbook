@@ -83,7 +83,7 @@ func BuildPlan(_ context.Context, artifact InventoryArtifact, opts Options) (Res
 	inventory := cloneInventory(artifact.inventory)
 	deployments := cloneDeployments(inventory.Deployments)
 	sortDeployments(deployments)
-	blockers := append([]contracts.Blocker(nil), inventory.Blockers...)
+	blockers := append(make([]contracts.Blocker, 0, len(inventory.Blockers)), inventory.Blockers...)
 
 	var planningErr error
 	switch opts.Intent {
@@ -351,7 +351,7 @@ func preconditionsFor(deployments []contracts.Deployment) []contracts.Preconditi
 }
 
 func verificationRequirementsFor(deployments []contracts.Deployment) []contracts.VerificationRequirement {
-	var requirements []contracts.VerificationRequirement
+	requirements := []contracts.VerificationRequirement{}
 	for _, deployment := range deployments {
 		for _, binding := range deployment.RuntimeBindings {
 			requirements = append(requirements, contracts.VerificationRequirement{DeploymentID: deployment.DeploymentID, Runtime: binding.Runtime, Required: true})
@@ -415,7 +415,7 @@ func cloneDeployments(in []contracts.Deployment) []contracts.Deployment {
 	out := make([]contracts.Deployment, len(in))
 	for i, deployment := range in {
 		out[i] = deployment
-		out[i].RuntimeBindings = append([]contracts.RuntimeBinding(nil), deployment.RuntimeBindings...)
+		out[i].RuntimeBindings = append(make([]contracts.RuntimeBinding, 0, len(deployment.RuntimeBindings)), deployment.RuntimeBindings...)
 		sortBindings(out[i].RuntimeBindings)
 	}
 	return out

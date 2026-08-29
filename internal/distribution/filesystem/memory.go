@@ -17,6 +17,7 @@ type MemoryAdapter struct {
 	platform       string
 	env            PlatformEnv
 	files          map[string][]byte
+	symlinks       map[string]string
 	dirs           map[string]bool
 	durableFiles   map[string][]byte
 	durableDirs    map[string]bool
@@ -26,6 +27,7 @@ type MemoryAdapter struct {
 	locks          map[string]memoryLockState
 	lockCloseErr   map[string]error
 	writeFailures  map[memoryWriteFailureKey]memoryWriteFailure
+	writeAttempts  map[memoryWriteAttemptKey]int
 	ambiguousFails []string
 	shared         []string
 	exclusive      []string
@@ -55,9 +57,15 @@ type memoryWriteFailureKey struct {
 	path      string
 }
 
-type memoryWriteFailure struct {
+type memoryWriteAttemptKey struct {
+	key    memoryWriteFailureKey
 	timing FailureTiming
-	err    error
+}
+
+type memoryWriteFailure struct {
+	timing     FailureTiming
+	occurrence int
+	err        error
 }
 
 func NewMemoryAdapter() *MemoryAdapter {
@@ -65,6 +73,7 @@ func NewMemoryAdapter() *MemoryAdapter {
 		platform:      "linux",
 		env:           PlatformEnv{Home: "/memory/home", XDGStateHome: "/memory/state", LocalAppData: "C:/memory/local"},
 		files:         map[string][]byte{},
+		symlinks:      map[string]string{},
 		dirs:          map[string]bool{},
 		durableFiles:  map[string][]byte{},
 		durableDirs:   map[string]bool{},
@@ -74,6 +83,7 @@ func NewMemoryAdapter() *MemoryAdapter {
 		locks:         map[string]memoryLockState{},
 		lockCloseErr:  map[string]error{},
 		writeFailures: map[memoryWriteFailureKey]memoryWriteFailure{},
+		writeAttempts: map[memoryWriteAttemptKey]int{},
 	}
 }
 
@@ -117,7 +127,20 @@ func (m *MemoryAdapter) PutFile(path contracts.AbsolutePath, data []byte) {
 	m.ensureDurabilityMaps()
 	clean := cleanMemoryPath(string(path))
 	m.files[clean] = append([]byte(nil), data...)
+	delete(m.symlinks, clean)
 	m.durableFiles[clean] = append([]byte(nil), data...)
+	markDirectoryAncestors(m.dirs, filepath.Dir(clean))
+	markDirectoryAncestors(m.durableDirs, filepath.Dir(clean))
+}
+
+func (m *MemoryAdapter) PutSymlink(path contracts.AbsolutePath, target string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureDurabilityMaps()
+	clean := cleanMemoryPath(string(path))
+	delete(m.files, clean)
+	delete(m.durableFiles, clean)
+	m.symlinks[clean] = target
 	markDirectoryAncestors(m.dirs, filepath.Dir(clean))
 	markDirectoryAncestors(m.durableDirs, filepath.Dir(clean))
 }
@@ -130,6 +153,7 @@ func (m *MemoryAdapter) CrashClone() *MemoryAdapter {
 	clone.platform = m.platform
 	clone.env = m.env
 	clone.files = cloneFileMap(m.durableFiles)
+	clone.symlinks = cloneStringMap(m.symlinks)
 	clone.durableFiles = cloneFileMap(m.durableFiles)
 	clone.dirs = cloneBoolMap(m.durableDirs)
 	clone.durableDirs = cloneBoolMap(m.durableDirs)
@@ -161,14 +185,22 @@ func (m *MemoryAdapter) ActiveLocks() map[string]ActiveLockState {
 }
 
 func (m *MemoryAdapter) SetWriteFailure(operation string, path contracts.AbsolutePath, timing FailureTiming, err error) {
+	m.SetWriteFailureOccurrence(operation, path, timing, 1, err)
+}
+
+func (m *MemoryAdapter) SetWriteFailureOccurrence(operation string, path contracts.AbsolutePath, timing FailureTiming, occurrence int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if occurrence < 1 {
+		occurrence = 1
+	}
 	key := memoryWriteFailureKey{operation: operation, path: cleanMemoryPath(string(path))}
+	delete(m.writeAttempts, memoryWriteAttemptKey{key: key, timing: timing})
 	if err == nil {
 		delete(m.writeFailures, key)
 		return
 	}
-	m.writeFailures[key] = memoryWriteFailure{timing: timing, err: err}
+	m.writeFailures[key] = memoryWriteFailure{timing: timing, occurrence: occurrence, err: err}
 }
 
 func (m *MemoryAdapter) AmbiguousDurabilityFailures() []contracts.AbsolutePath {
@@ -276,6 +308,21 @@ func (m *MemoryAdapter) ListNoFollow(_ context.Context, path contracts.AbsoluteP
 			seen[name] = DirEntry{Name: name, Kind: "directory", Path: contracts.AbsolutePath(filepath.Join(root, name))}
 		}
 	}
+	for link := range m.symlinks {
+		if !strings.HasPrefix(link, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(link, prefix)
+		name := firstPathPart(rest)
+		if name == "" {
+			continue
+		}
+		kind := "symlink"
+		if strings.Contains(rest, string(filepath.Separator)) {
+			kind = "directory"
+		}
+		seen[name] = DirEntry{Name: name, Kind: kind, Path: contracts.AbsolutePath(filepath.Join(root, name))}
+	}
 	for file := range m.files {
 		if !strings.HasPrefix(file, prefix) {
 			continue
@@ -315,8 +362,13 @@ func (m *MemoryAdapter) ObserveNoFollow(_ context.Context, path contracts.Absolu
 	defer m.mu.Unlock()
 	clean := cleanMemoryPath(string(path))
 	_, fileExists := m.files[clean]
+	_, linkExists := m.symlinks[clean]
 	_, treeExists := m.trees[clean]
-	return Observation{Path: contracts.AbsolutePath(clean), Exists: fileExists || treeExists, Kind: memoryKind(fileExists, treeExists), Identity: clean}, nil
+	obs := Observation{Path: contracts.AbsolutePath(clean), Exists: fileExists || linkExists || treeExists, Kind: memoryKind(fileExists, linkExists, treeExists), Identity: clean}
+	if linkExists {
+		obs.Target = m.symlinks[clean]
+	}
+	return obs, nil
 }
 
 func (m *MemoryAdapter) SnapshotTree(_ context.Context, root contracts.AbsolutePath) (TreeSnapshot, error) {
@@ -408,15 +460,13 @@ func (m *MemoryAdapter) EnsureDirSync(_ context.Context, path contracts.Absolute
 	defer m.mu.Unlock()
 	m.ensureDurabilityMaps()
 	clean := cleanMemoryPath(string(path))
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "ensure-dir", path: clean}]; ok && failure.timing == FailBeforeWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "ensure-dir", path: clean})
+	if failure, ok := m.takeWriteFailure("ensure-dir", clean, FailBeforeWrite); ok {
 		return failure.err
 	}
 	markDirectoryAncestors(m.dirs, clean)
 	markDirectoryAncestors(m.durableDirs, clean)
 	m.writeLog = append(m.writeLog, "ensure-dir:"+clean)
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "ensure-dir", path: clean}]; ok && failure.timing == FailAfterWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "ensure-dir", path: clean})
+	if failure, ok := m.takeWriteFailure("ensure-dir", clean, FailAfterWrite); ok {
 		m.ambiguousFails = append(m.ambiguousFails, clean)
 		return failure.err
 	}
@@ -428,8 +478,7 @@ func (m *MemoryAdapter) AppendFileSync(_ context.Context, path contracts.Absolut
 	defer m.mu.Unlock()
 	m.ensureDurabilityMaps()
 	clean := cleanMemoryPath(string(path))
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "append", path: clean}]; ok && failure.timing == FailBeforeWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "append", path: clean})
+	if failure, ok := m.takeWriteFailure("append", clean, FailBeforeWrite); ok {
 		return failure.err
 	}
 	_, wasDurable := m.durableFiles[clean]
@@ -439,8 +488,7 @@ func (m *MemoryAdapter) AppendFileSync(_ context.Context, path contracts.Absolut
 		m.durableFiles[clean] = append([]byte(nil), m.files[clean]...)
 	}
 	m.writeLog = append(m.writeLog, "append:"+clean)
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "append", path: clean}]; ok && failure.timing == FailAfterWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "append", path: clean})
+	if failure, ok := m.takeWriteFailure("append", clean, FailAfterWrite); ok {
 		m.ambiguousFails = append(m.ambiguousFails, clean)
 		return failure.err
 	}
@@ -452,8 +500,7 @@ func (m *MemoryAdapter) WriteFileNoReplaceSync(_ context.Context, path contracts
 	defer m.mu.Unlock()
 	m.ensureDurabilityMaps()
 	clean := cleanMemoryPath(string(path))
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "write-no-replace", path: clean}]; ok && failure.timing == FailBeforeWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "write-no-replace", path: clean})
+	if failure, ok := m.takeWriteFailure("write-no-replace", clean, FailBeforeWrite); ok {
 		return failure.err
 	}
 	if _, exists := m.files[clean]; exists {
@@ -462,8 +509,7 @@ func (m *MemoryAdapter) WriteFileNoReplaceSync(_ context.Context, path contracts
 	m.files[clean] = append([]byte(nil), data...)
 	markDirectoryAncestors(m.dirs, filepath.Dir(clean))
 	m.writeLog = append(m.writeLog, "write-no-replace:"+clean)
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "write-no-replace", path: clean}]; ok && failure.timing == FailAfterWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "write-no-replace", path: clean})
+	if failure, ok := m.takeWriteFailure("write-no-replace", clean, FailAfterWrite); ok {
 		m.ambiguousFails = append(m.ambiguousFails, clean)
 		return failure.err
 	}
@@ -480,19 +526,31 @@ func (m *MemoryAdapter) ReadFile(_ context.Context, path contracts.AbsolutePath)
 	return append([]byte(nil), data...), nil
 }
 
+func (m *MemoryAdapter) ReadFileNoFollow(_ context.Context, path contracts.AbsolutePath) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clean := cleanMemoryPath(string(path))
+	if _, ok := m.symlinks[clean]; ok {
+		return nil, ErrUnsupportedCapability
+	}
+	data, ok := m.files[clean]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return append([]byte(nil), data...), nil
+}
+
 func (m *MemoryAdapter) SyncDirectory(_ context.Context, path contracts.AbsolutePath) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureDurabilityMaps()
 	clean := cleanMemoryPath(string(path))
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "sync-dir", path: clean}]; ok && failure.timing == FailBeforeWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "sync-dir", path: clean})
+	if failure, ok := m.takeWriteFailure("sync-dir", clean, FailBeforeWrite); ok {
 		return failure.err
 	}
 	markDurableChildren(m, clean)
 	m.writeLog = append(m.writeLog, "sync-dir:"+clean)
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "sync-dir", path: clean}]; ok && failure.timing == FailAfterWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "sync-dir", path: clean})
+	if failure, ok := m.takeWriteFailure("sync-dir", clean, FailAfterWrite); ok {
 		m.ambiguousFails = append(m.ambiguousFails, clean)
 		return failure.err
 	}
@@ -504,8 +562,7 @@ func (m *MemoryAdapter) PublishNoReplace(_ context.Context, destination contract
 	defer m.mu.Unlock()
 	m.ensureDurabilityMaps()
 	clean := cleanMemoryPath(string(destination))
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "publish", path: clean}]; ok && failure.timing == FailBeforeWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "publish", path: clean})
+	if failure, ok := m.takeWriteFailure("publish", clean, FailBeforeWrite); ok {
 		return failure.err
 	}
 	if err := validatePublishDestination(clean, forbiddenRoots); err != nil {
@@ -517,8 +574,7 @@ func (m *MemoryAdapter) PublishNoReplace(_ context.Context, destination contract
 	m.files[clean] = append([]byte(nil), canonical...)
 	markDirectoryAncestors(m.dirs, filepath.Dir(clean))
 	m.writeLog = append(m.writeLog, "publish:"+clean)
-	if failure, ok := m.writeFailures[memoryWriteFailureKey{operation: "publish", path: clean}]; ok && failure.timing == FailAfterWrite {
-		delete(m.writeFailures, memoryWriteFailureKey{operation: "publish", path: clean})
+	if failure, ok := m.takeWriteFailure("publish", clean, FailAfterWrite); ok {
 		m.ambiguousFails = append(m.ambiguousFails, clean)
 		return failure.err
 	}
@@ -550,6 +606,22 @@ func (m *MemoryAdapter) OwnerPrivateLockRoot(env PlatformEnv) (contracts.Absolut
 		}
 		return contracts.AbsolutePath(filepath.Join(base, "waywarden", "locks")), nil
 	}
+}
+
+func (m *MemoryAdapter) takeWriteFailure(operation, path string, timing FailureTiming) (memoryWriteFailure, bool) {
+	key := memoryWriteFailureKey{operation: operation, path: path}
+	failure, ok := m.writeFailures[key]
+	if !ok || failure.timing != timing {
+		return memoryWriteFailure{}, false
+	}
+	attemptKey := memoryWriteAttemptKey{key: key, timing: timing}
+	m.writeAttempts[attemptKey]++
+	if m.writeAttempts[attemptKey] != failure.occurrence {
+		return memoryWriteFailure{}, false
+	}
+	delete(m.writeFailures, key)
+	delete(m.writeAttempts, attemptKey)
+	return failure, true
 }
 
 func (m *MemoryAdapter) ensureDurabilityMaps() {
@@ -622,6 +694,14 @@ func cloneTreeMap(in map[string]TreeSnapshot) map[string]TreeSnapshot {
 	return out
 }
 
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 func clonePhysicalMap(in map[string]PhysicalIdentity) map[string]PhysicalIdentity {
 	out := make(map[string]PhysicalIdentity, len(in))
 	for k, v := range in {
@@ -656,10 +736,12 @@ func firstPathPart(path string) string {
 	return path
 }
 
-func memoryKind(fileExists, treeExists bool) string {
+func memoryKind(fileExists, linkExists, treeExists bool) string {
 	switch {
 	case treeExists:
 		return "directory"
+	case linkExists:
+		return "symlink"
 	case fileExists:
 		return "file"
 	default:

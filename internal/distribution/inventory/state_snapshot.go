@@ -25,7 +25,7 @@ func snapshotState(ctx context.Context, adapter filesystem.Adapter, stateRoot, l
 	}
 	defer lock.Close()
 
-	data, err := adapter.ReadFile(ctx, ledgerPath(stateRoot))
+	data, err := adapter.ReadFileNoFollow(ctx, ledgerPath(stateRoot))
 	if errors.Is(err, fs.ErrNotExist) {
 		return stateSnapshot{Ownership: []contracts.OwnershipSnapshot{}, Backups: []contracts.BackupSetSnapshot{}}, nil
 	}

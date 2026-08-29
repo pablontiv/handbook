@@ -136,7 +136,7 @@ func round4StateOwnershipRecord(op string, ids []string, planRef, inventoryRef c
 		}
 		deployments = append(deployments, contracts.OwnershipDeploymentRecord{DeploymentID: id, BeforeObservation: before, AfterObservation: after, RuntimeBindingSummaries: bindings, OriginalPreimage: before, InstalledPostimage: &after, BackupEntryRef: &artifact, CleanupEvidenceRef: &artifact, RollbackAuthorityRefs: []contracts.ArtifactRef{artifact}, Result: "verification_required"})
 	}
-	return contracts.OwnershipRecord{Schema: contracts.SchemaOwnership, RecordID: "record-" + op, OperationID: contracts.OperationID(op), InstallationID: "install", PreviousHash: nil, PlanRef: planRef, InventoryRef: inventoryRef, JournalRef: contracts.JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: sha}, BackupSetRef: &contracts.BackupSetRef{BackupSetID: "backup", SHA256: sha}, DeploymentIDs: append([]string(nil), ids...), Deployments: deployments, AggregateEvent: "applied_unverified", OperationResult: "verification_required"}
+	return contracts.OwnershipRecord{Schema: contracts.SchemaOwnership, RecordID: "record-" + op, OperationID: contracts.OperationID(op), InstallationID: "install", PreviousHash: nil, PlanRef: planRef, InventoryRef: inventoryRef, JournalRef: contracts.JournalRef{OperationID: op, Path: "runs/" + op + "/journal.ndjson", SHA256: sha}, BackupSetRef: &contracts.BackupSetRef{BackupSetID: string(contracts.SHA256([]byte("backup"))), SHA256: sha}, DeploymentIDs: append([]string(nil), ids...), Deployments: deployments, AggregateEvent: "applied_unverified", OperationResult: "verification_required"}
 }
 
 func publishRound4BackupManifest(t *testing.T, adapter *filesystem.MemoryAdapter, roots state.Roots, record *contracts.OwnershipRecord) {
@@ -144,7 +144,11 @@ func publishRound4BackupManifest(t *testing.T, adapter *filesystem.MemoryAdapter
 	if record.BackupSetRef == nil {
 		return
 	}
-	manifest := contracts.BackupManifest{Schema: contracts.SchemaBackupManifest, BackupSetID: record.BackupSetRef.BackupSetID, InstallationID: string(record.InstallationID), Operation: "apply", Entries: []contracts.BackupEntry{}, Verified: true}
+	entries := make([]contracts.BackupEntry, 0, len(record.DeploymentIDs))
+	for _, id := range record.DeploymentIDs {
+		entries = append(entries, contracts.BackupEntry{DeploymentID: id, Kind: "typed_missing", Payload: nil, Metadata: []string{}})
+	}
+	manifest := contracts.BackupManifest{Schema: contracts.SchemaBackupManifest, BackupSetID: record.BackupSetRef.BackupSetID, InstallationID: string(record.InstallationID), OperationID: record.OperationID, Operation: "apply", Entries: entries, Verified: true}
 	manifestBytes, err := contracts.CanonicalBytes(manifest)
 	if err != nil {
 		t.Fatal(err)

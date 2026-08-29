@@ -227,7 +227,7 @@ func TestLedgerAppendCanonicalHashChainRejectsPartialAndMismatch(t *testing.T) {
 	if firstHash == secondHash {
 		t.Fatalf("ledger hashes did not advance")
 	}
-	data, err := adapter.ReadFile(ctx, roots.LedgerPath())
+	data, err := adapter.ReadFileNoFollow(ctx, roots.LedgerPath())
 	if err != nil {
 		t.Fatalf("Read ledger error = %v", err)
 	}
@@ -436,7 +436,7 @@ func ownershipRecord(installationID, operationID, event string) contracts.Owners
 		PlanRef:                artifact,
 		InventoryRef:           artifact,
 		JournalRef:             journal,
-		BackupSetRef:           &contracts.BackupSetRef{BackupSetID: "backup-" + installationID, SHA256: sha},
+		BackupSetRef:           &contracts.BackupSetRef{BackupSetID: string(contracts.SHA256([]byte("backup-" + installationID + "-" + operationID))), SHA256: sha},
 		VerificationRef:        nil,
 		AggregateEvent:         event,
 		OperationResult:        "verification_required",
@@ -497,7 +497,7 @@ func prepareReceiptProtocol(ctx context.Context, t *testing.T, adapter *filesyst
 	if err != nil {
 		t.Fatal(err)
 	}
-	record := ownershipRecord("install", string(op), "applied_unverified")
+	record := ownershipRecord("install-"+string(op), string(op), "applied_unverified")
 	record.JournalRef = ledgerRef
 	publishAuthorityArtifactsForStateTest(ctx, t, adapter, store, roots, &record)
 	ledgerHash, err := ledger.Append(ctx, record)
@@ -567,7 +567,11 @@ func publishAuthorityArtifactsForStateTest(ctx context.Context, t *testing.T, ad
 	record.PlanRef = planRef
 	record.InventoryRef = inventoryRef
 	if record.BackupSetRef != nil {
-		manifest := contracts.BackupManifest{Schema: contracts.SchemaBackupManifest, BackupSetID: record.BackupSetRef.BackupSetID, InstallationID: string(record.InstallationID), Operation: "apply", Entries: []contracts.BackupEntry{}, Verified: true}
+		entries := make([]contracts.BackupEntry, 0, len(record.DeploymentIDs))
+		for _, id := range record.DeploymentIDs {
+			entries = append(entries, contracts.BackupEntry{DeploymentID: id, Kind: "typed_missing", Payload: nil, Metadata: []string{}})
+		}
+		manifest := contracts.BackupManifest{Schema: contracts.SchemaBackupManifest, BackupSetID: record.BackupSetRef.BackupSetID, InstallationID: string(record.InstallationID), OperationID: record.OperationID, Operation: "apply", Entries: entries, Verified: true}
 		manifestBytes, err := contracts.CanonicalBytes(manifest)
 		if err != nil {
 			t.Fatal(err)
@@ -600,7 +604,7 @@ func receiptForTest(op contracts.OperationID) contracts.Receipt {
 		ReadyJournalRef:            journal,
 		PlanRef:                    &artifact,
 		InventoryRef:               &artifact,
-		BackupSetRef:               &contracts.BackupSetRef{BackupSetID: "backup-install", SHA256: sha},
+		BackupSetRef:               &contracts.BackupSetRef{BackupSetID: string(contracts.SHA256([]byte("backup-install"))), SHA256: sha},
 		VerificationRef:            nil,
 		Preconditions:              []contracts.Precondition{},
 		DeploymentResults:          operationDeploymentResultsForStateTest(artifact, sha),

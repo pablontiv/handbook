@@ -70,7 +70,7 @@ func (s *store) PublishReceipt(ctx context.Context, roots Roots, op contracts.Op
 	if _, err := journal.Append(ctx, contracts.JournalEntry{OperationID: string(op), Boundary: "committed", Result: receipt.OperationResult, ReceiptSHA256: receiptDigest, FinalReceiptPath: "receipt.json"}); err != nil {
 		return contracts.ArtifactRef{}, err
 	}
-	preservedDraft, err := s.fs.ReadFile(ctx, draftPath)
+	preservedDraft, err := s.fs.ReadFileNoFollow(ctx, draftPath)
 	if err != nil {
 		return contracts.ArtifactRef{}, err
 	}
@@ -142,7 +142,7 @@ func validateReadyCommitEvidence(ctx context.Context, s *store, roots Roots, op 
 		return fmt.Errorf("ready_journal_ref must bind a later prefix than ledger journal_ref")
 	}
 	abs := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), filepath.FromSlash(ready.Path)))
-	data, err := s.fs.ReadFile(ctx, abs)
+	data, err := s.fs.ReadFileNoFollow(ctx, abs)
 	if err != nil {
 		return err
 	}
@@ -245,7 +245,7 @@ func verifyReadyJournalRef(ctx context.Context, s *store, roots Roots, op contra
 		return err
 	}
 	abs := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), filepath.FromSlash(ref.Path)))
-	data, err := s.fs.ReadFile(ctx, abs)
+	data, err := s.fs.ReadFileNoFollow(ctx, abs)
 	if err != nil {
 		return err
 	}

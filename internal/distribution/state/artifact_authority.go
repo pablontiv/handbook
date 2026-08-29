@@ -28,7 +28,7 @@ func validateOwnershipRecordContext(ctx context.Context, adapter filesystem.Adap
 		return err
 	}
 	if record.BackupSetRef != nil {
-		if err := validateBackupManifestRef(ctx, adapter, roots, *record.BackupSetRef); err != nil {
+		if err := validateBackupManifestForRecord(ctx, adapter, roots, record); err != nil {
 			return err
 		}
 	}
@@ -55,7 +55,7 @@ func validateReceiptContext(ctx context.Context, adapter filesystem.Adapter, roo
 		return err
 	}
 	if receipt.BackupSetRef != nil {
-		if err := validateBackupManifestRef(ctx, adapter, roots, *receipt.BackupSetRef); err != nil {
+		if err := validateBackupManifestForReceipt(ctx, adapter, roots, receipt); err != nil {
 			return err
 		}
 	}
@@ -138,7 +138,7 @@ func readCanonicalArtifactRef(ctx context.Context, adapter filesystem.Adapter, r
 	if !isUnderRoot(string(roots.StateRoot), string(abs)) {
 		return nil, fmt.Errorf("artifact ref escapes state root")
 	}
-	data, err := adapter.ReadFile(ctx, abs)
+	data, err := adapter.ReadFileNoFollow(ctx, abs)
 	if err != nil {
 		return nil, err
 	}
@@ -154,22 +154,91 @@ func readCanonicalArtifactRef(ctx context.Context, adapter filesystem.Adapter, r
 	return data, nil
 }
 
-func validateBackupManifestRef(ctx context.Context, adapter filesystem.Adapter, roots Roots, ref contracts.BackupSetRef) error {
-	if ref.BackupSetID == "" {
-		return fmt.Errorf("backup_set_ref is invalid")
+func readBackupManifestRef(ctx context.Context, adapter filesystem.Adapter, roots Roots, ref contracts.BackupSetRef) (contracts.BackupManifest, error) {
+	if err := contracts.ValidateBackupSetID(ref.BackupSetID); err != nil {
+		return contracts.BackupManifest{}, err
 	}
-	path := contracts.AbsolutePath(filepath.Join(string(roots.StateRoot), "backups", ref.BackupSetID, "manifest.json"))
-	data, err := adapter.ReadFile(ctx, path)
+	backupRoot := filepath.Join(string(roots.StateRoot), "backups", ref.BackupSetID)
+	path := contracts.AbsolutePath(filepath.Join(backupRoot, "manifest.json"))
+	if !isUnderRoot(filepath.Join(string(roots.StateRoot), "backups"), string(path)) || !isUnderRoot(backupRoot, string(path)) {
+		return contracts.BackupManifest{}, fmt.Errorf("backup manifest path escapes backup set root")
+	}
+	data, err := adapter.ReadFileNoFollow(ctx, path)
 	if err != nil {
-		return fmt.Errorf("backup manifest: %w", err)
+		return contracts.BackupManifest{}, fmt.Errorf("backup manifest: %w", err)
 	}
 	if contracts.SHA256(data) != ref.SHA256 {
-		return fmt.Errorf("backup manifest digest mismatch")
+		return contracts.BackupManifest{}, fmt.Errorf("backup manifest digest mismatch")
 	}
 	if err := contracts.ValidateSchema(contracts.SchemaBackupManifest, data); err != nil {
-		return fmt.Errorf("backup manifest: %w", err)
+		return contracts.BackupManifest{}, fmt.Errorf("backup manifest: %w", err)
+	}
+	var manifest contracts.BackupManifest
+	if err := contracts.StrictParseCanonical(data, &manifest); err != nil {
+		return contracts.BackupManifest{}, err
+	}
+	return manifest, nil
+}
+
+func validateBackupManifestForRecord(ctx context.Context, adapter filesystem.Adapter, roots Roots, record contracts.OwnershipRecord) error {
+	manifest, err := readBackupManifestRef(ctx, adapter, roots, *record.BackupSetRef)
+	if err != nil {
+		return err
+	}
+	if manifest.BackupSetID != record.BackupSetRef.BackupSetID {
+		return fmt.Errorf("backup manifest backup_set_id mismatch")
+	}
+	if manifest.InstallationID != record.InstallationID {
+		return fmt.Errorf("backup manifest installation_id mismatch")
+	}
+	if manifest.OperationID != record.OperationID {
+		return fmt.Errorf("backup manifest operation_id mismatch")
+	}
+	if !manifest.Verified {
+		return fmt.Errorf("backup manifest must be verified")
+	}
+	if !backupManifestEntriesMatchDeployments(manifest, record.DeploymentIDs) {
+		return fmt.Errorf("backup manifest entries do not match ledger deployments")
 	}
 	return nil
+}
+
+func validateBackupManifestForReceipt(ctx context.Context, adapter filesystem.Adapter, roots Roots, receipt contracts.Receipt) error {
+	manifest, err := readBackupManifestRef(ctx, adapter, roots, *receipt.BackupSetRef)
+	if err != nil {
+		return err
+	}
+	if manifest.BackupSetID != receipt.BackupSetRef.BackupSetID {
+		return fmt.Errorf("backup manifest backup_set_id mismatch")
+	}
+	if manifest.OperationID != contracts.OperationID(receipt.OperationID) {
+		return fmt.Errorf("backup manifest operation_id mismatch")
+	}
+	if !manifest.Verified {
+		return fmt.Errorf("backup manifest must be verified")
+	}
+	if !backupManifestEntriesMatchDeployments(manifest, receiptDeploymentIDs(receipt.DeploymentResults)) {
+		return fmt.Errorf("backup manifest entries do not match receipt deployments")
+	}
+	return nil
+}
+
+func backupManifestEntriesMatchDeployments(manifest contracts.BackupManifest, deploymentIDs []string) bool {
+	if len(manifest.Entries) != len(deploymentIDs) {
+		return false
+	}
+	want := map[string]bool{}
+	for _, id := range deploymentIDs {
+		want[id] = true
+	}
+	seen := map[string]bool{}
+	for _, entry := range manifest.Entries {
+		if !want[entry.DeploymentID] || seen[entry.DeploymentID] {
+			return false
+		}
+		seen[entry.DeploymentID] = true
+	}
+	return true
 }
 
 func authorityFromDeployments(deployments []contracts.Deployment) (aggregateAuthority, error) {

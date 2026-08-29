@@ -107,11 +107,11 @@ func TestRecoveryRejectsCrossOperationReceiptSwaps(t *testing.T) {
 	roots := tempRoots(t)
 	opA, _ := completeReceiptDAG(ctx, t, adapter, store, roots, "swap-a")
 	opB, _ := completeReceiptDAG(ctx, t, adapter, store, roots, "swap-b")
-	bytesA, err := adapter.ReadFile(ctx, receiptPath(roots, opA))
+	bytesA, err := adapter.ReadFileNoFollow(ctx, receiptPath(roots, opA))
 	if err != nil {
 		t.Fatal(err)
 	}
-	bytesB, err := adapter.ReadFile(ctx, receiptPath(roots, opB))
+	bytesB, err := adapter.ReadFileNoFollow(ctx, receiptPath(roots, opB))
 	if err != nil {
 		t.Fatal(err)
 	}
