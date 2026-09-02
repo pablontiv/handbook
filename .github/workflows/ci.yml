@@ -30,6 +30,23 @@ jobs:
           -t skills/systemic-issue-triage
           -p "test_*.py"
           -v
+      - name: Run context-save contract tests
+        run: >-
+          python -m unittest discover
+          -s skills/context-save/tests
+          -t skills/context-save
+          -p "test_*.py"
+          -v
+      - name: Run sweep contract tests
+        run: >-
+          python -m unittest discover
+          -s skills/sweep/tests
+          -t skills/sweep
+          -p "test_*.py"
+          -v
+      - name: Run sweep asset tests
+        if: runner.os != 'Windows'
+        run: sh skills/sweep/assets/test-assets.sh
       - name: Run unit tests
         working-directory: skills/remove-gentle-context
         run: python -m unittest discover -s tests -t . -v
