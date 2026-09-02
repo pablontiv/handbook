@@ -15,11 +15,27 @@ Use when a significant decision has just been made or overturned in a repository
 - Browse [`skills/adr/`](skills/adr/) and read [`SKILL.md`](skills/adr/SKILL.md).
 - Mechanics run through `skills/adr/adr.sh` over `rootline`; run it with no arguments for usage.
 
+### `context-save`
+
+Save, restore, and list cross-session context as rootline-validated markdown records under `.claude/session-state/`.
+
+- Browse [`skills/context-save/`](skills/context-save/) and read [`SKILL.md`](skills/context-save/SKILL.md).
+- Provenance: adapted from `pablontiv/praxis` at commit `ad40aa3c3f08aed2caffd1343edbabe1f1f9ae00`.
+- Bundles the PolyForm Noncommercial License 1.0.0 in [`LICENSE`](skills/context-save/LICENSE).
+
 ### `decision-calibrator`
 
 Use after a concrete trigger — a user correction that contradicts a prior assumption, a re-asked question, resumed work after context loss, a stalled research loop, or a tool/architecture choice with ongoing operating cost — to spend rigor only where it can still change the outcome. Records checkpoints through the `adr` skill.
 
 - Browse [`skills/decision-calibrator/`](skills/decision-calibrator/) and read [`SKILL.md`](skills/decision-calibrator/SKILL.md).
+
+### `sweep`
+
+Sweep stale worktrees, branches, and open pull requests across explicit roots. The skill is inspect-only by default: it reports with command-level evidence and mutates only across the documented `--apply` boundary.
+
+- Browse [`skills/sweep/`](skills/sweep/) and read [`SKILL.md`](skills/sweep/SKILL.md).
+- Bundles deterministic shell helpers under `assets/` plus evidence, tiering, fan-out, fork-mirror, and apply references.
+- Runtime boundary: Claude receives Claude-native adapters in `agents/claude/` with parent-visible `SendMessage` delivery; Pi receives Pi-native adapters in `agents/pi/` whose final responses are delivered through `subagent_run`; OpenCode receives the skill only, without bundled agent definitions.
 
 ### `remove-gentle-context`
 
