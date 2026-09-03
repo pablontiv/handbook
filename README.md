@@ -1,111 +1,70 @@
-# Skills
+# Handbook
 
-Public collection of portable Agent Skills maintained by Pablo Ontiveros.
+Un handbook para convertir el trabajo de desarrollo improvisado en un método reproducible, verificable y adaptable.
 
-Each skill is self-contained under `skills/<name>/` and may include deterministic helpers, references, fixtures, and tests. Repository-wide documentation lives under `docs/`.
+Reúne reglas, skills, herramientas y memoria para orientar el trabajo de personas y agentes.
 
-Public repository URL: `https://github.com/pablontiv/gentle-ai`.
+## What exists today
 
-## Available skills
+This repository is the handbook itself. Its current, versioned building blocks are:
 
-### `adr`
+- repository-wide operating rules in [`AGENTS.md`](AGENTS.md);
+- portable agent workflows under [`skills/`](skills/);
+- deterministic helpers, assets, references, fixtures, and tests bundled with their owning skills;
+- cross-session memory guidance in [`context-save`](skills/context-save/);
+- interaction contracts under [`output-styles/`](output-styles/);
+- architecture decisions in [`docs/adr/`](docs/adr/) and design history in [`docs/superpowers/`](docs/superpowers/).
 
-Use when a significant decision has just been made or overturned in a repository and must be recorded, accepted, or superseded as an Architecture Decision Record.
+The integrated workspace method, workspace controller, and end-to-end delivery lifecycle are outside the current repository contract.
 
-- Browse [`skills/adr/`](skills/adr/) and read [`SKILL.md`](skills/adr/SKILL.md).
-- Mechanics run through `skills/adr/adr.sh` over `rootline`; run it with no arguments for usage.
+## Core model
 
-### `context-save`
+The handbook organizes portable working artifacts around development needs rather than one agent runtime.
 
-Save, restore, and list cross-session context as rootline-validated markdown records under `.claude/session-state/`.
+- **Rules** define repository-wide invariants and contribution boundaries.
+- **Skills** provide self-contained workflows that agents can discover and follow.
+- **Tools** provide deterministic evidence or guarded execution inside the artifact that owns them.
+- **Memory** preserves context and decisions across sessions.
+- **Records** preserve architecture and design history without rewriting past decisions.
 
-- Browse [`skills/context-save/`](skills/context-save/) and read [`SKILL.md`](skills/context-save/SKILL.md).
-- Provenance: adapted from `pablontiv/praxis` at commit `ad40aa3c3f08aed2caffd1343edbabe1f1f9ae00`.
-- Bundles the PolyForm Noncommercial License 1.0.0 in [`LICENSE`](skills/context-save/LICENSE).
+Every published artifact must be globally useful, portable, publicly distributable, and explicitly owned. Product-coupled and repository-local workflows stay with their owning product or repository.
 
-### `decision-calibrator`
+## Capabilities
 
-Use after a concrete trigger — a user correction that contradicts a prior assumption, a re-asked question, resumed work after context loss, a stalled research loop, or a tool/architecture choice with ongoing operating cost — to spend rigor only where it can still change the outcome. Records checkpoints through the `adr` skill.
+### Make and preserve decisions
 
-- Browse [`skills/decision-calibrator/`](skills/decision-calibrator/) and read [`SKILL.md`](skills/decision-calibrator/SKILL.md).
+- [`adr`](skills/adr/) records, accepts, and supersedes architecture decisions through Rootline-governed records.
+- [`decision-calibrator`](skills/decision-calibrator/) focuses rigor after corrections, context loss, stalled research, or high-operating-cost choices.
 
-### `sweep`
+### Keep continuity across sessions
 
-Sweep stale worktrees, branches, and open pull requests across explicit roots. The skill is inspect-only by default: it reports with command-level evidence and mutates only across the documented `--apply` boundary.
+- [`context-save`](skills/context-save/) saves, restores, and lists structured session state with Rootline validation.
 
-- Browse [`skills/sweep/`](skills/sweep/) and read [`SKILL.md`](skills/sweep/SKILL.md).
-- Bundles deterministic shell helpers under `assets/` plus evidence, tiering, fan-out, fork-mirror, and apply references.
-- Runtime boundary: Claude receives Claude-native adapters in `agents/claude/` with parent-visible `SendMessage` delivery; Pi receives Pi-native adapters in `agents/pi/` whose final responses are delivered through `subagent_run`; OpenCode receives the skill only, without bundled agent definitions.
+### Inspect repositories and portfolios
 
-### `remove-gentle-context`
+- [`systemic-issue-triage`](skills/systemic-issue-triage/) classifies a repository's issue backlog by verified systemic root causes and stops before design or delivery.
+- [`sweep`](skills/sweep/) inventories and classifies stale worktrees, branches, and pull requests before any separately approved mutation.
 
-Use when active Gentle AI context must be cleared from supported clients while preserving infrastructure and history.
+### Optimize agent configuration with evidence
 
-Quick discovery:
+- [`model-optimizer`](skills/model-optimizer/) evaluates Pi and OpenCode model assignments with runtime-local evidence and explicit approval before native configuration edits.
 
-- Browse [`skills/remove-gentle-context/`](skills/remove-gentle-context/) and read [`SKILL.md`](skills/remove-gentle-context/SKILL.md).
-- Run the helper help with your Python 3.11+ executable; the examples use `python`, but some platforms expose it as `python3` or `python3.11`.
+### Remove active generated context safely
 
-```bash
-python skills/remove-gentle-context/scripts/cleanup.py --help
-```
+- [`skills/remove-gentle-context/`](skills/remove-gentle-context/) inventories, plans, applies, verifies, and restores supported Gentle AI context through digest-bound authority and verified backups. See its [`SKILL.md`](skills/remove-gentle-context/SKILL.md). Use a Python 3.11+ executable as `python`, `python3`, or an equivalent platform command.
 
-Manual install:
+### Shape agent interaction
 
-1. Copy `skills/remove-gentle-context/` into an Agent Skills-compatible skills directory.
-2. Keep `SKILL.md`, `scripts/`, `helper/`, `references/`, and adapter JSON files together.
-3. Use Python 3.11+; the helper uses only the Python standard library.
+- [`mentor-telemetria`](output-styles/mentor-telemetria.md) defines operating modes, decision telemetry, root-cause reporting, and post-task learning.
 
-Quick use from the skill directory:
+## Optional integrations
 
-```bash
-python scripts/cleanup.py inventory --home <absolute-home> --platform <linux|macos|windows> --output <inventory.json>
-python scripts/cleanup.py plan --inventory <inventory.json> --output <plan.json>
-python scripts/cleanup.py apply --inventory <inventory.json> --plan <plan.json> --approve <plan-digest> --receipt <receipt.json>
-python scripts/cleanup.py verify --inventory <inventory.json> --plan <plan.json> --receipt <receipt.json> --output <verification.json>
-python scripts/cleanup.py restore --manifest <backup-manifest.json> --receipt <receipt.json> --approve <manifest-digest> --output <restore.json>
-```
+Individual artifacts may integrate with Pi, Claude Code, OpenCode, GitHub CLI, Rootline, Backscroll, or other tools. Those integrations are capability-specific; the linked artifact is the authority for supported runtimes, dependencies, and safety gates.
 
-Supported clients and platforms:
+## References
 
-- Clients: Claude, Codex/ChatGPT, OpenCode, Pi, and bundled declarative adapters for Gemini, Hermes, Kimi, and VS Code Copilot.
-- Platforms: Linux, macOS, and Windows.
-- CI: three-OS Python 3.11 unittest, CLI help, and compile checks without secrets or network-dependent tests.
-
-Safety guarantees:
-
-- Canonical inventory and plan approval are required before any mutation.
-- Exact authority is bound to inventory root/environment data and plan digest.
-- fd-bound validation, preimage hashes, verified backup, receipt, atomic rollback, and independent live verification are part of the contract.
-- Ambiguity blockers fail closed; the ambiguity blockers contract prefers report-only over unsafe mutation.
-- MCP, Engram, packages, binaries, source, `node_modules`, history, prompts, messages, caches, backups, `.git/gentle-ai`, and provenance-protected personal skills are preserved unless explicit contract authority says otherwise.
-
-Current limitations:
-
-- Pi registry deletion blocks without reliable process probe; the registry entry is reported instead of removed.
-- The skill removes active generated Gentle context, not package installations, history archives, client caches, or user-authored source.
-- Do not use grep-driven, name-only, path-only, text-only, marker-only, fingerprint-only, or author-only deletion shortcuts, skipped plan approval, or implicit restart.
-
-Review path:
-
-- Pull requests are disabled.
-- Use GitHub Issues to report defects, unsafe behavior, missing preservation coverage, or client/platform support requests.
-- Include inventory/plan/receipt/verification paths and digests when safe to share.
-
-### `model-optimizer`
-
-Optimize Pi and OpenCode model assignments with runtime-local evidence. The skill includes a read-only Python 3.11+ helper for inventory, bounded live checks, runtime-exact confined evaluations, and benchmark-prior cache entries. It does not provide a helper `apply`, `write`, or `configure` command; native configuration edits occur only inside the approved skill workflow after explicit approval, backup, validation, reload, and affected agent-path verification.
-
-Install manually by copying or installing the self-contained [`skills/model-optimizer/`](skills/model-optimizer/) directory through your Agent Skills mechanism. See [`skills/model-optimizer/references/optimization-flow.md`](skills/model-optimizer/references/optimization-flow.md), [`skills/model-optimizer/references/benchmark-sources.md`](skills/model-optimizer/references/benchmark-sources.md), and [`skills/model-optimizer/references/contracts.md`](skills/model-optimizer/references/contracts.md) for the implemented workflow and contracts.
-
-## Planned skills
-
-- None currently listed.
-
-## Contributing
-
-Pull requests are disabled. Use GitHub Issues to report defects or request capabilities.
-
-## License
-
-MIT
+- To use a skill capability, open its linked skill directory and read `SKILL.md`; for interaction style, open the linked output-style document.
+- To contribute, follow [`AGENTS.md`](AGENTS.md).
+- To understand current decisions, browse [`docs/adr/`](docs/adr/).
+- To inspect approved designs and implementation history, browse [`docs/superpowers/`](docs/superpowers/).
+- Repository content is available under the [`MIT License`](LICENSE), except where an artifact bundles and declares a different license.

@@ -2,7 +2,17 @@
 
 ## Purpose
 
-This repository publishes independent, portable Agent Skills. Keep every skill self-contained under `skills/<name>/` and avoid dependencies between sibling skills.
+This repository publishes a portable working handbook: rules, Agent Skills, deterministic tools, memory workflows, output styles, and governed documentation that help people and agents replace ad hoc development with repeatable, verifiable, adaptable practice.
+
+Every top-level artifact family must be globally useful, portable, publicly distributable, and explicitly owned. Product-coupled and repository-local artifacts stay with their owning product or repository. Keep every skill self-contained under `skills/<name>/` and avoid dependencies between sibling skills.
+
+## Artifact boundaries
+
+- Give each artifact one explicit owner and keep its runtime dependencies with it.
+- Add a top-level artifact family only when real content exists; do not scaffold empty categories.
+- Document how each new family contributes to the handbook, how it is verified, and where its portability boundary lies.
+- Treat agent runtimes and external tools as integrations, not as the handbook's category.
+- Preserve historical ADRs, specs, plans, and completed records; supersede decisions instead of rewriting them.
 
 ## Safety
 
