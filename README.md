@@ -51,7 +51,7 @@ Every published artifact must be globally useful, portable, publicly distributab
 
 ### Remove active generated context safely
 
-- [`remove-gentle-context`](skills/remove-gentle-context/) inventories, plans, applies, verifies, and restores supported Gentle AI context through digest-bound authority and verified backups.
+- [`skills/remove-gentle-context/`](skills/remove-gentle-context/) inventories, plans, applies, verifies, and restores supported Gentle AI context through digest-bound authority and verified backups. Use a Python 3.11+ executable with `python3`.
 
 ### Shape agent interaction
 
