@@ -569,7 +569,7 @@ Use a PR body containing:
 - Existing Python suites: 521 tests
 - Sweep asset checks: 5 checks
 - Rootline strict validation: ADR 0016 and ADR 0022
-- Pi diagnostics: no blocking findings
+- Primary Python LSP clean; no branch-introduced blocking diagnostics. Pre-existing unpinned GitHub Actions findings are disclosed as inherited debt.
 
 ## Governance
 
