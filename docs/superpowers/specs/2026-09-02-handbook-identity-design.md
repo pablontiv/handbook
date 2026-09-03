@@ -182,6 +182,7 @@ After the documentation pull request is merged, the public repository MUST be re
 | `docs/adr/0016-gobernar-propiedad-y-distribucion-de-skills-globales.md` | Status metadata only | Mark the old identity decision superseded. |
 | `docs/adr/0022-ampliar-repositorio-a-handbook-de-trabajo.md` | New accepted ADR | Record the broadened identity, boundaries, and rename decision. |
 | `docs/superpowers/specs/2026-09-02-handbook-identity-design.md` | New approved design | Bind implementation to reviewed requirements and scenarios. |
+| `docs/superpowers/plans/2026-09-02-handbook-identity-foundation.md` | New approved implementation plan | Bind delivery sequencing, tests, and verification evidence to the approved design. |
 | `README.md` | Restructure | Make the handbook outcome, proof, concepts, capabilities, integrations, and references discoverable. |
 | `AGENTS.md` | Update purpose and artifact inclusion contract | Synchronize executable agent guidance with the new identity. |
 | `tests/test_handbook_contract.py` | New deterministic tests | Prevent identity, inventory, link, and stale-claim drift. |

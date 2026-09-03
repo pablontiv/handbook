@@ -51,7 +51,7 @@ Every published artifact must be globally useful, portable, publicly distributab
 
 ### Remove active generated context safely
 
-- [`skills/remove-gentle-context/`](skills/remove-gentle-context/) inventories, plans, applies, verifies, and restores supported Gentle AI context through digest-bound authority and verified backups. Use a Python 3.11+ executable with `python3`.
+- [`skills/remove-gentle-context/`](skills/remove-gentle-context/) inventories, plans, applies, verifies, and restores supported Gentle AI context through digest-bound authority and verified backups. See its [`SKILL.md`](skills/remove-gentle-context/SKILL.md). Use a Python 3.11+ executable as `python`, `python3`, or an equivalent platform command.
 
 ### Shape agent interaction
 
@@ -63,7 +63,7 @@ Individual artifacts may integrate with Pi, Claude Code, OpenCode, GitHub CLI, R
 
 ## References
 
-- To use a capability, start with its linked `SKILL.md` or output-style document.
+- To use a skill capability, open its linked skill directory and read `SKILL.md`; for interaction style, open the linked output-style document.
 - To contribute, follow [`AGENTS.md`](AGENTS.md).
 - To understand current decisions, browse [`docs/adr/`](docs/adr/).
 - To inspect approved designs and implementation history, browse [`docs/superpowers/`](docs/superpowers/).
