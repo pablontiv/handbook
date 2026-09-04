@@ -58,31 +58,113 @@ BASE_CONTRACT_MARKERS = (
     "Los escalares de una capa más específica reemplazan",
     "Los mapas se combinan recursivamente",
     "Las listas se reemplazan completas",
+)
+
+INVARIANT_IDS = tuple(f"INV-{number:02d}" for number in range(1, 14))
+WORKFLOW_PHASES = tuple(f"Fase {number}" for number in range(9))
+CONTROL_STATES = (
+    "pending",
     "passed",
     "failed",
+    "skipped",
     "unknown",
     "not_applicable",
-    "INV-01",
-    "INV-11",
-    "Fase 0",
-    "Fase 8",
+)
+CONDITIONAL_TRIGGER = re.compile(
+    r"\bse activa (?:al|como|cuando|después|para|tras|únicamente)\b"
 )
 
 
 def published_artifacts() -> set[str]:
-    skills = {
-        path.parent.name
-        for path in (REPO_ROOT / "skills").glob("*/SKILL.md")
-    }
-    agents = {
-        path.stem
-        for path in (REPO_ROOT / "skills").glob("*/agents/pi/*.md")
-    }
-    styles = {
-        path.stem
-        for path in (REPO_ROOT / "output-styles").glob("*.md")
-    }
+    skills = {path.parent.name for path in (REPO_ROOT / "skills").glob("*/SKILL.md")}
+    agents = {path.stem for path in (REPO_ROOT / "skills").glob("*/agents/pi/*.md")}
+    styles = {path.stem for path in (REPO_ROOT / "output-styles").glob("*.md")}
     return skills | agents | styles
+
+
+def h2_body(profile: str, heading: str) -> str:
+    match = re.search(
+        rf"^## (?:\d+\. )?{re.escape(heading)}\n(?P<body>.*?)(?=^## |\Z)",
+        profile,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group("body") if match else ""
+
+
+def section_contract_violations(profile: str) -> tuple[str, ...]:
+    headings = tuple(re.findall(r"^## (?:\d+\. )?(.+)$", profile, re.MULTILINE))
+    return () if headings == PROFILE_SECTIONS else ("ordered sections",)
+
+
+def category_contract_violations(profile: str) -> tuple[str, ...]:
+    violations = [
+        f"missing marker: {marker}"
+        for marker in BASE_CONTRACT_MARKERS
+        if marker not in profile
+    ]
+
+    invariant_ids = tuple(
+        re.findall(
+            r"^\d+\. \*\*(INV-\d{2})\b",
+            h2_body(profile, "Invariantes"),
+            re.MULTILINE,
+        )
+    )
+    if invariant_ids != INVARIANT_IDS:
+        violations.append("invariant IDs")
+
+    workflow_phases = tuple(
+        re.findall(
+            r"^### (Fase \d+)\b",
+            h2_body(profile, "Flujo de trabajo"),
+            re.MULTILINE,
+        )
+    )
+    if workflow_phases != WORKFLOW_PHASES:
+        violations.append("workflow phases")
+
+    state_body = h2_body(profile, "Contrato de los controles").partition(
+        "Los estados canónicos son:"
+    )[2]
+    control_states = tuple(re.findall(r"^- `([a-z_]+)`:", state_body, re.MULTILINE))
+    if control_states != CONTROL_STATES:
+        violations.append("canonical states")
+
+    return tuple(violations)
+
+
+def routed_artifacts(profile: str) -> tuple[tuple[str, str], ...]:
+    routing_body = h2_body(profile, "Ejes configurables").partition(
+        "### Routing de artefactos publicados"
+    )[2]
+    return tuple(
+        (match.group("artifact"), match.group("prose"))
+        for match in re.finditer(
+            r"^(?:- )?`(?P<artifact>[a-z0-9-]+)`(?::)? "
+            r"(?P<prose>[^\n]+)$",
+            routing_body,
+            re.MULTILINE,
+        )
+    )
+
+
+def routing_contract_violations(
+    profile: str,
+    artifacts: set[str],
+) -> tuple[str, ...]:
+    routes = routed_artifacts(profile)
+    routed_names = tuple(artifact for artifact, _ in routes)
+    violations = []
+    if set(routed_names) != artifacts or len(routed_names) != len(set(routed_names)):
+        violations.append("artifact inventory")
+    triggerless = sorted(
+        artifact
+        for artifact, prose in routes
+        if CONDITIONAL_TRIGGER.search(prose) is None
+    )
+    if triggerless:
+        violations.append("triggerless routes: " + ", ".join(triggerless))
+    return tuple(violations)
 
 
 class ProfileContractTests(unittest.TestCase):
@@ -99,15 +181,34 @@ class ProfileContractTests(unittest.TestCase):
         )
 
     def test_profile_preserves_all_base_sections(self) -> None:
-        headings = set(
-            re.findall(r"^## (?:\d+\. )?(.+)$", self.profile, re.MULTILINE)
-        )
-        self.assertEqual(set(PROFILE_SECTIONS) - headings, set())
+        self.assertEqual(section_contract_violations(self.profile), ())
+
+    def test_contract_rejects_reversed_headings(self) -> None:
+        mutated = self.profile.replace("## 1. Propósito", "## SWAP", 1)
+        mutated = mutated.replace("## 2. Principios de diseño", "## 1. Propósito", 1)
+        mutated = mutated.replace("## SWAP", "## 2. Principios de diseño", 1)
+        self.assertTrue(section_contract_violations(mutated))
 
     def test_profile_preserves_contract_categories(self) -> None:
-        for marker in BASE_CONTRACT_MARKERS:
-            with self.subTest(marker=marker):
-                self.assertIn(marker, self.profile)
+        self.assertEqual(category_contract_violations(self.profile), ())
+
+    def test_contract_rejects_removed_or_extra_categories(self) -> None:
+        mutations = (
+            ("missing invariant", self.profile.replace("**INV-13", "**RULE-13", 1)),
+            ("missing phase", self.profile.replace("### Fase 4", "### Etapa 4", 1)),
+            ("missing state", self.profile.replace("- `pending`:", "- `queued`:", 1)),
+            (
+                "extra state",
+                self.profile.replace(
+                    "- `passed`:",
+                    "- `running`: ejecución iniciada;\n- `passed`:",
+                    1,
+                ),
+            ),
+        )
+        for label, mutated in mutations:
+            with self.subTest(label=label):
+                self.assertTrue(category_contract_violations(mutated))
 
     def test_template_preserves_layers_and_axes(self) -> None:
         for layer in ("workspace:", "groups:", "repositories:"):
@@ -116,9 +217,37 @@ class ProfileContractTests(unittest.TestCase):
             self.assertRegex(self.template, rf"(?m)^\s+{re.escape(axis)}:")
 
     def test_profile_routes_every_published_artifact(self) -> None:
-        for artifact in sorted(published_artifacts()):
-            with self.subTest(artifact=artifact):
-                self.assertIn(f"`{artifact}`", self.profile)
+        self.assertEqual(
+            routing_contract_violations(self.profile, published_artifacts()), ()
+        )
+
+    def test_contract_rejects_unlisted_and_stale_routes(self) -> None:
+        published = published_artifacts()
+        stale_route = (
+            "\n- `retired-artifact`: se activa cuando aparece una señal retirada.\n"
+        )
+        mutated = self.profile.replace(
+            "\n## 7. Valores por defecto",
+            stale_route + "\n## 7. Valores por defecto",
+            1,
+        )
+        cases = (
+            (
+                "unlisted published artifact",
+                self.profile,
+                published | {"future-artifact"},
+            ),
+            ("stale routed artifact", mutated, published),
+        )
+        for label, profile, artifacts in cases:
+            with self.subTest(label=label):
+                self.assertTrue(routing_contract_violations(profile, artifacts))
+
+    def test_contract_rejects_triggerless_routes(self) -> None:
+        mutated = self.profile.replace(
+            "- `adr`: se activa", "- `adr`: está disponible", 1
+        )
+        self.assertTrue(routing_contract_violations(mutated, published_artifacts()))
 
     def test_profile_requires_rootline_backscroll_and_pi(self) -> None:
         for required in ("Rootline", "Backscroll", "Pi"):
