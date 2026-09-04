@@ -61,6 +61,13 @@ jobs:
           rootline validate --all .workspace/docs/adr -o json
           rootline validate --all .workspace/docs/superpowers -o json
           rootline validate --all profiles/pablontiv -o json
+      - name: Run evidence-driven development contract tests
+        run: >-
+          python -m unittest discover
+          -s skills/evidence-driven-development/tests
+          -t skills/evidence-driven-development
+          -p "test_*.py"
+          -v
       - name: Run systemic issue triage tests
         run: >-
           python -m unittest discover
