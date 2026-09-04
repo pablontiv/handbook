@@ -148,6 +148,7 @@ cmd_supersede() { # NNNN slug ctx dec alt con [pend]
   local new
   new=$(cmd_propose "$slug" "$ctx" "$dec" "$alt" "$con" "$pend" "$(basename "$old" .md)")
   [ "$DRY" = 1 ] && {
+    printf '%s\n' "$new"
     echo "(dry-run: would mark $old superseded)" >&2
     return 0
   }

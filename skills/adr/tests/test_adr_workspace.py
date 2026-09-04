@@ -137,6 +137,44 @@ class AdrWorkspaceTests(unittest.TestCase):
     def test_dry_run_uses_process_stdout_without_device_path(self) -> None:
         self.assertNotIn("/dev/stdout", SCRIPT.read_text())
 
+    def test_supersede_dry_run_prints_record_without_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            adr = root / ".workspace/docs/adr"
+            adr.mkdir(parents=True)
+            (root / ".workspace/config.yaml").write_text(
+                "schema_version: workspace-control/v1\n"
+            )
+            (root / ".workspace/docs/.stem").write_text("version: 2\nroot: true\n")
+            (adr / ".stem").write_text("version: 2\n")
+            old = adr / "0001-original.md"
+            old.write_text("original bytes\n")
+            before = {path.name: path.read_bytes() for path in adr.iterdir()}
+
+            result = run(
+                root,
+                "--dry-run",
+                "supersede",
+                "0001",
+                "replacement",
+                "contexto",
+                "decisión",
+                "alternativa",
+                "consecuencia",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("# 0002. Replacement", result.stdout)
+            self.assertIn("Reemplaza a 0001-original.", result.stdout)
+            self.assertIn(
+                "would write .workspace/docs/adr/0002-replacement.md", result.stderr
+            )
+            self.assertIn(
+                "would mark .workspace/docs/adr/0001-original.md", result.stderr
+            )
+            after = {path.name: path.read_bytes() for path in adr.iterdir()}
+            self.assertEqual(after, before)
+
     def test_propose_uses_maximum_existing_number_across_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
