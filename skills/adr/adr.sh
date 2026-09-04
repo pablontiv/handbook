@@ -8,6 +8,8 @@
 # propose is idempotent per slug: an existing <NNNN>-<slug>.md is returned, never duplicated.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$ROOT"
 
 workspace_active() { [ -f .workspace/config.yaml ]; }
 
@@ -41,7 +43,13 @@ need_dir() {
 
 cmd_init() {
   case "${1:-}" in
-    versioned) DIR=$(versioned_dir) ;;
+    versioned)
+      DIR=$(versioned_dir)
+      if workspace_active && [ ! -f .workspace/docs/.stem ]; then
+        echo "adr: adopted workspace requires .workspace/docs/.stem" >&2
+        exit 2
+      fi
+      ;;
     local)
       if workspace_active; then
         echo "adr: local ADR store is not allowed in an adopted workspace" >&2
@@ -51,7 +59,12 @@ cmd_init() {
       ;;
     *) echo "usage: adr.sh init versioned|local" >&2; exit 2 ;;
   esac
-  mkdir -p "$DIR"; cp "$HERE/adr.stem" "$DIR/.stem"
+  mkdir -p "$DIR"
+  if workspace_active; then
+    sed '/^root: true$/d' "$HERE/adr.stem" > "$DIR/.stem"
+  else
+    cp "$HERE/adr.stem" "$DIR/.stem"
+  fi
   if [ "$DIR" = .adr ]; then printf '*\n' > .adr/.gitignore; fi
   echo "$DIR"
 }
@@ -83,10 +96,13 @@ cmd_propose() { # slug ctx dec alt con [pend] [supersedes]
   [ $# -ge 5 ] || { echo "usage: adr.sh propose <slug> <contexto> <decision> <alternativas> <consecuencias> [pendientes]" >&2; exit 2; }
   local slug=$1; shift
   [[ "$slug" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || { echo "adr: slug must be kebab-case: $slug" >&2; exit 2; }
-  local existing; existing=$(ls "$DIR"/[0-9][0-9][0-9][0-9]-"$slug".md 2>/dev/null | head -1 || true)
+  local existing
+  existing=$(find "$DIR" -maxdepth 1 -type f -name "[0-9][0-9][0-9][0-9]-$slug.md" -print -quit)
   if [ -n "$existing" ]; then echo "adr: already exists, not duplicated: $existing" >&2; echo "$existing"; return 0; fi
-  local n; n=$( (ls "$DIR"/[0-9][0-9][0-9][0-9]-*.md 2>/dev/null || true) | wc -l | tr -d ' ')
-  local num; num=$(printf '%04d' $((n+1)))
+  local n
+  n=$(find "$DIR" -maxdepth 1 -type f -name '[0-9][0-9][0-9][0-9]-*.md' -exec basename {} \; | sed 's/-.*//' | sort -n | tail -1)
+  [ -n "$n" ] || n=0
+  local num; num=$(printf '%04d' "$((10#$n + 1))")
   local f="$DIR/$num-$slug.md"
   local title; title=$(echo "$slug" | tr '-' ' ' | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
   if [ "$DRY" = 1 ]; then write_record /dev/stdout "$num" "$title" "$@"; echo "(dry-run: would write $f)" >&2; return 0; fi

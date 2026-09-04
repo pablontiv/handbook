@@ -17,7 +17,10 @@ workspace:
       unknown si la fuente requerida no está disponible.
   workflow:
     base_branch: main
-    sync_strategy: unknown
+    sync_strategy: |
+      Antes de trabajo mutante, comparar por lectura origin/main con la revisión
+      base del branch; no ejecutar pull implícito. Si no coinciden o no puede
+      verificarse, conservar unknown y detener la fase afectada.
     isolation_strategy: dedicated-worktree
     development_workflow: |
       Clasificar alcance, explorar contexto, aprobar el diseño aplicable,
@@ -76,4 +79,9 @@ repositories:
       managed: true
       verified_revision: unknown
     context_sources:
+      - |
+        Backscroll es obligatorio cuando la historia pueda afectar el trabajo:
+        buscar primero por proyecto, ampliar una vez si no hay resultados, usar
+        contenido de tools para recordar comandos, rutas o errores y conservar
+        unknown si la fuente requerida no está disponible.
       - AGENTS.md

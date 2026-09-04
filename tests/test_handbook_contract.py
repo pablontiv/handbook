@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-
 ROOT = Path(__file__).resolve().parents[1]
 README_PATH = ROOT / "README.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
@@ -19,7 +18,9 @@ SUPPORT = (
     "de personas y agentes."
 )
 APPROVED_IDENTITY_BLOCK = f"# Handbook\n\n{HERO}\n\n{SUPPORT}"
-REMOVE_GENTLE_CONTEXT_LINK = "[`skills/remove-gentle-context/`](skills/remove-gentle-context/)"
+REMOVE_GENTLE_CONTEXT_LINK = (
+    "[`skills/remove-gentle-context/`](skills/remove-gentle-context/)"
+)
 LINK_PATTERN = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
 REQUIRED_AGENT_CLAUSES = (
     "portable working handbook",
@@ -72,7 +73,9 @@ class HandbookContractTests(unittest.TestCase):
             ),
             "",
         )
-        self.assertTrue(bullet, "README must expose the exact remove-gentle-context discovery link.")
+        self.assertTrue(
+            bullet, "README must expose the exact remove-gentle-context discovery link."
+        )
         self.assertIn("Python 3.11+ executable", bullet)
         self.assertIn("`python`", bullet)
         self.assertIn("`python3`", bullet)
@@ -87,11 +90,13 @@ class HandbookContractTests(unittest.TestCase):
             "# Agent Skills\n\nPublic collection of portable Agent Skills.\n\n",
             "# Pi Handbook\n\nVendor-specific agent runtime guidance.\n\n",
         ):
-            with self.subTest(branding=branding.splitlines()[0]):
-                with self.assertRaises(AssertionError):
-                    self.assert_readme_leads_with_approved_identity(
-                        f"{branding}{APPROVED_IDENTITY_BLOCK}\n"
-                    )
+            with (
+                self.subTest(branding=branding.splitlines()[0]),
+                self.assertRaises(AssertionError),
+            ):
+                self.assert_readme_leads_with_approved_identity(
+                    f"{branding}{APPROVED_IDENTITY_BLOCK}\n"
+                )
 
     def test_every_published_skill_is_linked(self) -> None:
         skills = sorted(
@@ -146,7 +151,9 @@ class HandbookContractTests(unittest.TestCase):
                     self.assert_agents_contract(mutated)
 
     def test_github_actions_are_pinned_to_commits(self) -> None:
-        action_refs = re.findall(r"^\s*- uses: \S+@([^\s]+)$", self.workflow, re.MULTILINE)
+        action_refs = re.findall(
+            r"^\s*- uses: \S+@([^\s]+)$", self.workflow, re.MULTILINE
+        )
         self.assertTrue(action_refs)
         for ref in action_refs:
             with self.subTest(ref=ref):
@@ -154,6 +161,15 @@ class HandbookContractTests(unittest.TestCase):
 
     def test_checkout_does_not_persist_credentials(self) -> None:
         self.assertIn("persist-credentials: false", self.workflow)
+
+    def test_ci_validates_every_rootline_boundary(self) -> None:
+        for target in (
+            ".workspace/docs/adr",
+            ".workspace/docs/superpowers",
+            "profiles/pablontiv",
+        ):
+            with self.subTest(target=target):
+                self.assertIn(f"rootline validate --all {target}", self.workflow)
 
     def test_no_legacy_document_authority_remains(self) -> None:
         self.assertFalse((ROOT / "docs").exists())

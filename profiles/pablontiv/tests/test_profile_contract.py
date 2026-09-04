@@ -53,6 +53,12 @@ CONFIG_AXES = (
     "cleanup_policy",
     "custom_rules",
 )
+FORBIDDEN_CONTROL_FIELDS = (
+    "executor",
+    "timeout_seconds",
+    "success",
+    "on_failure",
+)
 
 BASE_CONTRACT_MARKERS = (
     "workspace → group → repository",
@@ -88,6 +94,24 @@ def top_level_yaml_keys(text: str) -> set[str]:
         match.group(1)
         for match in re.finditer(r"^([a-z][a-z0-9_]*):", text, re.MULTILINE)
     }
+
+
+def yaml_mapping_body(text: str, key: str, indent: int = 0) -> str:
+    lines = text.splitlines()
+    marker = f"{' ' * indent}{key}:"
+    start = lines.index(marker) + 1
+    body = []
+    for line in lines[start:]:
+        leading = len(line) - len(line.lstrip())
+        if line.strip() and leading <= indent:
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+def deterministic_control_fields(text: str) -> tuple[str, ...]:
+    alternatives = "|".join(FORBIDDEN_CONTROL_FIELDS)
+    return tuple(re.findall(rf"^\s+({alternatives}):", text, re.MULTILINE))
 
 
 def h2_body(profile: str, heading: str) -> str:
@@ -224,6 +248,21 @@ class ProfileContractTests(unittest.TestCase):
         for axis in CONFIG_AXES:
             self.assertRegex(self.template, rf"(?m)^\s+{re.escape(axis)}:")
 
+    def test_profile_preserves_every_configurable_axis(self) -> None:
+        axes = h2_body(self.profile, "Ejes configurables")
+        for axis in CONFIG_AXES:
+            with self.subTest(axis=axis):
+                self.assertIn(f"| `{axis}` |", axes)
+
+    def test_template_rejects_deterministic_control_fields(self) -> None:
+        self.assertEqual(deterministic_control_fields(self.template), ())
+        mutated = self.template.replace(
+            "  custom_rules: []",
+            "  custom_rules: []\n  executor: shell",
+            1,
+        )
+        self.assertEqual(deterministic_control_fields(mutated), ("executor",))
+
     def test_profile_routes_every_published_artifact(self) -> None:
         self.assertEqual(
             routing_contract_violations(self.profile, published_artifacts()), ()
@@ -288,6 +327,8 @@ class DogfoodConfigTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.config = DOGFOOD_CONFIG_PATH.read_text(encoding="utf-8")
+        cls.workspace = yaml_mapping_body(cls.config, "workspace")
+        cls.repository = yaml_mapping_body(cls.config, "pablontiv/handbook", indent=2)
 
     def test_config_has_all_logical_layers(self) -> None:
         self.assertTrue(
@@ -295,10 +336,48 @@ class DogfoodConfigTests(unittest.TestCase):
             <= top_level_yaml_keys(self.config)
         )
 
-    def test_config_preserves_every_axis(self) -> None:
+    def test_workspace_config_preserves_every_axis(self) -> None:
         for axis in CONFIG_AXES:
             with self.subTest(axis=axis):
-                self.assertRegex(self.config, rf"(?m)^\s+{re.escape(axis)}:")
+                self.assertRegex(self.workspace, rf"(?m)^\s+{re.escape(axis)}:")
+
+    def test_repository_context_sources_preserve_backscroll(self) -> None:
+        sources = yaml_mapping_body(
+            self.repository,
+            "context_sources",
+            indent=4,
+        )
+        for required in (
+            "Backscroll",
+            "buscar primero por proyecto",
+            "ampliar una vez",
+            "contenido de tools",
+            "unknown",
+            "AGENTS.md",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, sources)
+
+    def test_sync_strategy_is_observable_and_fail_closed(self) -> None:
+        workflow = yaml_mapping_body(self.workspace, "workflow", indent=2)
+        normalized = " ".join(workflow.split())
+        self.assertNotIn("sync_strategy: unknown", workflow)
+        for required in ("lectura", "origin/main", "revisión base", "pull", "unknown"):
+            with self.subTest(required=required):
+                self.assertIn(required, normalized)
+
+    def test_config_rejects_deterministic_control_fields(self) -> None:
+        self.assertEqual(deterministic_control_fields(self.config), ())
+        mutated = self.config.replace(
+            "  custom_rules:",
+            "  executor: shell\n  timeout_seconds: 30\n  success: exit-zero\n"
+            "  on_failure: stop\n  custom_rules:",
+            1,
+        )
+        self.assertEqual(
+            deterministic_control_fields(mutated),
+            FORBIDDEN_CONTROL_FIELDS,
+        )
 
     def test_config_names_required_authorities(self) -> None:
         for required in (

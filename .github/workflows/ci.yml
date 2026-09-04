@@ -53,7 +53,10 @@ jobs:
           -p "test_*.py"
           -v
       - name: Validate governed knowledge
-        run: rootline validate --all .workspace/docs/adr -o json
+        run: |
+          rootline validate --all .workspace/docs/adr -o json
+          rootline validate --all .workspace/docs/superpowers -o json
+          rootline validate --all profiles/pablontiv -o json
       - name: Run systemic issue triage tests
         run: >-
           python -m unittest discover
