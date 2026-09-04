@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -163,6 +164,26 @@ class HandbookContractTests(unittest.TestCase):
 
     def test_checkout_does_not_persist_credentials(self) -> None:
         self.assertIn("persist-credentials: false", self.workflow)
+
+    def test_python_cache_artifacts_are_ignored(self) -> None:
+        candidates = (
+            "nested/__pycache__/metadata.txt",
+            "nested/module.pyc",
+            "nested/module.py",
+        )
+        result = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--stdin"],
+            cwd=ROOT,
+            input=("\n".join(candidates) + "\n").encode("ascii"),
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        self.assertEqual(
+            result.stdout.decode("ascii").splitlines(),
+            list(candidates[:2]),
+            "Python bytecode must be ignored without hiding source files.",
+        )
 
     def test_profile_test_dependency_is_pinned_installed_and_documented(self) -> None:
         install = (
