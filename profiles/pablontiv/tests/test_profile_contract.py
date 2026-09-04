@@ -12,6 +12,7 @@ BOOTSTRAP_PATH = PROFILE_ROOT / "bootstrap.md"
 TEMPLATE_PATH = PROFILE_ROOT / "config.template.yaml"
 SOURCE_PATH = PROFILE_ROOT / "references" / "engineering-handbook-v1.4.md"
 SOURCE_SHA256 = "f5455e3eced13690358b02823053a1e00a6c7c06de5f17d9716805bf0a0cff26"
+DOGFOOD_CONFIG_PATH = REPO_ROOT / ".workspace" / "config.yaml"
 
 PROFILE_SECTIONS = (
     "Propósito",
@@ -80,6 +81,13 @@ def published_artifacts() -> set[str]:
     agents = {path.stem for path in (REPO_ROOT / "skills").glob("*/agents/pi/*.md")}
     styles = {path.stem for path in (REPO_ROOT / "output-styles").glob("*.md")}
     return skills | agents | styles
+
+
+def top_level_yaml_keys(text: str) -> set[str]:
+    return {
+        match.group(1)
+        for match in re.finditer(r"^([a-z][a-z0-9_]*):", text, re.MULTILINE)
+    }
 
 
 def h2_body(profile: str, heading: str) -> str:
@@ -274,6 +282,41 @@ class ProfileContractTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertIn("unknown", self.bootstrap)
         self.assertIn("bloquea", self.bootstrap)
+
+
+class DogfoodConfigTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.config = DOGFOOD_CONFIG_PATH.read_text(encoding="utf-8")
+
+    def test_config_has_all_logical_layers(self) -> None:
+        self.assertTrue(
+            {"schema_version", "profile", "workspace", "groups", "repositories"}
+            <= top_level_yaml_keys(self.config)
+        )
+
+    def test_config_preserves_every_axis(self) -> None:
+        for axis in CONFIG_AXES:
+            with self.subTest(axis=axis):
+                self.assertRegex(self.config, rf"(?m)^\s+{re.escape(axis)}:")
+
+    def test_config_names_required_authorities(self) -> None:
+        for required in (
+            "pablontiv/handbook",
+            "AGENTS.md",
+            "Rootline",
+            "Backscroll",
+            ".workspace/docs/adr",
+            ".workspace/docs/superpowers/specs",
+            ".workspace/docs/superpowers/plans",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.config)
+
+    def test_config_keeps_unresolved_bindings_explicit(self) -> None:
+        self.assertIn("unknown", self.config)
+        self.assertNotIn("{" * 2, self.config)
+        self.assertNotIn("TO" + "DO", self.config)
 
 
 if __name__ == "__main__":

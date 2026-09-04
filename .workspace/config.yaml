@@ -1,0 +1,79 @@
+schema_version: workspace-control/v1
+
+profile:
+  id: pablontiv/handbook
+  version: 1
+  based_on:
+    name: engineering-handbook
+    version: "1.4"
+    digest: f5455e3eced13690358b02823053a1e00a6c7c06de5f17d9716805bf0a0cff26
+
+workspace:
+  context_sources:
+    - |
+      Backscroll es obligatorio cuando la historia pueda afectar el trabajo:
+      buscar primero por proyecto, ampliar una vez si no hay resultados, usar
+      contenido de tools para recordar comandos, rutas o errores y conservar
+      unknown si la fuente requerida no está disponible.
+  workflow:
+    base_branch: main
+    sync_strategy: unknown
+    isolation_strategy: dedicated-worktree
+    development_workflow: |
+      Clasificar alcance, explorar contexto, aprobar el diseño aplicable,
+      planificar cuando corresponda e implementar mediante TDD.
+    commit_policy: |
+      Usar conventional commits y ejecutar la suite completa antes del commit.
+    delivery_mode: pull-request
+    delivery_gate: |
+      Requerir review y autorización humana antes de integrar.
+  pre_checks:
+    - |
+      Revisar el ADR aceptado que gobierna el cambio.
+    - |
+      Confirmar Rootline antes de escribir conocimiento gobernado.
+    - |
+      Consultar Backscroll cuando la historia pueda cambiar la decisión.
+  acceptance_checks:
+    - |
+      Mapear cada criterio de la spec aprobada a evidencia verificable.
+  review_checks:
+    - |
+      Obtener al menos una revisión antes de la entrega mutante.
+  post_checks:
+    - |
+      Confirmar que la revisión aprobada quedó realmente entregada.
+  monitoring: |
+    No se declara monitoreo para cambios puramente documentales; cualquier
+    entrega con comportamiento operativo debe definirlo antes de mutar.
+  external_effects: |
+    Operar read-only hasta obtener autorización explícita y ligada al payload.
+  credential_policy: |
+    Usar únicamente mecanismos declarados y no persistir secretos.
+  knowledge_policy: |
+    Rootline gobierna ADRs en .workspace/docs/adr, specs en
+    .workspace/docs/superpowers/specs y planes en
+    .workspace/docs/superpowers/plans. No existe fallback activo a docs/.
+  cleanup_policy: |
+    Ofrecer cleanup y no eliminar automáticamente.
+  custom_rules:
+    - |
+      Las herramientas oficiales del perfil no admiten sustituciones.
+    - |
+      La versión 1 declara compatibilidad únicamente con Pi.
+
+groups:
+  handbook:
+    workflow:
+      delivery_mode: pull-request
+
+repositories:
+  pablontiv/handbook:
+    repo:
+      id: pablontiv/handbook
+      path: unknown
+      group: handbook
+      managed: true
+      verified_revision: unknown
+    context_sources:
+      - AGENTS.md
