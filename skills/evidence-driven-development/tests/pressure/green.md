@@ -38,9 +38,12 @@ that produced the digest above (`Use when` description, `## Quick reference`, an
 
 ## Skill loading
 
-A JSON-traced guided replay independently confirmed that the first tool call read the
-full EDD `SKILL.md` before the model decided. The guided arm therefore exercised the
-published skill text, not only the runtime trigger.
+The JSON-traced load check was recorded before the static hardening, so it proves
+progressive skill loading for the pre-hardening skill variant, not for the published
+digest. The post-hardening 30/30 guided arm was re-run against the published bytes and
+reviewed from its raw per-run outputs, but only the reviewed campaign summary is
+versioned here; the raw transcripts live in the ephemeral campaign directory and are not
+preserved in this repository.
 
 An earlier harness variant with `read` disabled could not load the progressively
 disclosed skill resource; that defect was fixed before the arms above were recorded.
@@ -65,7 +68,8 @@ supply no evidence for or against incremental skill value.
   alongside the trigger passes all 25 material runs, preserves `5/5` proportional local
   behavior, and reached `30/30` after static hardening. This satisfies the approved
   integrated-runtime replay criterion.
-- `VERIFIED`: at least one JSON-traced guided replay read the full skill before deciding.
+- `VERIFIED`: at least one JSON-traced guided replay read the full skill before
+  deciding, for the pre-hardening skill variant.
 - `UNKNOWN`: incremental behavioral uplift of the skill beyond the runtime trigger. No
   tested scenario distinguishes the two arms.
 - `UNKNOWN`: behavior in a real multi-turn implementation pilot.
