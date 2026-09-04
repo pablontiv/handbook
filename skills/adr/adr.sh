@@ -74,8 +74,8 @@ cmd_init() {
 
 yq() { printf "'%s'" "${1//\'/\'\'}"; } # single-quoted YAML scalar; safe for ':' and quotes
 
-write_record() { # file num title ctx dec alt con [pend] [supersedes]
-  local f=$1 num=$2 title=$3 ctx=$4 dec=$5 alt=$6 con=$7 pend=${8:-} sup=${9:-}
+write_record() { # num title ctx dec alt con [pend] [supersedes]
+  local num=$1 title=$2 ctx=$3 dec=$4 alt=$5 con=$6 pend=${7:-} sup=${8:-}
   {
     echo '---'
     echo 'tipo: adr'
@@ -91,7 +91,7 @@ write_record() { # file num title ctx dec alt con [pend] [supersedes]
     if [ -n "$sup" ]; then printf 'Reemplaza a %s.\n\n' "$sup"; fi
     printf '## Contexto\n%s\n\n## Decisión\n%s\n\n## Alternativas descartadas\n%s\n\n## Consecuencias\n%s\n' "$ctx" "$dec" "$alt" "$con"
     if [ -n "$pend" ]; then printf '\n## Pendientes\n%s\n' "$pend"; fi
-  } >"$f"
+  }
 }
 
 cmd_propose() { # slug ctx dec alt con [pend] [supersedes]
@@ -122,11 +122,11 @@ cmd_propose() { # slug ctx dec alt con [pend] [supersedes]
   local title
   title=$(echo "$slug" | tr '-' ' ' | awk '{print toupper(substr($0,1,1)) substr($0,2)}')
   if [ "$DRY" = 1 ]; then
-    write_record /dev/stdout "$num" "$title" "$@"
+    write_record "$num" "$title" "$@"
     echo "(dry-run: would write $f)" >&2
     return 0
   fi
-  write_record "$f" "$num" "$title" "$@"
+  write_record "$num" "$title" "$@" >"$f"
   rootline validate "$f" -o table >&2
   echo "$f"
 }

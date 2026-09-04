@@ -134,6 +134,9 @@ class AdrWorkspaceTests(unittest.TestCase):
             self.assertIn("local ADR store is not allowed", result.stderr)
             self.assertFalse((root / ".adr").exists())
 
+    def test_dry_run_uses_process_stdout_without_device_path(self) -> None:
+        self.assertNotIn("/dev/stdout", SCRIPT.read_text())
+
     def test_propose_uses_maximum_existing_number_across_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
