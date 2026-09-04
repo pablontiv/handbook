@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 README_PATH = ROOT / "README.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+TEST_REQUIREMENTS_PATH = ROOT / "requirements-test.txt"
 HERO = (
     "Un handbook para convertir el trabajo de desarrollo improvisado en un "
     "método reproducible, verificable y adaptable."
@@ -49,6 +50,7 @@ class HandbookContractTests(unittest.TestCase):
         cls.readme = README_PATH.read_text(encoding="utf-8")
         cls.agents = AGENTS_PATH.read_text(encoding="utf-8")
         cls.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cls.test_requirements = TEST_REQUIREMENTS_PATH.read_text(encoding="utf-8")
 
     def assert_readme_leads_with_approved_identity(self, text: str) -> None:
         self.assertTrue(
@@ -161,6 +163,20 @@ class HandbookContractTests(unittest.TestCase):
 
     def test_checkout_does_not_persist_credentials(self) -> None:
         self.assertIn("persist-credentials: false", self.workflow)
+
+    def test_profile_test_dependency_is_pinned_installed_and_documented(self) -> None:
+        install = (
+            "python -m pip install --disable-pip-version-check --no-deps "
+            "-r requirements-test.txt"
+        )
+        profile_tests = (
+            "python -m unittest discover -s profiles/pablontiv/tests "
+            '-t profiles/pablontiv -p "test_*.py" -v'
+        )
+        self.assertEqual(self.test_requirements.strip(), "PyYAML==6.0.3")
+        self.assertIn(install, " ".join(self.workflow.split()))
+        self.assertIn(install, self.readme)
+        self.assertIn(profile_tests, self.readme)
 
     def test_ci_validates_every_rootline_boundary(self) -> None:
         for target in (

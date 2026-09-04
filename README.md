@@ -64,6 +64,15 @@ Version 1 supports Pi as its runtime. Rootline governs durable knowledge under `
 
 - [`mentor-telemetria`](output-styles/mentor-telemetria.md) defines operating modes, decision telemetry, root-cause reporting, and post-task learning.
 
+## Verify the profile contract
+
+PyYAML is a pinned test-only dependency. From the repository root in an activated Python 3.11+ virtual environment, install it and run the profile contract with:
+
+```sh
+python -m pip install --disable-pip-version-check --no-deps -r requirements-test.txt
+python -m unittest discover -s profiles/pablontiv/tests -t profiles/pablontiv -p "test_*.py" -v
+```
+
 ## Optional integrations
 
 Individual artifacts may integrate with Pi, Claude Code, OpenCode, GitHub CLI, Rootline, Backscroll, or other tools. Those integrations are capability-specific; the linked artifact is the authority for supported runtimes, dependencies, and safety gates. This does not expand the Pablontiv profile's version 1 runtime compatibility beyond Pi.

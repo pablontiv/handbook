@@ -4,6 +4,9 @@ import hashlib
 import re
 import unittest
 from pathlib import Path
+from typing import Any, cast
+
+import yaml
 
 PROFILE_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PROFILE_ROOT.parents[1]
@@ -89,29 +92,30 @@ def published_artifacts() -> set[str]:
     return skills | agents | styles
 
 
-def top_level_yaml_keys(text: str) -> set[str]:
-    return {
-        match.group(1)
-        for match in re.finditer(r"^([a-z][a-z0-9_]*):", text, re.MULTILINE)
-    }
+def parse_yaml_mapping(text: str) -> dict[str, Any]:
+    document = yaml.safe_load(text)
+    if not isinstance(document, dict) or not all(
+        isinstance(key, str) for key in document
+    ):
+        raise AssertionError("YAML document must have a string-keyed mapping root")
+    return cast(dict[str, Any], document)
 
 
-def yaml_mapping_body(text: str, key: str, indent: int = 0) -> str:
-    lines = text.splitlines()
-    marker = f"{' ' * indent}{key}:"
-    start = lines.index(marker) + 1
-    body = []
-    for line in lines[start:]:
-        leading = len(line) - len(line.lstrip())
-        if line.strip() and leading <= indent:
-            break
-        body.append(line)
-    return "\n".join(body)
+def forbidden_control_fields(value: Any) -> tuple[str, ...]:
+    found: set[str] = set()
 
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                if key in FORBIDDEN_CONTROL_FIELDS:
+                    found.add(key)
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
 
-def deterministic_control_fields(text: str) -> tuple[str, ...]:
-    alternatives = "|".join(FORBIDDEN_CONTROL_FIELDS)
-    return tuple(re.findall(rf"^\s+({alternatives}):", text, re.MULTILINE))
+    visit(value)
+    return tuple(field for field in FORBIDDEN_CONTROL_FIELDS if field in found)
 
 
 def h2_body(profile: str, heading: str) -> str:
@@ -199,12 +203,43 @@ def routing_contract_violations(
     return tuple(violations)
 
 
+class YamlContractParsingTests(unittest.TestCase):
+    def test_parser_accepts_comments_and_valid_reindentation(self) -> None:
+        parsed = parse_yaml_mapping(
+            "workspace:  # logical layer\n"
+            "    workflow:\n"
+            "        base_branch: main\n"
+            "groups: {}\n"
+        )
+        self.assertEqual(parsed["workspace"]["workflow"]["base_branch"], "main")
+
+    def test_parser_rejects_non_mapping_root(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "mapping root"):
+            parse_yaml_mapping("- workspace\n- groups\n")
+
+    def test_forbidden_fields_are_found_recursively(self) -> None:
+        parsed = parse_yaml_mapping(
+            "workspace:\n"
+            "  custom_rules:\n"
+            "    - executor: shell\n"
+            "      nested:\n"
+            "        timeout_seconds: 30\n"
+            "repositories:\n"
+            "  pablontiv/handbook:\n"
+            "    success: exit-zero\n"
+            "    hooks:\n"
+            "      - on_failure: stop\n"
+        )
+        self.assertEqual(forbidden_control_fields(parsed), FORBIDDEN_CONTROL_FIELDS)
+
+
 class ProfileContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.profile = PROFILE_PATH.read_text(encoding="utf-8")
         cls.bootstrap = BOOTSTRAP_PATH.read_text(encoding="utf-8")
         cls.template = TEMPLATE_PATH.read_text(encoding="utf-8")
+        cls.template_document = parse_yaml_mapping(cls.template)
 
     def test_source_snapshot_has_approved_digest(self) -> None:
         self.assertEqual(
@@ -243,10 +278,18 @@ class ProfileContractTests(unittest.TestCase):
                 self.assertTrue(category_contract_violations(mutated))
 
     def test_template_preserves_layers_and_axes(self) -> None:
-        for layer in ("workspace:", "groups:", "repositories:"):
-            self.assertIn(layer, self.template)
+        for layer in ("workspace", "groups", "repositories"):
+            self.assertIn(layer, self.template_document)
+        workspace = self.template_document.get("workspace")
+        self.assertIsInstance(workspace, dict)
+        assert isinstance(workspace, dict)
+        workflow = workspace.get("workflow")
+        self.assertIsInstance(workflow, dict)
+        assert isinstance(workflow, dict)
+        axis_keys = set(workspace) | set(workflow)
         for axis in CONFIG_AXES:
-            self.assertRegex(self.template, rf"(?m)^\s+{re.escape(axis)}:")
+            with self.subTest(axis=axis):
+                self.assertIn(axis, axis_keys)
 
     def test_profile_preserves_every_configurable_axis(self) -> None:
         axes = h2_body(self.profile, "Ejes configurables")
@@ -255,13 +298,16 @@ class ProfileContractTests(unittest.TestCase):
                 self.assertIn(f"| `{axis}` |", axes)
 
     def test_template_rejects_deterministic_control_fields(self) -> None:
-        self.assertEqual(deterministic_control_fields(self.template), ())
+        self.assertEqual(forbidden_control_fields(self.template_document), ())
         mutated = self.template.replace(
             "  custom_rules: []",
             "  custom_rules: []\n  executor: shell",
             1,
         )
-        self.assertEqual(deterministic_control_fields(mutated), ("executor",))
+        self.assertEqual(
+            forbidden_control_fields(parse_yaml_mapping(mutated)),
+            ("executor",),
+        )
 
     def test_profile_routes_every_published_artifact(self) -> None:
         self.assertEqual(
@@ -327,26 +373,38 @@ class DogfoodConfigTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.config = DOGFOOD_CONFIG_PATH.read_text(encoding="utf-8")
-        cls.workspace = yaml_mapping_body(cls.config, "workspace")
-        cls.repository = yaml_mapping_body(cls.config, "pablontiv/handbook", indent=2)
+        cls.document = parse_yaml_mapping(cls.config)
+        workspace = cls.document.get("workspace")
+        repositories = cls.document.get("repositories")
+        if not isinstance(workspace, dict) or not isinstance(repositories, dict):
+            raise TypeError("workspace and repositories must be mappings")
+        repository = repositories.get("pablontiv/handbook")
+        if not isinstance(repository, dict):
+            raise TypeError("pablontiv/handbook must be a mapping")
+        cls.workspace = cast(dict[str, Any], workspace)
+        cls.repository = cast(dict[str, Any], repository)
 
     def test_config_has_all_logical_layers(self) -> None:
         self.assertTrue(
             {"schema_version", "profile", "workspace", "groups", "repositories"}
-            <= top_level_yaml_keys(self.config)
+            <= set(self.document)
         )
 
     def test_workspace_config_preserves_every_axis(self) -> None:
+        workflow = self.workspace.get("workflow")
+        self.assertIsInstance(workflow, dict)
+        assert isinstance(workflow, dict)
+        axis_keys = set(self.workspace) | set(workflow)
         for axis in CONFIG_AXES:
             with self.subTest(axis=axis):
-                self.assertRegex(self.workspace, rf"(?m)^\s+{re.escape(axis)}:")
+                self.assertIn(axis, axis_keys)
 
     def test_repository_context_sources_preserve_backscroll(self) -> None:
-        sources = yaml_mapping_body(
-            self.repository,
-            "context_sources",
-            indent=4,
-        )
+        sources = self.repository.get("context_sources")
+        self.assertIsInstance(sources, list)
+        assert isinstance(sources, list)
+        self.assertTrue(all(isinstance(source, str) for source in sources))
+        source_text = "\n".join(cast(list[str], sources))
         for required in (
             "Backscroll",
             "buscar primero por proyecto",
@@ -356,18 +414,23 @@ class DogfoodConfigTests(unittest.TestCase):
             "AGENTS.md",
         ):
             with self.subTest(required=required):
-                self.assertIn(required, sources)
+                self.assertIn(required, source_text)
 
     def test_sync_strategy_is_observable_and_fail_closed(self) -> None:
-        workflow = yaml_mapping_body(self.workspace, "workflow", indent=2)
-        normalized = " ".join(workflow.split())
-        self.assertNotIn("sync_strategy: unknown", workflow)
+        workflow = self.workspace.get("workflow")
+        self.assertIsInstance(workflow, dict)
+        assert isinstance(workflow, dict)
+        sync_strategy = workflow.get("sync_strategy")
+        self.assertIsInstance(sync_strategy, str)
+        assert isinstance(sync_strategy, str)
+        normalized = " ".join(sync_strategy.split())
+        self.assertNotEqual(sync_strategy.strip(), "unknown")
         for required in ("lectura", "origin/main", "revisión base", "pull", "unknown"):
             with self.subTest(required=required):
                 self.assertIn(required, normalized)
 
     def test_config_rejects_deterministic_control_fields(self) -> None:
-        self.assertEqual(deterministic_control_fields(self.config), ())
+        self.assertEqual(forbidden_control_fields(self.document), ())
         mutated = self.config.replace(
             "  custom_rules:",
             "  executor: shell\n  timeout_seconds: 30\n  success: exit-zero\n"
@@ -375,7 +438,7 @@ class DogfoodConfigTests(unittest.TestCase):
             1,
         )
         self.assertEqual(
-            deterministic_control_fields(mutated),
+            forbidden_control_fields(parse_yaml_mapping(mutated)),
             FORBIDDEN_CONTROL_FIELDS,
         )
 
