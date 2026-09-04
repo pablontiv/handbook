@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import importlib
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+shell_support = importlib.import_module("tests.shell_support")
+
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = SKILL_ROOT / "adr.sh"
+BASH = shell_support.resolve_bash()
 
 
 def run(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", str(SCRIPT), *args],
+        [BASH, str(SCRIPT), *args],
         cwd=cwd,
         text=True,
         capture_output=True,
