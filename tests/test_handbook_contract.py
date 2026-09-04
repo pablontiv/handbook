@@ -5,10 +5,11 @@ import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-
 ROOT = Path(__file__).resolve().parents[1]
 README_PATH = ROOT / "README.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
+WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+TEST_REQUIREMENTS_PATH = ROOT / "requirements-test.txt"
 HERO = (
     "Un handbook para convertir el trabajo de desarrollo improvisado en un "
     "método reproducible, verificable y adaptable."
@@ -18,7 +19,9 @@ SUPPORT = (
     "de personas y agentes."
 )
 APPROVED_IDENTITY_BLOCK = f"# Handbook\n\n{HERO}\n\n{SUPPORT}"
-REMOVE_GENTLE_CONTEXT_LINK = "[`skills/remove-gentle-context/`](skills/remove-gentle-context/)"
+REMOVE_GENTLE_CONTEXT_LINK = (
+    "[`skills/remove-gentle-context/`](skills/remove-gentle-context/)"
+)
 LINK_PATTERN = re.compile(r"(?<!!)\[[^]]+\]\(([^)]+)\)")
 REQUIRED_AGENT_CLAUSES = (
     "portable working handbook",
@@ -33,7 +36,8 @@ REQUIRED_AGENT_CLAUSES = (
     "Support macOS, Linux, and Windows without hard-coded user paths.",
     "Prefer the Python standard library for helpers.",
     "Before implementation, identify and review the accepted ADR that governs the change.",
-    "Validate each new or modified ADR with `rootline validate docs/adr/<record>.md --strict`.",
+    "Validate each new or modified ADR with `rootline validate .workspace/docs/adr/NNNN-slug.md --strict`.",
+    "Before work, resolve the operational workspace policy from `.workspace/config.yaml`.",
     "Keep documentation synchronized with executable behavior.",
     "Run the complete test suite before committing.",
     "Integrate changes through pull requests.",
@@ -45,6 +49,8 @@ class HandbookContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.readme = README_PATH.read_text(encoding="utf-8")
         cls.agents = AGENTS_PATH.read_text(encoding="utf-8")
+        cls.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cls.test_requirements = TEST_REQUIREMENTS_PATH.read_text(encoding="utf-8")
 
     def assert_readme_leads_with_approved_identity(self, text: str) -> None:
         self.assertTrue(
@@ -69,7 +75,9 @@ class HandbookContractTests(unittest.TestCase):
             ),
             "",
         )
-        self.assertTrue(bullet, "README must expose the exact remove-gentle-context discovery link.")
+        self.assertTrue(
+            bullet, "README must expose the exact remove-gentle-context discovery link."
+        )
         self.assertIn("Python 3.11+ executable", bullet)
         self.assertIn("`python`", bullet)
         self.assertIn("`python3`", bullet)
@@ -84,11 +92,13 @@ class HandbookContractTests(unittest.TestCase):
             "# Agent Skills\n\nPublic collection of portable Agent Skills.\n\n",
             "# Pi Handbook\n\nVendor-specific agent runtime guidance.\n\n",
         ):
-            with self.subTest(branding=branding.splitlines()[0]):
-                with self.assertRaises(AssertionError):
-                    self.assert_readme_leads_with_approved_identity(
-                        f"{branding}{APPROVED_IDENTITY_BLOCK}\n"
-                    )
+            with (
+                self.subTest(branding=branding.splitlines()[0]),
+                self.assertRaises(AssertionError),
+            ):
+                self.assert_readme_leads_with_approved_identity(
+                    f"{branding}{APPROVED_IDENTITY_BLOCK}\n"
+                )
 
     def test_every_published_skill_is_linked(self) -> None:
         skills = sorted(
@@ -102,10 +112,11 @@ class HandbookContractTests(unittest.TestCase):
     def test_existing_artifact_families_are_linked(self) -> None:
         for target in (
             "AGENTS.md",
+            "profiles/",
             "skills/",
             "output-styles/",
-            "docs/adr/",
-            "docs/superpowers/",
+            ".workspace/docs/adr/",
+            ".workspace/docs/superpowers/",
         ):
             with self.subTest(target=target):
                 self.assertIn(f"({target})", self.readme)
@@ -140,6 +151,52 @@ class HandbookContractTests(unittest.TestCase):
                 mutated = self.agents.replace(clause, "", 1)
                 with self.assertRaises(AssertionError):
                     self.assert_agents_contract(mutated)
+
+    def test_github_actions_are_pinned_to_commits(self) -> None:
+        action_refs = re.findall(
+            r"^\s*- uses: \S+@([^\s]+)$", self.workflow, re.MULTILINE
+        )
+        self.assertTrue(action_refs)
+        for ref in action_refs:
+            with self.subTest(ref=ref):
+                self.assertRegex(ref, r"^[0-9a-f]{40}$")
+
+    def test_checkout_does_not_persist_credentials(self) -> None:
+        self.assertIn("persist-credentials: false", self.workflow)
+
+    def test_profile_test_dependency_is_pinned_installed_and_documented(self) -> None:
+        install = (
+            "python -m pip install --disable-pip-version-check --no-deps "
+            "-r requirements-test.txt"
+        )
+        profile_tests = (
+            "python -m unittest discover -s profiles/pablontiv/tests "
+            '-t profiles/pablontiv -p "test_*.py" -v'
+        )
+        self.assertEqual(self.test_requirements.strip(), "PyYAML==6.0.3")
+        self.assertIn(install, " ".join(self.workflow.split()))
+        self.assertIn(install, self.readme)
+        self.assertIn(profile_tests, self.readme)
+
+    def test_ci_validates_every_rootline_boundary(self) -> None:
+        for target in (
+            ".workspace/docs/adr",
+            ".workspace/docs/superpowers",
+            "profiles/pablontiv",
+        ):
+            with self.subTest(target=target):
+                self.assertIn(f"rootline validate --all {target}", self.workflow)
+
+    def test_no_legacy_document_authority_remains(self) -> None:
+        self.assertFalse((ROOT / "docs").exists())
+        self.assertNotIn("(docs/adr/)", self.readme)
+        self.assertNotIn("(docs/superpowers/)", self.readme)
+
+    def test_profile_is_published(self) -> None:
+        self.assertIn("(profiles/pablontiv/)", self.readme)
+        self.assertIn("Pi", self.readme)
+        self.assertIn("Rootline", self.readme)
+        self.assertIn("Backscroll", self.readme)
 
     def test_remove_gentle_context_readme_discovery_is_portable(self) -> None:
         self.assert_remove_gentle_context_portability(self.readme)

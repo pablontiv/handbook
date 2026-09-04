@@ -1,10 +1,11 @@
 ---
 tipo: adr
-estado: accepted
+estado: superseded
 fecha: "2026-08-20"
 contexto: "El repositorio implementó cambios significativos mientras las decisiones quedaban repartidas entre conversaciones, specs, AGENTS.md y ramas no integradas; el PR #4 añadió el primer ADR después de la implementación y una regla no justificada en AGENTS.md seguía prohibiendo pull requests pese a la preferencia explícita de integración mediante PR."
 decision: "Adoptar docs/adr como registro versionado de decisiones, exigir que cada implementación identifique y revise su ADR gobernante antes de modificar código, registrar y aceptar toda decisión significativa antes de implementarla, y usar pull requests como vía normal de integración salvo una excepción humana explícita también registrada."
 consecuencias: "AGENTS.md deja de prohibir pull requests; specs y planes no sustituyen ADRs; los ADRs retrospectivos documentan una brecha pero no prueban gobernanza previa; las ramas con ADRs divergentes deben reconciliar estado, numeración y alcance antes de integrarse."
+superseded_by: 0021-adoptar-perfil-pablontiv-gobernado-por-workspace
 ---
 
 # ADR 0002: Adoptar gobernanza versionada mediante ADR y pull requests

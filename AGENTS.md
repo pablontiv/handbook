@@ -6,6 +6,8 @@ This repository publishes a portable working handbook: rules, Agent Skills, dete
 
 Every top-level artifact family must be globally useful, portable, publicly distributable, and explicitly owned. Product-coupled and repository-local artifacts stay with their owning product or repository. Keep every skill self-contained under `skills/<name>/` and avoid dependencies between sibling skills.
 
+Before work, resolve the operational workspace policy from `.workspace/config.yaml`. The reusable profile under `profiles/pablontiv/` is reference material; repository-specific operation comes from the workspace configuration.
+
 ## Artifact boundaries
 
 - Give each artifact one explicit owner and keep its runtime dependencies with it.
@@ -13,6 +15,7 @@ Every top-level artifact family must be globally useful, portable, publicly dist
 - Document how each new family contributes to the handbook, how it is verified, and where its portability boundary lies.
 - Treat agent runtimes and external tools as integrations, not as the handbook's category.
 - Preserve historical ADRs, specs, plans, and completed records; supersede decisions instead of rewriting them.
+- Rootline governs durable Markdown under `.workspace/docs/`; Backscroll supplies episodic recall according to the workspace policy.
 
 ## Safety
 
@@ -31,8 +34,8 @@ Every top-level artifact family must be globally useful, portable, publicly dist
 
 ## Delivery
 
-- Before implementation, identify and review the accepted ADR that governs the change. If a significant decision is not covered, add or update an ADR under `docs/adr/` and obtain acceptance before modifying code.
-- Validate each new or modified ADR with `rootline validate docs/adr/<record>.md --strict`.
+- Before implementation, identify and review the accepted ADR that governs the change. If a significant decision is not covered, add or update an ADR under `.workspace/docs/adr/` and obtain acceptance before modifying code.
+- Validate each new or modified ADR with `rootline validate .workspace/docs/adr/NNNN-slug.md --strict`.
 - Use conventional commits.
 - Keep documentation synchronized with executable behavior.
 - Run the complete test suite before committing.

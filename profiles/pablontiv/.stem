@@ -1,0 +1,8 @@
+version: 2
+root: true
+links:
+  styles: [markdown]
+  checks:
+    resolve: true
+    anchors: true
+    encoding: true

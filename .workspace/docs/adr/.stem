@@ -1,5 +1,4 @@
 version: 2
-root: true
 schema:
     tipo:
         type: enum

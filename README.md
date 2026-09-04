@@ -9,13 +9,14 @@ Reúne reglas, skills, herramientas y memoria para orientar el trabajo de person
 This repository is the handbook itself. Its current, versioned building blocks are:
 
 - repository-wide operating rules in [`AGENTS.md`](AGENTS.md);
+- the reusable Pablontiv profile under [`profiles/`](profiles/);
 - portable agent workflows under [`skills/`](skills/);
 - deterministic helpers, assets, references, fixtures, and tests bundled with their owning skills;
 - cross-session memory guidance in [`context-save`](skills/context-save/);
 - interaction contracts under [`output-styles/`](output-styles/);
-- architecture decisions in [`docs/adr/`](docs/adr/) and design history in [`docs/superpowers/`](docs/superpowers/).
+- architecture decisions in [`.workspace/docs/adr/`](.workspace/docs/adr/) and design history in [`.workspace/docs/superpowers/`](.workspace/docs/superpowers/).
 
-The integrated workspace method, workspace controller, and end-to-end delivery lifecycle are outside the current repository contract.
+Version 1 adds a prose-first workspace method without claiming a deterministic controller or automatic execution.
 
 ## Core model
 
@@ -30,6 +31,12 @@ The handbook organizes portable working artifacts around development needs rathe
 Every published artifact must be globally useful, portable, publicly distributable, and explicitly owned. Product-coupled and repository-local workflows stay with their owning product or repository.
 
 ## Capabilities
+
+### Adopt the Pablontiv working profile
+
+[`profiles/pablontiv/`](profiles/pablontiv/) publishes reusable reference material: `PROFILE.md` specializes Engineering Handbook v1.4 and `bootstrap.md` guides adoption. This repository dogfoods it through `.workspace/config.yaml`; repository-specific operation comes from that instance, not from edits to the reusable profile.
+
+Version 1 supports Pi as its runtime. Rootline governs durable knowledge under `.workspace/docs/`, Backscroll supplies required episodic recall, and controls begin as prose so they can become deterministic incrementally without fabricating execution evidence.
 
 ### Make and preserve decisions
 
@@ -57,14 +64,23 @@ Every published artifact must be globally useful, portable, publicly distributab
 
 - [`mentor-telemetria`](output-styles/mentor-telemetria.md) defines operating modes, decision telemetry, root-cause reporting, and post-task learning.
 
+## Verify the profile contract
+
+PyYAML is a pinned test-only dependency. From the repository root in an activated Python 3.11+ virtual environment, install it and run the profile contract with:
+
+```sh
+python -m pip install --disable-pip-version-check --no-deps -r requirements-test.txt
+python -m unittest discover -s profiles/pablontiv/tests -t profiles/pablontiv -p "test_*.py" -v
+```
+
 ## Optional integrations
 
-Individual artifacts may integrate with Pi, Claude Code, OpenCode, GitHub CLI, Rootline, Backscroll, or other tools. Those integrations are capability-specific; the linked artifact is the authority for supported runtimes, dependencies, and safety gates.
+Individual artifacts may integrate with Pi, Claude Code, OpenCode, GitHub CLI, Rootline, Backscroll, or other tools. Those integrations are capability-specific; the linked artifact is the authority for supported runtimes, dependencies, and safety gates. This does not expand the Pablontiv profile's version 1 runtime compatibility beyond Pi.
 
 ## References
 
 - To use a skill capability, open its linked skill directory and read `SKILL.md`; for interaction style, open the linked output-style document.
 - To contribute, follow [`AGENTS.md`](AGENTS.md).
-- To understand current decisions, browse [`docs/adr/`](docs/adr/).
-- To inspect approved designs and implementation history, browse [`docs/superpowers/`](docs/superpowers/).
+- To understand current decisions, browse [`.workspace/docs/adr/`](.workspace/docs/adr/).
+- To inspect approved designs and implementation history, browse [`.workspace/docs/superpowers/`](.workspace/docs/superpowers/).
 - Repository content is available under the [`MIT License`](LICENSE), except where an artifact bundles and declares a different license.
