@@ -5,7 +5,11 @@ description: Use when a significant decision has just been made or overturned in
 
 # ADR
 
-Single owner of ADR policy and schema. Other skills and the output style invoke this skill; they never reimplement it. Mechanics live in `adr.sh` (this directory) over `rootline`; run `adr.sh` with no args for usage.
+Single owner of ADR policy and schema. Other skills and the output style invoke this skill; they never reimplement it. Mechanics live in `adr.sh` (this directory) over `rootline`; run `adr.sh` with no args for usage. Rootline remains the sole ADR data interface.
+
+## Repository routing
+
+`.workspace/docs/adr` is mandatory when `.workspace/config.yaml` exists. Legacy `docs/adr` and `.adr` detection applies only outside adopted workspaces. Missing workspace governance fails closed; an adopted workspace never falls back to a legacy store.
 
 ## Threshold
 
@@ -13,10 +17,12 @@ Record a decision only if it is irreversible, cross-cutting, or carries ongoing 
 
 ## Quick reference
 
+The `docs/adr` and `.adr` paths below describe legacy/non-adopted operation until a repository creates `.workspace/config.yaml`. In an adopted workspace, versioned commands resolve `.workspace/docs/adr` exclusively.
+
 | Situation | Command |
 |---|---|
-| Is ADR enabled here? | `adr.sh detect` → prints dir, or exit 2 |
-| Enable (once per repo) | `adr.sh init versioned` (`docs/adr`) or `adr.sh init local` (`.adr`, self-ignored) |
+| Is ADR enabled here? | `adr.sh detect` → prints `.workspace/docs/adr` when adopted, otherwise a legacy dir; fails if none is governed |
+| Enable (once per repo) | `adr.sh init versioned` (`.workspace/docs/adr` when adopted; legacy `docs/adr` otherwise) or, only outside adopted workspaces, `adr.sh init local` (`.adr`, self-ignored) |
 | Preview without writing | `adr.sh --dry-run propose ...` (the only way to experiment) |
 | New decision | `adr.sh propose <slug> <contexto> <decision> <alternativas> <consecuencias> [pendientes]` |
 | User approved it in this conversation | `adr.sh accept <NNNN>` right after propose |
@@ -28,7 +34,9 @@ Field values are one-line summaries written in neutral professional Spanish, reg
 
 ## Not enabled
 
-`detect` fails → ask once per repo per session: "¿Desea inicializar ADRs en este repositorio? ¿En modo versionado (docs/adr) o local (.adr)?". Declined → reply "ADR no registrado (no habilitado)" and stop. There is no other store: not engram, not a scratch file, not the chat.
+In an adopted workspace, `detect` fails closed when `.workspace/docs/adr/.stem` is missing; repair or initialize the workspace-governed store and never offer a legacy fallback.
+
+Outside adopted workspaces, `detect` fails → ask once per repo per session: "¿Desea inicializar ADRs en este repositorio? ¿En modo versionado (docs/adr) o local (.adr)?". Declined → reply "ADR no registrado (no habilitado)" and stop. There is no other store: not engram, not a scratch file, not the chat.
 
 ## Enforcement (optional, per repo)
 

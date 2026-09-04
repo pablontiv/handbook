@@ -9,14 +9,39 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-detect() {
-  if [ -f docs/adr/.stem ]; then echo docs/adr; elif [ -f .adr/.stem ]; then echo .adr; else return 1; fi
+workspace_active() { [ -f .workspace/config.yaml ]; }
+
+versioned_dir() {
+  if workspace_active; then
+    printf '%s\n' .workspace/docs/adr
+  else
+    printf '%s\n' docs/adr
+  fi
 }
-need_dir() { DIR=$(detect) || { echo "adr: not enabled (no docs/adr/.stem or .adr/.stem). Run: adr.sh init versioned|local" >&2; exit 2; }; }
+
+detect() {
+  if workspace_active; then
+    [ -f .workspace/docs/adr/.stem ] || return 1
+    printf '%s\n' .workspace/docs/adr
+  elif [ -f docs/adr/.stem ]; then
+    printf '%s\n' docs/adr
+  elif [ -f .adr/.stem ]; then
+    printf '%s\n' .adr
+  else
+    return 1
+  fi
+}
+
+need_dir() {
+  DIR=$(detect) || {
+    echo "adr: no governed ADR store resolved for this workspace or repository" >&2
+    exit 2
+  }
+}
 
 cmd_init() {
   case "${1:-}" in
-    versioned) DIR=docs/adr ;;
+    versioned) DIR=$(versioned_dir) ;;
     local) DIR=.adr ;;
     *) echo "usage: adr.sh init versioned|local" >&2; exit 2 ;;
   esac
