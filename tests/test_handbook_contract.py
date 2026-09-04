@@ -174,14 +174,13 @@ class HandbookContractTests(unittest.TestCase):
         result = subprocess.run(
             ["git", "check-ignore", "--no-index", "--stdin"],
             cwd=ROOT,
-            input="\n".join(candidates) + "\n",
-            text=True,
+            input=("\n".join(candidates) + "\n").encode("ascii"),
             capture_output=True,
             check=False,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
         self.assertEqual(
-            result.stdout.splitlines(),
+            result.stdout.decode("ascii").splitlines(),
             list(candidates[:2]),
             "Python bytecode must be ignored without hiding source files.",
         )
