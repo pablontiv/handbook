@@ -1,0 +1,41 @@
+schema_version: workspace-control/v1
+
+profile:
+  id: pablontiv/handbook
+  version: 1
+  based_on:
+    name: engineering-handbook
+    version: "1.4"
+    digest: f5455e3eced13690358b02823053a1e00a6c7c06de5f17d9716805bf0a0cff26
+
+workspace:
+  context_sources: []
+  workflow:
+    base_branch: unknown
+    sync_strategy: unknown
+    isolation_strategy: unknown
+    development_workflow: |
+      Describir el flujo de diseño, aprobación e implementación.
+    commit_policy: |
+      Describir la política de commits.
+    delivery_mode: unknown
+    delivery_gate: |
+      Describir la aprobación y evidencia requeridas.
+  pre_checks: []
+  acceptance_checks: []
+  review_checks: []
+  post_checks: []
+  monitoring: |
+    Describir el monitoreo requerido o declarar que no aplica.
+  external_effects: |
+    Describir los efectos permitidos y sus gates.
+  credential_policy: |
+    Describir el mecanismo autorizado sin incluir secretos.
+  knowledge_policy: |
+    Rootline gobierna ADRs, specs y planes bajo .workspace/docs/.
+  cleanup_policy: |
+    Ofrecer cleanup; nunca eliminar automáticamente.
+  custom_rules: []
+
+groups: {}
+repositories: {}
