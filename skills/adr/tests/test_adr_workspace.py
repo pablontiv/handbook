@@ -69,6 +69,18 @@ class AdrWorkspaceTests(unittest.TestCase):
             self.assertEqual(result.stdout.strip(), ".workspace/docs/adr")
             self.assertTrue((root / ".workspace/docs/adr/.stem").is_file())
 
+    def test_local_init_is_rejected_when_workspace_is_adopted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / ".workspace").mkdir()
+            (root / ".workspace/config.yaml").write_text(
+                "schema_version: workspace-control/v1\n"
+            )
+            result = run(root, "init", "local")
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("local ADR store is not allowed", result.stderr)
+            self.assertFalse((root / ".adr").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

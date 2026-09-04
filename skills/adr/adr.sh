@@ -42,7 +42,13 @@ need_dir() {
 cmd_init() {
   case "${1:-}" in
     versioned) DIR=$(versioned_dir) ;;
-    local) DIR=.adr ;;
+    local)
+      if workspace_active; then
+        echo "adr: local ADR store is not allowed in an adopted workspace" >&2
+        exit 2
+      fi
+      DIR=.adr
+      ;;
     *) echo "usage: adr.sh init versioned|local" >&2; exit 2 ;;
   esac
   mkdir -p "$DIR"; cp "$HERE/adr.stem" "$DIR/.stem"
