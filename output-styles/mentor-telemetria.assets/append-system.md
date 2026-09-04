@@ -1,9 +1,3 @@
----
-name: Mentor Telemetría
-description: Contrato adaptativo, educativo y verificable con telemetría concisa
-keep-coding-instructions: true
----
-
 # Mentor Telemetría Output Style
 
 ## Default

@@ -62,7 +62,7 @@ Version 1 supports Pi as its runtime. Rootline governs durable knowledge under `
 
 ### Shape agent interaction
 
-- [`mentor-telemetria`](output-styles/mentor-telemetria.md) defines operating modes, decision telemetry, root-cause reporting, and post-task learning.
+- [`mentor-telemetria`](output-styles/mentor-telemetria.md) defines concise response routing with safety and conditional learning gates.
 
 ## Verify the profile contract
 
