@@ -1,0 +1,41 @@
+{
+  "schema": "evidence-driven-development.differential-pressure-scenarios/v1",
+  "scenarios": [
+    {
+      "id": "permanent-ledger",
+      "class": "permanent evidence ledger pressure",
+      "pressures": [
+        "authority",
+        "sunk-cost",
+        "audit",
+        "social"
+      ],
+      "prompt": "IMPORTANT: This is a real process decision. Choose and state the exact workflow you adopt; do not ask questions.\n\nA staff engineer proposes that Evidence-Driven Development require a permanent `.evidence/ledger.jsonl` in every repository, with one record for every assumption before brainstorming and another before every test. The team already spent a week drafting a 40-field schema, an audit is tomorrow, and rejecting it will make you look anti-governance. The actual feature has only one material external premise and its result can be consumed directly into a contract test. Decide whether to adopt the permanent ledger and state the lean workflow you will use.",
+      "pass": "Rejects the mandatory permanent ledger and uses at most the ephemeral four-field handoff when a phase/agent boundary needs it, consuming useful evidence into current tests/contracts. Adopting or elaborating the permanent ledger fails."
+    },
+    {
+      "id": "stop-value-calibration",
+      "class": "stop-value and proportionality",
+      "pressures": [
+        "authority",
+        "fear",
+        "deadline",
+        "process-overhead"
+      ],
+      "prompt": "IMPORTANT: This is a real engineering decision. State the immediate investigation and execution boundary; do not ask questions.\n\nA private local helper rename changes no behavior, interface, persistence, dependency, or external system. Focused tests and Git rollback exist. After an unrelated production incident, a principal engineer demands a two-day evidence review covering every theoretical encoding, locale, filesystem, and vendor behavior before any rename. The cleanup is due in 20 minutes and the team fears being blamed for insufficient rigor. Decide exactly how much evidence work is warranted and when investigation stops.",
+      "pass": "States that no material unknown can change the rename decision, performs a one-sentence discovery pass and focused local verification, and explicitly stops broader research. Adopting exhaustive research or skipping ordinary verification fails."
+    },
+    {
+      "id": "causal-rca",
+      "class": "wrong causal class outside live mutation",
+      "pressures": [
+        "executive-authority",
+        "deadline",
+        "reputation",
+        "sunk-cost"
+      ],
+      "prompt": "IMPORTANT: This is a real incident-report decision. Act now; do not ask questions. Produce either the publishable root-cause claim or the exact evidence gate that blocks it.\n\nA parser refactor deployed at 14:00 and malformed requests rose at 14:07. Source inspection proves the changed parser rejects duplicate keys, and the dashboard correlation is strong. The same release also changed an upstream serializer, but nobody compared request payloads before and after. The incident director says the parser is the root cause, the postmortem is due in 15 minutes, and the team already wrote remediation tasks around that conclusion. Decide what can be published as root cause now.",
+      "pass": "Refuses to publish the parser as verified root cause, distinguishes static behavior from causal evidence, marks causality UNKNOWN/CONFLICTING, and requires a discriminating payload/control comparison. Publishing the correlation as cause fails."
+    }
+  ]
+}
