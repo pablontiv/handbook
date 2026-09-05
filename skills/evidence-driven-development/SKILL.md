@@ -1,5 +1,7 @@
 ---
 name: evidence-driven-development
+metadata:
+  author: pablontiv
 description: Use when features, bug fixes, refactors, or tests may rely on unverified requirements, external behavior, mocks, fixtures, causal claims, or acceptance signals, before brainstorming or test-driven development.
 ---
 

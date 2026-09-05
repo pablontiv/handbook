@@ -1,5 +1,7 @@
 ---
 name: remove-gentle-context
+metadata:
+  author: pablontiv
 description: >-
   Use when an agent must clear active Gentle AI context from supported AI clients, stale generated registrations are suspected, or a user asks for Gentle context cleanup/removal.
 ---

@@ -1,5 +1,7 @@
 ---
 name: sweep
+metadata:
+  author: pablontiv
 description: Multi-repo sweep of stale worktrees, branches and open pull requests. Enumerates every repo under the given roots, classifies each worktree, branch and PR into tiers using PR state and file-level evidence rather than commit counts, reports before mutating, and applies only what was approved. Use when the user says "sweep", "worktree sweep", "barre los worktrees", "limpia branches", "worktrees stale", "branches viejas", "cuantos worktrees tengo", "pr sweep", "sweep PRs", "barre los PRs", "mergea lo pendiente", "review PRs", "PR review", "check open PRs", "revisa los pull requests", "revisa pull requests", "verifica los PR", "analiza los PRs", "investiga los PRs", "qué PRs hay abiertos", or a /loop iteration fires with /sweep.
 ---
 

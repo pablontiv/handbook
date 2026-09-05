@@ -2,7 +2,9 @@
 
 **Date:** 2026-08-26
 
-**Status:** Approved
+**Status:** Approved (historical)
+
+**Current operational successor:** `2026-09-04-federated-skill-ownership-and-distribution-design.md`
 
 **Governing ADRs:** ADR 0001, ADR 0014, ADR 0015, ADR 0016
 

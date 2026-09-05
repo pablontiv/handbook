@@ -57,6 +57,14 @@ Version 1 supports Pi as its runtime. Rootline governs durable knowledge under `
 
 - [`context-save`](skills/context-save/) saves, restores, and lists structured session state with Rootline validation.
 
+### Shape names, documentation, and collaboration
+
+- [`naming-brief`](skills/naming-brief/) produces a complete prompt for naming software projects.
+- [`docs-northstar`](skills/docs-northstar/) aligns repository documentation with an owner-approved product direction and verified behavior.
+- [`rule-audit`](skills/rule-audit/) evaluates agent instruction strength and enforcement coverage.
+- [`gh-communication-style`](skills/gh-communication-style/) structures evidence-first GitHub issues, pull requests, and review replies.
+- [`markitdown`](skills/markitdown/) guides document-to-Markdown conversion through the Microsoft MarkItDown CLI.
+
 ### Inspect repositories and portfolios
 
 - [`systemic-issue-triage`](skills/systemic-issue-triage/) classifies a repository's issue backlog by verified systemic root causes and stops before design or delivery.

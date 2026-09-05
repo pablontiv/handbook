@@ -1,5 +1,7 @@
 ---
 name: adr
+metadata:
+  author: pablontiv
 description: Use when a significant decision has just been made or overturned in a repo - an architecture or tool chosen, an approach rejected with rationale, a convention established, an irreversible trade-off accepted, a decision checkpoint requested by another skill, or a user correction that invalidates a prior decision. Also when the user says "adr", "registra la decisión", "qué decidimos", "por qué se decidió".
 ---
 

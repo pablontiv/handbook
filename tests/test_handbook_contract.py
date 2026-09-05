@@ -48,6 +48,17 @@ REQUIRED_AGENT_CLAUSES = (
 )
 
 
+def load_skill_frontmatter(path: Path) -> dict[str, object]:
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise AssertionError(f"{path} must begin with YAML frontmatter")
+    _, raw_frontmatter, _ = text.split("---", 2)
+    parsed = yaml.safe_load(raw_frontmatter)
+    if not isinstance(parsed, dict):
+        raise AssertionError(f"{path} frontmatter must be a mapping")
+    return parsed
+
+
 class HandbookContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -115,6 +126,22 @@ class HandbookContractTests(unittest.TestCase):
         for name in skills:
             with self.subTest(skill=name):
                 self.assertIn(f"(skills/{name}/)", self.readme)
+
+    def test_every_published_skill_declares_pablontiv_author(self) -> None:
+        skill_paths = sorted((ROOT / "skills").glob("*/SKILL.md"))
+        self.assertTrue(skill_paths)
+        for path in skill_paths:
+            with self.subTest(skill=path.parent.name):
+                frontmatter = load_skill_frontmatter(path)
+                metadata = frontmatter.get("metadata")
+                self.assertIsInstance(metadata, dict, path.relative_to(ROOT))
+                if not isinstance(metadata, dict):
+                    continue
+                self.assertEqual(
+                    metadata.get("author"),
+                    "pablontiv",
+                    path.relative_to(ROOT),
+                )
 
     def test_existing_artifact_families_are_linked(self) -> None:
         for target in (

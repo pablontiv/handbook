@@ -1,13 +1,16 @@
 ---
 source: pablontiv/praxis
 name: context-save
+metadata:
+  author: pablontiv
 description: |
   Guardar y restaurar estado de sesión estructurado entre sesiones usando
   rootline como capa de datos. Crea snapshots markdown con YAML frontmatter
   capturando trabajo activo, decisiones, estado git, y próximos pasos. Usar
   este skill siempre que el usuario diga "guardar contexto", "save context",
-  "save session", "guardar progreso", "retomar", "pick up where I left off",
-  "resume", "ya terminé por hoy", "list sessions", o cualquier variación de
+  "save session", "guardar progreso", "handover", "handoff", "retomar",
+  "pick up where I left off", "resume", "esta sesión está quemada",
+  "ya terminé por hoy", "list sessions", o cualquier variación de
   preservar/recuperar estado de trabajo — incluso si no dice "context-save"
   explícitamente, e incluso si solo dice "ya acabé por hoy" o "save my
   progress." Para buscar en el historial de conversaciones pasadas, usar
@@ -47,6 +50,10 @@ Parse the arguments supplied when invoking this skill to determine mode. Default
 | `list` | List |
 
 ---
+
+## Handover Quality
+
+When saving so another session can continue the same work, write actionable state rather than a chronological summary. Separate every material claim as **Verified** (include the command or observation), **Reported** (name the source), or **Assumed** (state what would falsify it). Include active work, state of the work, key decisions with rejected alternatives, open defects with reproduction evidence, hidden traps, and ordered next steps whose first command is explicit. Save the handover last; continuing to work after it makes the snapshot stale.
 
 ## Save Mode (no argument, or the `save` argument)
 
