@@ -1,0 +1,45 @@
+{
+  "schema": "handbook/recovered-agent-provenance/v1",
+  "status": "inactive",
+  "owner": "pablontiv/handbook",
+  "license": "MIT",
+  "captured_at": "2026-09-04T03:42:56.165Z",
+  "deleted_at": "2026-09-04T04:16:58.609Z",
+  "recovery_method": "Exact pre-removal file output corroborated by persisted runtime system prompts.",
+  "files": [
+    {
+      "name": "superpowers-architecture-reviewer.md",
+      "bytes": 805,
+      "sha256": "26cac96c581f85433bd43752e5e67a2c88cb892292fdd9724e9e52fbb95d3ace"
+    },
+    {
+      "name": "superpowers-debugger.md",
+      "bytes": 795,
+      "sha256": "841f9f30f8a43a07933009e9b38e30c2f8ba89b28990c36c7e43ed9895eb304c"
+    },
+    {
+      "name": "superpowers-final-reviewer.md",
+      "bytes": 814,
+      "sha256": "945ff92aba278316eaf26940d568e06f4bf6ee210db445411d315461d7f040ab"
+    },
+    {
+      "name": "superpowers-integration-worker.md",
+      "bytes": 858,
+      "sha256": "0f373d8964441ee840b7ac375a624c5139862aacb7ac478275137193cef93ad1"
+    },
+    {
+      "name": "superpowers-mechanical-implementer.md",
+      "bytes": 849,
+      "sha256": "da191def49093359dd0917bf4ecb478283a08ed104a7bc19300e4499c017c3a6"
+    },
+    {
+      "name": "superpowers-task-reviewer.md",
+      "bytes": 805,
+      "sha256": "e6e3c0658806c3dcbdd222c290b3f9a2d7e640c8646be6367abb0e8125ebce79"
+    }
+  ],
+  "limitations": [
+    "Original filesystem metadata is not part of the recovered content identity.",
+    "Runtime adaptation and activation require a separate approved change."
+  ]
+}
