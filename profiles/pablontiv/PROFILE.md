@@ -150,6 +150,7 @@ La pertenencia al catálogo no activa una herramienta rutinariamente. Pi enruta 
 - `adr`: se activa después de una decisión significativa nueva o revocada, ante una corrección que invalida una decisión, o cuando se solicita registrar o recuperar un ADR.
 - `context-save`: se activa para guardar, restaurar o listar estado estructurado entre sesiones; para conversaciones históricas se usa Backscroll.
 - `decision-calibrator`: se activa tras una corrección contradictoria, una pregunta repetida, recuperación de contexto, una tercera ronda sin nuevos unknowns decisivos o una elección de herramienta o arquitectura con costo operativo sostenido.
+- `evidence-driven-development`: se activa cuando features, bugfixes, refactors o pruebas pueden depender de requisitos, comportamiento externo, mocks, fixtures, afirmaciones causales o señales de aceptación no verificados, antes de brainstorming y antes de test-driven development.
 - `model-optimizer`: se activa al optimizar, asignar, validar o refrescar modelos y rutas de agentes cuando disponibilidad, autenticación, respuesta live, costo, cuota, cache, visión, esfuerzo o independencia importan. En este perfil solo se autorizan rutas del runtime Pi.
 
 `remove-gentle-context` se activa únicamente para retirar contexto activo de Gentle AI o investigar registros generados stale; no se ejecuta rutinariamente y no desinstala paquetes, binarios, source ni instalaciones del framework.

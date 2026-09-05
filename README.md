@@ -43,6 +43,10 @@ Version 1 supports Pi as its runtime. Rootline governs durable knowledge under `
 - [`adr`](skills/adr/) records, accepts, and supersedes architecture decisions through Rootline-governed records.
 - [`decision-calibrator`](skills/decision-calibrator/) focuses rigor after corrections, context loss, stalled research, or high-operating-cost choices.
 
+### Develop against verified evidence
+
+- [`evidence-driven-development`](skills/evidence-driven-development/) stops a specification, fixture, mock, test, and implementation from validating the same unverified premise. Use when features, bug fixes, refactors, or tests may rely on unverified requirements, external behavior, mocks, fixtures, causal claims, or acceptance signals, before brainstorming or test-driven development. See its [`SKILL.md`](skills/evidence-driven-development/SKILL.md). Deterministic contract tests and versioned pressure-replay evidence live under [`tests/`](skills/evidence-driven-development/tests/); that evidence records integrated runtime behavior and does not establish uplift beyond the runtime trigger that activates the skill.
+
 ### Keep continuity across sessions
 
 - [`context-save`](skills/context-save/) saves, restores, and lists structured session state with Rootline validation.
