@@ -6,10 +6,13 @@ import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 README_PATH = ROOT / "README.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+DEPENDABOT_PATH = ROOT / ".github" / "dependabot.yml"
 TEST_REQUIREMENTS_PATH = ROOT / "requirements-test.txt"
 HERO = (
     "Un handbook para convertir el trabajo de desarrollo improvisado en un "
@@ -51,6 +54,9 @@ class HandbookContractTests(unittest.TestCase):
         cls.readme = README_PATH.read_text(encoding="utf-8")
         cls.agents = AGENTS_PATH.read_text(encoding="utf-8")
         cls.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cls.dependabot = yaml.safe_load(DEPENDABOT_PATH.read_text(encoding="utf-8"))
+        if not isinstance(cls.dependabot, dict):
+            raise TypeError("dependabot.yml must contain a mapping")
         cls.test_requirements = TEST_REQUIREMENTS_PATH.read_text(encoding="utf-8")
 
     def assert_readme_leads_with_approved_identity(self, text: str) -> None:
@@ -154,16 +160,54 @@ class HandbookContractTests(unittest.TestCase):
                     self.assert_agents_contract(mutated)
 
     def test_github_actions_are_pinned_to_commits(self) -> None:
-        action_refs = re.findall(
-            r"^\s*- uses: \S+@([^\s]+)$", self.workflow, re.MULTILINE
-        )
-        self.assertTrue(action_refs)
-        for ref in action_refs:
-            with self.subTest(ref=ref):
-                self.assertRegex(ref, r"^[0-9a-f]{40}$")
+        for workflow_path in sorted(
+            (ROOT / ".github" / "workflows").glob("*.yml")
+        ):
+            workflow = workflow_path.read_text(encoding="utf-8")
+            with self.subTest(workflow=workflow_path.name):
+                action_refs = re.findall(
+                    r"^\s*- uses: \S+@([^\s]+)$", workflow, re.MULTILINE
+                )
+                self.assertTrue(action_refs)
+                for ref in action_refs:
+                    with self.subTest(ref=ref):
+                        self.assertRegex(ref, r"^[0-9a-f]{40}$")
 
     def test_checkout_does_not_persist_credentials(self) -> None:
-        self.assertIn("persist-credentials: false", self.workflow)
+        for workflow_path in sorted(
+            (ROOT / ".github" / "workflows").glob("*.yml")
+        ):
+            workflow = workflow_path.read_text(encoding="utf-8")
+            with self.subTest(workflow=workflow_path.name):
+                self.assertIn("persist-credentials: false", workflow)
+
+    def test_dependabot_updates_are_weekly_and_grouped(self) -> None:
+        self.assertEqual(self.dependabot.get("version"), 2)
+        updates = self.dependabot.get("updates")
+        self.assertIsInstance(updates, list)
+        assert isinstance(updates, list)
+        self.assertEqual(
+            {
+                (update.get("package-ecosystem"), update.get("directory"))
+                for update in updates
+            },
+            {("pip", "/"), ("github-actions", "/")},
+        )
+        self.assertEqual(len(updates), 2)
+        for update in updates:
+            ecosystem = update["package-ecosystem"]
+            with self.subTest(ecosystem=ecosystem):
+                self.assertEqual(update.get("schedule"), {"interval": "weekly"})
+                self.assertEqual(update.get("cooldown"), {"default-days": 7})
+                groups = update.get("groups")
+                self.assertIsInstance(groups, dict)
+                assert isinstance(groups, dict)
+                self.assertEqual(
+                    {group.get("applies-to") for group in groups.values()},
+                    {"version-updates", "security-updates"},
+                )
+                for group in groups.values():
+                    self.assertEqual(group.get("patterns"), ["*"])
 
     def test_python_cache_artifacts_are_ignored(self) -> None:
         candidates = (
