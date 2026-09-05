@@ -12,7 +12,7 @@ Preserve six owner-authored Superpowers agent definitions recovered after their 
 
 ## Source evidence
 
-Immediately before the removal, a Pi session captured the complete bytes of all six files by printing each source file with `cat`. The preserved j0k3r SQLite independently confirms that each recovered Markdown body is the prefix of the latest persisted `system_prompt` for the corresponding agent.
+Immediately before the removal, a Pi session captured the complete bytes of all six files by printing each source file with `cat`. The preserved legacy runtime SQLite independently confirms that each recovered Markdown body is the prefix of the latest persisted `system_prompt` for the corresponding agent.
 
 The recovered files and immutable content identities are:
 
