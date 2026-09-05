@@ -1,6 +1,8 @@
 ---
 source: pablontiv/praxis
 name: context-save
+metadata:
+  author: pablontiv
 description: |
   Guardar y restaurar estado de sesión estructurado entre sesiones usando
   rootline como capa de datos. Crea snapshots markdown con YAML frontmatter

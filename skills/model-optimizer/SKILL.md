@@ -1,6 +1,8 @@
 ---
 name: model-optimizer
 description: Use when optimizing, assigning, validating, or refreshing models for agents in Pi or OpenCode, especially when availability, authentication, live response, cost, quotas, cache, vision, effort, or adversarial review independence may affect routing.
+metadata:
+  author: pablontiv
 ---
 
 ## Core principle
