@@ -6,10 +6,13 @@ import unittest
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 README_PATH = ROOT / "README.md"
 AGENTS_PATH = ROOT / "AGENTS.md"
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci.yml"
+DEPENDABOT_PATH = ROOT / ".github" / "dependabot.yml"
 TEST_REQUIREMENTS_PATH = ROOT / "requirements-test.txt"
 HERO = (
     "Un handbook para convertir el trabajo de desarrollo improvisado en un "
@@ -51,6 +54,9 @@ class HandbookContractTests(unittest.TestCase):
         cls.readme = README_PATH.read_text(encoding="utf-8")
         cls.agents = AGENTS_PATH.read_text(encoding="utf-8")
         cls.workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+        cls.dependabot = yaml.safe_load(DEPENDABOT_PATH.read_text(encoding="utf-8"))
+        if not isinstance(cls.dependabot, dict):
+            raise TypeError("dependabot.yml must contain a mapping")
         cls.test_requirements = TEST_REQUIREMENTS_PATH.read_text(encoding="utf-8")
 
     def assert_readme_leads_with_approved_identity(self, text: str) -> None:
@@ -164,6 +170,33 @@ class HandbookContractTests(unittest.TestCase):
 
     def test_checkout_does_not_persist_credentials(self) -> None:
         self.assertIn("persist-credentials: false", self.workflow)
+
+    def test_dependabot_updates_are_weekly_and_grouped(self) -> None:
+        self.assertEqual(self.dependabot.get("version"), 2)
+        updates = self.dependabot.get("updates")
+        self.assertIsInstance(updates, list)
+        assert isinstance(updates, list)
+        self.assertEqual(
+            {
+                (update.get("package-ecosystem"), update.get("directory"))
+                for update in updates
+            },
+            {("pip", "/"), ("github-actions", "/")},
+        )
+        self.assertEqual(len(updates), 2)
+        for update in updates:
+            ecosystem = update["package-ecosystem"]
+            with self.subTest(ecosystem=ecosystem):
+                self.assertEqual(update.get("schedule"), {"interval": "weekly"})
+                groups = update.get("groups")
+                self.assertIsInstance(groups, dict)
+                assert isinstance(groups, dict)
+                self.assertEqual(
+                    {group.get("applies-to") for group in groups.values()},
+                    {"version-updates", "security-updates"},
+                )
+                for group in groups.values():
+                    self.assertEqual(group.get("patterns"), ["*"])
 
     def test_python_cache_artifacts_are_ignored(self) -> None:
         candidates = (
