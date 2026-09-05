@@ -187,18 +187,9 @@ Until then, this specification is the normative ownership map and runtime state 
 - Add or update tests that enforce the author contract for every first-party skill.
 - Verify the existing eight source directories and their current runtime projections.
 
-### Stage 2 — Handbook migrations
+### Stage 2 — Handbook document copy
 
-Migrate one independently reviewable behavior unit at a time:
-
-1. `naming-brief`;
-2. `docs-northstar`;
-3. `rule-audit`;
-4. generalized `gh-communication-style`;
-5. the MarkItDown adaptation;
-6. the `context-save` and `session-handover` convergence.
-
-Each behavior-changing migration follows the `writing-skills` RED-GREEN-REFACTOR workflow and preserves licensing and relative dependencies.
+Copy `naming-brief`, `docs-northstar`, `rule-audit`, `gh-communication-style`, and `markitdown` into their handbook directories in one batch. Preserve supporting files and change only text required for portability, authorship, provenance, and removal of missing sibling-skill dependencies. Copy the non-duplicative continuity rules from `session-handover` into `context-save` rather than publishing a second skill. Verify the resulting frontmatter, links, and repository discovery without creating a separate design, plan, or bespoke test suite for each text document.
 
 ### Stage 3 — Owner-repository establishment
 
