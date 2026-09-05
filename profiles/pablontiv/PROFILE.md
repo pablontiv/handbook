@@ -152,6 +152,11 @@ La pertenencia al catálogo no activa una herramienta rutinariamente. Pi enruta 
 - `decision-calibrator`: se activa tras una corrección contradictoria, una pregunta repetida, recuperación de contexto, una tercera ronda sin nuevos unknowns decisivos o una elección de herramienta o arquitectura con costo operativo sostenido.
 - `evidence-driven-development`: se activa cuando features, bugfixes, refactors o pruebas pueden depender de requisitos, comportamiento externo, mocks, fixtures, afirmaciones causales o señales de aceptación no verificados, antes de brainstorming y antes de test-driven development.
 - `model-optimizer`: se activa al optimizar, asignar, validar o refrescar modelos y rutas de agentes cuando disponibilidad, autenticación, respuesta live, costo, cuota, cache, visión, esfuerzo o independencia importan. En este perfil solo se autorizan rutas del runtime Pi.
+- `naming-brief`: se activa para crear un brief que otro modelo usará al proponer nombres de proyectos, herramientas, paquetes o servicios.
+- `docs-northstar`: se activa al definir, recuperar o auditar la dirección narrativa de un repositorio y contrastarla con comportamiento verificado.
+- `rule-audit`: se activa para auditar, puntuar o reforzar archivos de reglas e instrucciones de agentes y sus backstops.
+- `gh-communication-style`: se activa para redactar issues, pull requests, respuestas de review o comentarios destinados a GitHub.
+- `markitdown`: se activa para convertir documentos o medios a Markdown mediante la CLI MarkItDown.
 
 `remove-gentle-context` se activa únicamente para retirar contexto activo de Gentle AI o investigar registros generados stale; no se ejecuta rutinariamente y no desinstala paquetes, binarios, source ni instalaciones del framework.
 
