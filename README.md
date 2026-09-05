@@ -10,6 +10,7 @@ This repository is the handbook itself. Its current, versioned building blocks a
 
 - repository-wide operating rules in [`AGENTS.md`](AGENTS.md);
 - the reusable Pablontiv profile under [`profiles/`](profiles/);
+- preserved portable agent role definitions under [`agents/`](agents/);
 - portable agent workflows under [`skills/`](skills/);
 - deterministic helpers, assets, references, fixtures, and tests bundled with their owning skills;
 - cross-session memory guidance in [`context-save`](skills/context-save/);
@@ -23,6 +24,7 @@ Version 1 adds a prose-first workspace method without claiming a deterministic c
 The handbook organizes portable working artifacts around development needs rather than one agent runtime.
 
 - **Rules** define repository-wide invariants and contribution boundaries.
+- **Agents** preserve portable role definitions independently from any runtime integration.
 - **Skills** provide self-contained workflows that agents can discover and follow.
 - **Tools** provide deterministic evidence or guarded execution inside the artifact that owns them.
 - **Memory** preserves context and decisions across sessions.
@@ -37,6 +39,10 @@ Every published artifact must be globally useful, portable, publicly distributab
 [`profiles/pablontiv/`](profiles/pablontiv/) publishes reusable reference material: `PROFILE.md` specializes Engineering Handbook v1.4 and `bootstrap.md` guides adoption. This repository dogfoods it through `.workspace/config.yaml`; repository-specific operation comes from that instance, not from edits to the reusable profile.
 
 Version 1 supports Pi as its runtime. Rootline governs durable knowledge under `.workspace/docs/`, Backscroll supplies required episodic recall, and controls begin as prose so they can become deterministic incrementally without fabricating execution evidence.
+
+### Preserve reusable agent roles
+
+[`agents/`](agents/) publishes owner-authored role definitions with explicit provenance and portability boundaries. The current Superpowers definitions are inactive reference artifacts; the Handbook does not install or register them automatically.
 
 ### Make and preserve decisions
 
