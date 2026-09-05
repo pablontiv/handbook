@@ -58,7 +58,7 @@ Actions remains enabled but changes from `all` to `selected`:
 - workflows remain unable to approve pull requests;
 - workflows from external fork contributors require owner approval as defense in depth, even though external pull-request creation is blocked.
 
-The repository's current workflows already use GitHub-owned actions pinned to full SHAs, so this policy should not invalidate the observed CI definition.
+The repository's current workflows use GitHub-owned actions, and every action reference is pinned to a full commit SHA before this policy is enforced; the contract test covers every tracked workflow.
 
 ## Dependency maintenance
 

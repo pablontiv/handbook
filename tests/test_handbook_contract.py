@@ -160,16 +160,26 @@ class HandbookContractTests(unittest.TestCase):
                     self.assert_agents_contract(mutated)
 
     def test_github_actions_are_pinned_to_commits(self) -> None:
-        action_refs = re.findall(
-            r"^\s*- uses: \S+@([^\s]+)$", self.workflow, re.MULTILINE
-        )
-        self.assertTrue(action_refs)
-        for ref in action_refs:
-            with self.subTest(ref=ref):
-                self.assertRegex(ref, r"^[0-9a-f]{40}$")
+        for workflow_path in sorted(
+            (ROOT / ".github" / "workflows").glob("*.yml")
+        ):
+            workflow = workflow_path.read_text(encoding="utf-8")
+            with self.subTest(workflow=workflow_path.name):
+                action_refs = re.findall(
+                    r"^\s*- uses: \S+@([^\s]+)$", workflow, re.MULTILINE
+                )
+                self.assertTrue(action_refs)
+                for ref in action_refs:
+                    with self.subTest(ref=ref):
+                        self.assertRegex(ref, r"^[0-9a-f]{40}$")
 
     def test_checkout_does_not_persist_credentials(self) -> None:
-        self.assertIn("persist-credentials: false", self.workflow)
+        for workflow_path in sorted(
+            (ROOT / ".github" / "workflows").glob("*.yml")
+        ):
+            workflow = workflow_path.read_text(encoding="utf-8")
+            with self.subTest(workflow=workflow_path.name):
+                self.assertIn("persist-credentials: false", workflow)
 
     def test_dependabot_updates_are_weekly_and_grouped(self) -> None:
         self.assertEqual(self.dependabot.get("version"), 2)

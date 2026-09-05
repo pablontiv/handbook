@@ -198,6 +198,7 @@ python3 -m unittest discover -s skills/evidence-driven-development/tests -t skil
 python3 -m unittest discover -s skills/systemic-issue-triage/tests -t skills/systemic-issue-triage -p "test_*.py" -v
 python3 -m unittest discover -s skills/context-save/tests -t skills/context-save -p "test_*.py" -v
 python3 -m unittest discover -s skills/sweep/tests -t skills/sweep -p "test_*.py" -v
+python3 -m unittest discover -s skills/model-optimizer/tests -t skills/model-optimizer -p "test_*.py" -v
 sh skills/sweep/assets/test-assets.sh
 (
   cd skills/remove-gentle-context
