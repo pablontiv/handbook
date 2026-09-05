@@ -20,7 +20,7 @@
 - GitHub-required approval count is `0`; independent review remains a workspace gate.
 - Only squash merge remains enabled.
 - GitHub Actions permits GitHub-owned actions only, with full-SHA pinning and a read-only workflow token.
-- Dependabot checks `pip` and `github-actions` at `/`, weekly, with separate version and security groups per ecosystem.
+- Dependabot checks `pip` and `github-actions` at `/`, weekly, with separate version and security groups per ecosystem; both entries use `cooldown: { default-days: 7 }` to reduce exposure to newly published versions for version updates without delaying security updates.
 - CodeQL uses default setup with the `extended` query suite.
 - AI findings may be enabled; agentic fixes and AI Credit consumption are not authorized.
 - Any live mutation requires an exact canonical manifest and SHA-256 approval.
@@ -63,6 +63,7 @@ Add `import yaml`, define `DEPENDABOT_PATH = ROOT / ".github" / "dependabot.yml"
             ecosystem = update["package-ecosystem"]
             with self.subTest(ecosystem=ecosystem):
                 self.assertEqual(update.get("schedule"), {"interval": "weekly"})
+                self.assertEqual(update.get("cooldown"), {"default-days": 7})
                 groups = update.get("groups")
                 self.assertIsInstance(groups, dict)
                 assert isinstance(groups, dict)
@@ -103,6 +104,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       python-version-updates:
         applies-to: version-updates
@@ -116,6 +119,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       actions-version-updates:
         applies-to: version-updates

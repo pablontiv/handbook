@@ -198,6 +198,7 @@ class HandbookContractTests(unittest.TestCase):
             ecosystem = update["package-ecosystem"]
             with self.subTest(ecosystem=ecosystem):
                 self.assertEqual(update.get("schedule"), {"interval": "weekly"})
+                self.assertEqual(update.get("cooldown"), {"default-days": 7})
                 groups = update.get("groups")
                 self.assertIsInstance(groups, dict)
                 assert isinstance(groups, dict)

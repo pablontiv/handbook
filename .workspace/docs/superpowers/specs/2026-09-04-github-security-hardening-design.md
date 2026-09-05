@@ -67,7 +67,7 @@ Add `.github/dependabot.yml` with version 2 syntax. It covers exactly the ecosys
 - `pip` at `/`;
 - `github-actions` at `/`.
 
-Both run weekly. Version updates are grouped by ecosystem to bound PR volume. Dependabot alerts, security updates, and grouped security updates are enabled in GitHub. Dependabot may propose changes, but all branch protection and CI requirements apply before `pablontiv` can merge them.
+Both run weekly. Each update entry uses a seven-day cooldown (`cooldown: { default-days: 7 }`) to reduce exposure to newly published dependency versions. GitHub documents this cooldown as applying to version updates only; it does not delay Dependabot security updates. Version updates are grouped by ecosystem to bound PR volume. Dependabot alerts, security updates, and grouped security updates are enabled in GitHub. This cooldown is part of the accepted Dependabot contract. Dependabot may propose changes, but all branch protection and CI requirements apply before `pablontiv` can merge them.
 
 No unobserved ecosystem or directory is invented. Adding a new package ecosystem later requires updating the versioned configuration and its contract test.
 
@@ -127,6 +127,7 @@ Local verification must demonstrate:
 - its version is `2`;
 - it contains only `pip` and `github-actions` at `/`;
 - both schedules are weekly and grouped;
+- both update entries contain exactly `cooldown: { default-days: 7 }`, reducing exposure to newly published versions for version updates without delaying security updates;
 - the existing complete repository suite passes;
 - Rootline validates all governed Markdown.
 
