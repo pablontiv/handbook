@@ -4,7 +4,7 @@
 
 **Status:** Approved design; preservation implementation pending
 
-**Governing ADR:** ADR 0026
+**Governing ADR:** ADR 0028
 
 ## Purpose
 
@@ -96,7 +96,7 @@ Before commit:
 3. parse `provenance.json` and compare its inventory with the files;
 4. scan published files for absolute home-directory or recovery-source paths;
 5. verify the active Pi settings and subagent configuration hashes are unchanged;
-6. validate ADR 0026 and this specification with Rootline;
+6. validate ADR 0028 and this specification with Rootline;
 7. run repository diagnostics and the complete existing test suite;
 8. inspect the full Git diff and confirm no activation surface changed.
 

@@ -4,7 +4,7 @@
 
 **Status:** Approved
 
-**Governing ADRs:** ADR 0018, ADR 0019, ADR 0022, ADR 0028
+**Governing ADRs:** ADR 0018, ADR 0019, ADR 0022, ADR 0030
 
 **Relationship to prior design:** This specification supersedes the operational ownership and distribution model in `2026-08-26-skill-ownership-and-distribution-design.md`. The prior specification remains historical and is not rewritten.
 

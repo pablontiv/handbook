@@ -143,6 +143,12 @@ class HandbookContractTests(unittest.TestCase):
                     path.relative_to(ROOT),
                 )
 
+    def test_adr_sequence_numbers_are_unique(self) -> None:
+        adr_paths = sorted((ROOT / ".workspace" / "docs" / "adr").glob("[0-9][0-9][0-9][0-9]-*.md"))
+        numbers = [path.name[:4] for path in adr_paths]
+        duplicates = sorted({number for number in numbers if numbers.count(number) > 1})
+        self.assertEqual(duplicates, [], f"duplicate ADR numbers: {duplicates}")
+
     def test_existing_artifact_families_are_linked(self) -> None:
         for target in (
             "AGENTS.md",
