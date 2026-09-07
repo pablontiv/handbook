@@ -57,7 +57,7 @@ Create `agents/README.md` explaining purpose, ownership, MIT licensing, hash ver
 
 Check all six published files byte-for-byte against the private bundle. Recompute their byte counts and hashes against the spec and provenance. Parse the JSON, scan `agents/` for private absolute paths, and confirm the two active config hashes are unchanged. Confirm no recovered agent exists in an active Pi agent directory.
 
-Validate ADR 0026, the spec, and this plan with Rootline; run `git diff --check`, diagnostics, and every existing local command represented by `.github/workflows/ci.yml` and `.github/workflows/test-model-optimizer.yml` using the normal Homebrew `python3`, not a login-shell Python 3.9. Inspect the complete diff for any activation surface.
+Validate ADR 0028, the spec, and this plan with Rootline; run `git diff --check`, diagnostics, and every existing local command represented by `.github/workflows/ci.yml` and `.github/workflows/test-model-optimizer.yml` using the normal Homebrew `python3`, not a login-shell Python 3.9. Inspect the complete diff for any activation surface.
 
 - [ ] **Step 5: Commit**
 
@@ -77,7 +77,7 @@ git commit -m "docs(agents): preserve recovered Superpowers roles"
 - Test: no new tests; use Task 1 evidence and independent read-only review
 
 **Interfaces:**
-- Consumes: clean preservation branch containing ADR 0026, approved spec, plan, exact definitions, provenance, and docs.
+- Consumes: clean preservation branch containing ADR 0028, approved spec, plan, exact definitions, provenance, and docs.
 - Produces: merged inactive `agents/` family on `origin/main`.
 
 - [ ] **Step 1: Obtain independent review**
@@ -86,7 +86,7 @@ Review `origin/main..HEAD` for exact hashes, portable provenance, truthful inact
 
 - [ ] **Step 2: Publish the pull request**
 
-Fetch and verify `origin/main`. If it differs from the reviewed base, integrate the new authority and repeat verification. Push `docs/recover-superpowers-agents` and create one PR against `main`. List ADR 0026, disclose inactive status and the explicit no-new-tests decision, and include complete existing-suite evidence.
+Fetch and verify `origin/main`. If it differs from the reviewed base, integrate the new authority and repeat verification. Push `docs/recover-superpowers-agents` and create one PR against `main`. List ADR 0028, disclose inactive status and the explicit no-new-tests decision, and include complete existing-suite evidence.
 
 - [ ] **Step 3: Merge and verify**
 
