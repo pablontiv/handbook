@@ -30,11 +30,17 @@ function text(content: string, details: Record<string, unknown> | undefined = {}
 function loadPolicy(): Policy {
   const policyPath = process.env.PI_EVAL_POLICY;
   if (!policyPath) throw new Error("eval_policy_missing");
-  const stat = fs.statSync(policyPath);
-  if (stat.size > MAX_POLICY_BYTES) throw new Error("eval_policy_too_large");
-  const parsed = JSON.parse(fs.readFileSync(policyPath, "utf8"));
-  if (!parsed || typeof parsed !== "object") throw new Error("eval_policy_invalid");
-  return parsed as Policy;
+  const policyFile = fs.openSync(policyPath, "r");
+  try {
+    const stat = fs.fstatSync(policyFile);
+    if (!stat.isFile()) throw new Error("eval_policy_invalid");
+    if (stat.size > MAX_POLICY_BYTES) throw new Error("eval_policy_too_large");
+    const parsed = JSON.parse(fs.readFileSync(policyFile, "utf8"));
+    if (!parsed || typeof parsed !== "object") throw new Error("eval_policy_invalid");
+    return parsed as Policy;
+  } finally {
+    fs.closeSync(policyFile);
+  }
 }
 
 function realRoot(policy: Policy): string {
@@ -262,7 +268,9 @@ async function runSandboxed(root: string, command: AllowedCommand, timeoutMs?: n
       try {
         if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
         else child.kill("SIGKILL");
-      } catch {}
+      } catch {
+        return;
+      }
     }, timeoutMs) : undefined;
     child.on("error", reject);
     child.on("close", (code) => {
