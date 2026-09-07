@@ -6,9 +6,10 @@ import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
-from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
+from unittest.mock import patch
 
 from helper.adapters import RuntimeContext
 from helper.adapters.pi import PiAdapter, parse_pi_auth, parse_pi_model_listing, _find_model_metadata
@@ -60,7 +61,7 @@ class PiAdapterTests(unittest.TestCase):
         env["PI_MODEL"] = "mutated"
         self.assertEqual(context.env["PI_MODEL"], "nan-builders/qwen3.6")
         with self.assertRaises(TypeError):
-            context.env["NEW"] = "blocked"
+            cast(dict[str, str], context.env)["NEW"] = "blocked"
 
     def test_listing_preserves_exact_ids_and_display_limits(self):
         models = parse_pi_model_listing(fixture_text("pi/list-models.txt"))
@@ -577,7 +578,7 @@ ok-provider     ok-model    1K       2K       yes       no
         workspace = PreparedWorkspace(workspace_root, "token-pi", SandboxAttestation(
             backend="bwrap",
             workspace_root=str(workspace_root.resolve()),
-            workspace_token="token-pi",
+            workspace_token="token-pi",  # noqa: S106 - synthetic test token
             profile_identity=profile_identity,
             profile_digest=sandbox_attestation_digest("bwrap", workspace_root, "token-pi", executable_identity, profile_identity, observations),
             observed_at=observed_at.isoformat().replace("+00:00", "Z"),
@@ -684,6 +685,15 @@ ok-provider     ok-model    1K       2K       yes       no
         self.assertIn("if (stat.isSymbolicLink()) throw new Error(\"eval_recursive_symlink_unsupported\")", extension)
         self.assertIn("requireAllowed(real, allowedRead", extension)
 
+    def test_confined_extension_reads_policy_through_one_open_descriptor(self):
+        extension = (Path(__file__).parents[1] / "evals" / "pi-confined-tools.ts").read_text(encoding="utf-8")
+        self.assertIn('fs.openSync(policyPath, "r")', extension)
+        self.assertIn("fs.fstatSync(policyFile)", extension)
+        self.assertIn('fs.readFileSync(policyFile, "utf8")', extension)
+        self.assertIn("fs.closeSync(policyFile)", extension)
+        self.assertNotIn("fs.statSync(policyPath)", extension)
+        self.assertNotIn('fs.readFileSync(policyPath, "utf8")', extension)
+
     def test_real_runtime_smoke_rejects_symlink_escapes_for_read_grep_and_find(self):
         if not hasattr(os, "symlink"):
             self.skipTest("symlink support unavailable")
@@ -772,6 +782,7 @@ ok-provider     ok-model    1K       2K       yes       no
 
         preflight_env = runner.env_replacements[1]
         self.assertIsNotNone(preflight_env)
+        assert preflight_env is not None
         self.assertIn("HOME", preflight_env)
         self.assertIn("PI_CODING_AGENT_DIR", preflight_env)
         self.assertIn("PI_SESSION_DIR", preflight_env)
