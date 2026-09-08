@@ -14,6 +14,7 @@ This repository is the handbook itself. Its current, versioned building blocks a
 - portable agent workflows under [`skills/`](skills/);
 - deterministic helpers, assets, references, fixtures, and tests bundled with their owning skills;
 - cross-session memory guidance in [`context-save`](skills/context-save/);
+- deterministic Mission Control health reporting in [`mission-control-health`](skills/mission-control-health/);
 - interaction contracts under [`output-styles/`](output-styles/);
 - architecture decisions in [`.workspace/docs/adr/`](.workspace/docs/adr/) and design history in [`.workspace/docs/superpowers/`](.workspace/docs/superpowers/).
 
@@ -69,6 +70,10 @@ Version 1 supports Pi as its runtime. Rootline governs durable knowledge under `
 
 - [`systemic-issue-triage`](skills/systemic-issue-triage/) classifies a repository's issue backlog by verified systemic root causes and stops before design or delivery.
 - [`sweep`](skills/sweep/) inventories and classifies stale worktrees, branches, and pull requests before any separately approved mutation.
+
+### Observe Mission Control health
+
+- [`mission-control-health`](skills/mission-control-health/) reports schedule execution, receipt delivery, and Mission Control processing separately from read-only records and raises a visible alert without depending on the Mission Control model. Use a Python 3.11+ executable as `python`, `python3`, or an equivalent platform command.
 
 ### Optimize agent configuration with evidence
 
