@@ -89,6 +89,13 @@ jobs:
           -t skills/sweep
           -p "test_*.py"
           -v
+      - name: Run mission-control-health tests
+        run: >-
+          python -m unittest discover
+          -s skills/mission-control-health/tests
+          -t skills/mission-control-health
+          -p "test_*.py"
+          -v
       - name: Run sweep asset tests
         if: runner.os != 'Windows'
         run: sh skills/sweep/assets/test-assets.sh
