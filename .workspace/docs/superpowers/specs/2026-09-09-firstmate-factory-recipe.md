@@ -42,7 +42,7 @@ Do not create a competing backlog. Distinguish hypotheses from reproduced defect
 
 ## 4. Task and workspace continuity
 
-One deliverable is one Firstmate task with one owned worktree from discovery through delivery:
+One deliverable is one Firstmate task with one owned worktree from spike through delivery:
 
 ```text
 spike -> findings -> E2E RED -> implementation -> GREEN -> review -> delivery
