@@ -1,0 +1,24 @@
+---
+tipo: adr
+estado: accepted
+fecha: '2026-09-09'
+contexto: 'Las instalaciones separadas de Homeserver y Backscroll operan como Primaries independientes sobre una revisión anterior de Firstmate, duplican configuración y no implementan el punto único de interacción ni la delegación nativa aprobados por el Operador; el 2026-09-09 el Operador autoriza corregir esa deriva sin perder el trabajo activo.'
+decision: 'Mantener un checkout revisado de kunchenguid/firstmate en /Users/Shared/vendor/firstmate como único Primary de la flota y registrar Homeserver y Backscroll como Secondmates persistentes con alcance por repositorio; conservar cada entregable en una sola tarea y un solo worktree desde el spike hasta la entrega, promoviendo scouts y relanzando cambios de harness o modelo en el mismo trabajo; ejecutar /stow y conservar los homes anteriores hasta demostrar por evidencia la delegación, continuidad, recuperación y ausencia de autoridad simultánea de despacho sobre un mismo proyecto; las autorizaciones y límites propios de cada repositorio no se transfieren ni se amplían.'
+alternativas: 'Mover literalmente cualquiera de los homes operativos se descarta porque mezcla runtime versionado con estado ignorado y pone en riesgo trabajo activo. Mantener un Primary independiente por repositorio se descarta porque conserva la duplicidad y contradice el punto único aprobado. Copiar íntegramente configuración, receta o integraciones anteriores se descarta porque perpetúa la deriva. Retirar los homes anteriores antes de la prueba de corte se descarta porque elimina la vía de recuperación.'
+consecuencias: 'La receta canónica debe expresar la delegación Primary-Secondmate y eliminar reglas que compitan con Firstmate nativo; la selección de agentes, proveedores y modelos continúa mediante configuración nativa e inventario verificado conforme a ADR 0037; la base inicial conserva solo Firstmate nativo y Herdr, y Backscroll, Engram, Codegraph y Rootline se habilitan de forma incremental tras probar aislamiento y función conforme a ADR 0036; clonar, configurar o lanzar no demuestra el corte, y los homes anteriores solo podrán retirarse tras aceptación explícita basada en evidencia.'
+---
+# 0038. Centralizar firstmate con secondmates por repositorio
+
+Reemplaza a 0035-adoptar-firstmate-nativo-para-handover-homeserver.
+
+## Contexto
+Las instalaciones separadas de Homeserver y Backscroll operan como Primaries independientes sobre una revisión anterior de Firstmate, duplican configuración y no implementan el punto único de interacción ni la delegación nativa aprobados por el Operador; el 2026-09-09 el Operador autoriza corregir esa deriva sin perder el trabajo activo.
+
+## Decisión
+Mantener un checkout revisado de kunchenguid/firstmate en /Users/Shared/vendor/firstmate como único Primary de la flota y registrar Homeserver y Backscroll como Secondmates persistentes con alcance por repositorio; conservar cada entregable en una sola tarea y un solo worktree desde el spike hasta la entrega, promoviendo scouts y relanzando cambios de harness o modelo en el mismo trabajo; ejecutar /stow y conservar los homes anteriores hasta demostrar por evidencia la delegación, continuidad, recuperación y ausencia de autoridad simultánea de despacho sobre un mismo proyecto; las autorizaciones y límites propios de cada repositorio no se transfieren ni se amplían.
+
+## Alternativas descartadas
+Mover literalmente cualquiera de los homes operativos se descarta porque mezcla runtime versionado con estado ignorado y pone en riesgo trabajo activo. Mantener un Primary independiente por repositorio se descarta porque conserva la duplicidad y contradice el punto único aprobado. Copiar íntegramente configuración, receta o integraciones anteriores se descarta porque perpetúa la deriva. Retirar los homes anteriores antes de la prueba de corte se descarta porque elimina la vía de recuperación.
+
+## Consecuencias
+La receta canónica debe expresar la delegación Primary-Secondmate y eliminar reglas que compitan con Firstmate nativo; la selección de agentes, proveedores y modelos continúa mediante configuración nativa e inventario verificado conforme a ADR 0037; la base inicial conserva solo Firstmate nativo y Herdr, y Backscroll, Engram, Codegraph y Rootline se habilitan de forma incremental tras probar aislamiento y función conforme a ADR 0036; clonar, configurar o lanzar no demuestra el corte, y los homes anteriores solo podrán retirarse tras aceptación explícita basada en evidencia.
