@@ -22,7 +22,7 @@ The Primary continuously reconciles:
 - review feedback and CI failures;
 - active, blocked, paused, and unfinished local work;
 - repository history, tests, recent changes, and observed behavior;
-- relevant Backscroll and durable-memory records.
+- relevant Backscroll and durable-memory records, only once enabled for the current task under section 6.
 
 The full survey is never a prerequisite for useful work. As soon as one independent candidate has a verified scope, owner, authority boundary, dependency state, and duplicate check, route it. Continue the remaining survey concurrently.
 
@@ -78,7 +78,7 @@ A tool must not duplicate Firstmate's ownership of scheduling, task state, workt
 
 ## 7. Mandatory spike-first flow
 
-Every new capability or unverified bug hypothesis begins with a bounded spike. Existing work is preserved and assessed; it is not blindly restarted.
+Every deliverable begins with a bounded spike, including work originating from existing issues, pull requests, or prior findings. The spike is unconditional; its size is proportional to the question. Prior findings inform the question but do not waive the spike. Existing work is preserved and assessed; it is not blindly restarted.
 
 ```text
 1. One written question

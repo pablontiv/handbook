@@ -1,8 +1,8 @@
 # Native Firstmate Handover Design
 
 **Date:** 2026-09-08
-**Status:** Operator-approved direction; runtime completion requires separate evidence.
-**Governing ADRs:** 0035, 0036, 0037.
+**Status:** Superseded on 2026-09-09 by ADR 0038 and the canonical [Firstmate Factory Recipe](2026-09-09-firstmate-factory-recipe.md) for fleet topology: Homeserver is a persistent Secondmate of the single Primary at `/Users/Shared/vendor/firstmate`, not a standalone Firstmate. The Homeserver-specific authorizations below remain in force within that Secondmate's scope as recorded in ADR 0038. Historical body retained unchanged.
+**Governing ADRs:** 0038 (superseding 0035), 0036, 0037.
 **Owner:** Handbook owns portable operating rules; Homeserver owns G4 implementation and acceptance.
 
 ## Decision and authority
