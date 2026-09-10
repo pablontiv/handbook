@@ -1,12 +1,12 @@
 # Native Firstmate Handover Implementation Plan
 
-> **For agentic workers:** Execute the handover task-by-task under the approved design. Use native Firstmate task workers for Homeserver work, not the superseded Factory choreography.
+> **For agentic workers:** Do not execute this historical plan. ADR 0038 and the canonical [Firstmate Factory Recipe](../specs/2026-09-09-firstmate-factory-recipe.md) now govern the single Primary and persistent repository-scoped Secondmate topology.
 
 **Goal:** Transfer safely from the old recipe to native Firstmate/Herdr and deliver the existing Homeserver G4 outcome before any production-environment effect.
 **Architecture:** One native Firstmate coordinates native task workers. Herdr owns agent terminals and Treehouse owns task worktrees. Existing verified models are selected dynamically without adding providers.
 **Tech Stack:** Pinned Firstmate, Herdr, Treehouse and upstream-required dependencies; approved personal integrations.
 **Spec:** [Native Firstmate Handover Design](../specs/2026-09-08-firstmate-native-handover-design.md).
-**Status:** Approved execution direction. Checkboxes are acceptance checks, not a duplicate implementation backlog or claims of current runtime state.
+**Status:** Superseded on 2026-09-09 by ADR 0038. Historical body retained unchanged.
 
 ## 1. Preserve and stop the old owner
 
