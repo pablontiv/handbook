@@ -12,7 +12,8 @@ This repository is the handbook itself. Its current, versioned building blocks a
 - the reusable Pablontiv profile under [`profiles/`](profiles/);
 - preserved portable agent role definitions under [`agents/`](agents/);
 - portable agent workflows under [`skills/`](skills/);
-- deterministic helpers, assets, references, fixtures, and tests bundled with their owning skills;
+- opt-in working methods under [`methods/`](methods/);
+- deterministic helpers, assets, references, fixtures, and tests bundled with their owning artifacts;
 - cross-session memory guidance in [`context-save`](skills/context-save/);
 - deterministic Mission Control health reporting in [`mission-control-health`](skills/mission-control-health/);
 - interaction contracts under [`output-styles/`](output-styles/);
@@ -27,6 +28,7 @@ The handbook organizes portable working artifacts around development needs rathe
 - **Rules** define repository-wide invariants and contribution boundaries.
 - **Agents** preserve portable role definitions independently from any runtime integration.
 - **Skills** provide self-contained workflows that agents can discover and follow.
+- **Methods** define portable opt-in entry, guardrail, proof, and stop contracts.
 - **Tools** provide deterministic evidence or guarded execution inside the artifact that owns them.
 - **Memory** preserves context and decisions across sessions.
 - **Records** preserve architecture and design history without rewriting past decisions.
