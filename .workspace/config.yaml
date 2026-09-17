@@ -2,7 +2,7 @@ schema_version: workspace-control/v1
 
 profile:
   id: pablontiv/handbook
-  version: 1
+  version: 2
   based_on:
     name: engineering-handbook
     version: "1.4"
@@ -26,7 +26,9 @@ workspace:
       Clasificar alcance, explorar contexto, aprobar el diseño aplicable,
       planificar cuando corresponda e implementar mediante TDD.
     commit_policy: |
-      Usar conventional commits y ejecutar la suite completa antes del commit.
+      Usar conventional commits, firmar cada commit con la clave configurada
+      del repositorio, verificar la firma y ejecutar la suite completa antes
+      del commit.
     delivery_mode: pull-request
     delivery_gate: |
       Requerir review y autorización humana antes de integrar.
@@ -63,7 +65,7 @@ workspace:
     - |
       Las herramientas oficiales del perfil no admiten sustituciones.
     - |
-      La versión 1 declara compatibilidad únicamente con Pi.
+      La versión 2 declara compatibilidad únicamente con Pi.
 
 groups:
   handbook:

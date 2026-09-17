@@ -2,7 +2,7 @@ schema_version: workspace-control/v1
 
 profile:
   id: pablontiv/handbook
-  version: 1
+  version: 2
   based_on:
     name: engineering-handbook
     version: "1.4"

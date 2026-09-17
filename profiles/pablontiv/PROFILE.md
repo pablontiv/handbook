@@ -1,7 +1,7 @@
 # Perfil Pablontiv Handbook
 
 - **Profile id:** `pablontiv/handbook`
-- **Versión del perfil:** 1
+- **Versión del perfil:** 2
 - **Base:** Engineering Handbook 1.4
 - **Digest de la base:** `f5455e3eced13690358b02823053a1e00a6c7c06de5f17d9716805bf0a0cff26`
 - **Runtime compatible:** Pi exclusivamente
@@ -26,7 +26,7 @@ Toda la configuración de control se representa en un único `.workspace/config.
 
 ### Controles genéricos, bindings concretos
 
-El contrato distingue control genérico, binding concreto y evidencia. Este perfil versión 1 expresa controles mediante prosa, listas de prosa y valores `unknown`. No define executors, no genera schemas, no implementa un merge engine ni afirma ejecución automática. Una migración futura podrá concretar un control únicamente con el modelo completo y una decisión aprobada.
+El contrato distingue control genérico, binding concreto y evidencia. Este perfil versión 2 expresa controles mediante prosa, listas de prosa y valores `unknown`. No define executors, no genera schemas, no implementa un merge engine ni afirma ejecución automática. Una migración futura podrá concretar un control únicamente con el modelo completo y una decisión aprobada.
 
 ### Fallo cerrado
 
@@ -36,7 +36,7 @@ La falta de configuración, acceso, evidencia, historia requerida o resolución 
 
 La configuración efectiva debe permitir identificar repositorios administrados, valores finales, origen por capa, controles aplicables y revisión observada. Las referencias a artefactos locales evitan duplicación, pero no transfieren autoridad ni permiten inferir controles ausentes.
 
-Pi es el único runtime compatible en la versión 1. Rootline gobierna el Markdown durable y Backscroll aporta memoria episódica; ambos son obligatorios, sin sustitutos. Declarar otro runtime exige paridad completa verificada.
+Pi es el único runtime compatible en la versión 2. Rootline gobierna el Markdown durable y Backscroll aporta memoria episódica; ambos son obligatorios, sin sustitutos. Declarar otro runtime exige paridad completa verificada.
 
 ## 3. Modelo de workspace
 
@@ -101,7 +101,7 @@ on_failure: stop | defer | notify
 
 Un control determinista futuro DEBE usar un `id` estable; un único tipo de executor con sus campos completos; una condición explícita; un `cwd` concreto cuando corresponda; una postcondición verificable; manejo de error que no convierta fallo en éxito; y evidencia sanitizada. Un control `external-mutation` requiere aprobación humana explícita y acotada, salvo autorización permanente igualmente explícita y acotada.
 
-La versión 1 no presenta este modelo como un executor disponible. Sus controles prose-first son instrucciones para Pi y no pueden reportarse como automáticamente ejecutados.
+La versión 2 no presenta este modelo como un executor disponible. Sus controles prose-first son instrucciones para Pi y no pueden reportarse como automáticamente ejecutados.
 
 Los estados canónicos son:
 
@@ -150,7 +150,7 @@ La pertenencia al catálogo no activa una herramienta rutinariamente. Pi enruta 
 - `adr`: se activa después de una decisión significativa nueva o revocada, ante una corrección que invalida una decisión, o cuando se solicita registrar o recuperar un ADR.
 - `context-save`: se activa para guardar, restaurar o listar estado estructurado entre sesiones; para conversaciones históricas se usa Backscroll.
 - `decision-calibrator`: se activa tras una corrección contradictoria, una pregunta repetida, recuperación de contexto, una tercera ronda sin nuevos unknowns decisivos o una elección de herramienta o arquitectura con costo operativo sostenido.
-- `evidence-driven-development`: se activa cuando features, bugfixes, refactors o pruebas pueden depender de requisitos, comportamiento externo, mocks, fixtures, afirmaciones causales o señales de aceptación no verificados, antes de brainstorming y antes de test-driven development.
+- `empirical-capability-development`: se activa únicamente cuando el repositorio opta por el método y un `UNKNOWN` material bloquea una decisión con un probe disposable seguro disponible; fuera de ese caso no aplica.
 - `mission-control-health`: se activa para informar por separado la ejecución del schedule, la entrega de recibos y el procesamiento o acuse de Mission Control a partir de registros de solo lectura y emitir una alerta visible independiente del modelo; nunca reintenta, sondea, pausa, reinicia ni cambia proveedores o modelos.
 - `model-optimizer`: se activa al optimizar, asignar, validar o refrescar modelos y rutas de agentes cuando disponibilidad, autenticación, respuesta live, costo, cuota, cache, visión, esfuerzo o independencia importan. En este perfil solo se autorizan rutas del runtime Pi.
 - `naming-brief`: se activa para crear un brief que otro modelo usará al proponer nombres de proyectos, herramientas, paquetes o servicios.
@@ -356,7 +356,7 @@ La adopción sigue este orden:
 11. ejecutar una tarea representativa sin efectos externos;
 12. habilitar gradualmente delivery y efectos externos mediante gates separados.
 
-El wizard operativo se encuentra en `bootstrap.md`. No existe CLI de bootstrap ni activación automática en la versión 1.
+El wizard operativo se encuentra en `bootstrap.md`. No existe CLI de bootstrap ni activación automática en la versión 2.
 
 ## 15. Criterios de aceptación
 
@@ -380,7 +380,7 @@ Una adopción de este perfil es aceptable cuando demuestra que:
 
 ## 16. Fuera de alcance
 
-La versión 1 no define ni implementa:
+La versión 2 no define ni implementa:
 
 - el formato interno de scripts o pipelines de repositorios consumidores;
 - un control-plane executor;

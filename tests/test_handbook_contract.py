@@ -43,6 +43,8 @@ REQUIRED_AGENT_CLAUSES = (
     "Validate each new or modified ADR with `rootline validate .workspace/docs/adr/NNNN-slug.md --strict`.",
     "Before work, resolve the operational workspace policy from `.workspace/config.yaml`.",
     "Keep documentation synchronized with executable behavior.",
+    "Use conventional commits and sign every commit with the repository-configured signing key.",
+    "Verify the commit signature before push.",
     "Run the complete test suite before committing.",
     "Integrate changes through pull requests.",
 )
@@ -154,6 +156,7 @@ class HandbookContractTests(unittest.TestCase):
             "AGENTS.md",
             "profiles/",
             "skills/",
+            "methods/",
             "output-styles/",
             ".workspace/docs/adr/",
             ".workspace/docs/superpowers/",
@@ -295,6 +298,15 @@ class HandbookContractTests(unittest.TestCase):
         self.assertIn("Pi", self.readme)
         self.assertIn("Rootline", self.readme)
         self.assertIn("Backscroll", self.readme)
+
+    def test_empirical_method_replaces_edd_skill_without_compatibility(self) -> None:
+        self.assertTrue(
+            (ROOT / "methods" / "empirical-capability-development" / "METHOD.md").is_file()
+        )
+        self.assertFalse((ROOT / "skills" / "evidence-driven-development").exists())
+        self.assertIn("(methods/empirical-capability-development/)", self.readme)
+        self.assertNotIn("skills/evidence-driven-development", self.readme)
+        self.assertNotIn("skills/evidence-driven-development", self.workflow)
 
     def test_remove_gentle_context_readme_discovery_is_portable(self) -> None:
         self.assert_remove_gentle_context_portability(self.readme)
