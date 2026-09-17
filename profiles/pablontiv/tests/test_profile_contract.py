@@ -16,6 +16,7 @@ TEMPLATE_PATH = PROFILE_ROOT / "config.template.yaml"
 SOURCE_PATH = PROFILE_ROOT / "references" / "engineering-handbook-v1.4.md"
 SOURCE_SHA256 = "f5455e3eced13690358b02823053a1e00a6c7c06de5f17d9716805bf0a0cff26"
 DOGFOOD_CONFIG_PATH = REPO_ROOT / ".workspace" / "config.yaml"
+PROFILE_VERSION = 2
 
 PROFILE_SECTIONS = (
     "Propósito",
@@ -88,8 +89,9 @@ CONDITIONAL_TRIGGER = re.compile(
 def published_artifacts() -> set[str]:
     skills = {path.parent.name for path in (REPO_ROOT / "skills").glob("*/SKILL.md")}
     agents = {path.stem for path in (REPO_ROOT / "skills").glob("*/agents/pi/*.md")}
+    methods = {path.parent.name for path in (REPO_ROOT / "methods").glob("*/METHOD.md")}
     styles = {path.stem for path in (REPO_ROOT / "output-styles").glob("*.md")}
-    return skills | agents | styles
+    return skills | agents | methods | styles
 
 
 def parse_yaml_mapping(text: str) -> dict[str, Any]:
@@ -314,6 +316,19 @@ class ProfileContractTests(unittest.TestCase):
             routing_contract_violations(self.profile, published_artifacts()), ()
         )
 
+    def test_profile_v2_routes_method_without_retired_edd_skill(self) -> None:
+        self.assertIn(f"**Versión del perfil:** {PROFILE_VERSION}", self.profile)
+        routes = dict(routed_artifacts(self.profile))
+        self.assertIn("empirical-capability-development", routes)
+        self.assertNotIn("evidence-driven-development", routes)
+        self.assertFalse((REPO_ROOT / "skills" / "evidence-driven-development").exists())
+
+    def test_template_declares_profile_v2(self) -> None:
+        profile = self.template_document.get("profile")
+        self.assertIsInstance(profile, dict)
+        assert isinstance(profile, dict)
+        self.assertEqual(profile.get("version"), PROFILE_VERSION)
+
     def test_contract_rejects_unlisted_and_stale_routes(self) -> None:
         published = published_artifacts()
         stale_route = (
@@ -374,13 +389,19 @@ class DogfoodConfigTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.config = DOGFOOD_CONFIG_PATH.read_text(encoding="utf-8")
         cls.document = parse_yaml_mapping(cls.config)
+        profile = cls.document.get("profile")
         workspace = cls.document.get("workspace")
         repositories = cls.document.get("repositories")
-        if not isinstance(workspace, dict) or not isinstance(repositories, dict):
-            raise TypeError("workspace and repositories must be mappings")
+        if (
+            not isinstance(profile, dict)
+            or not isinstance(workspace, dict)
+            or not isinstance(repositories, dict)
+        ):
+            raise TypeError("profile, workspace and repositories must be mappings")
         repository = repositories.get("pablontiv/handbook")
         if not isinstance(repository, dict):
             raise TypeError("pablontiv/handbook must be a mapping")
+        cls.profile = cast(dict[str, Any], profile)
         cls.workspace = cast(dict[str, Any], workspace)
         cls.repository = cast(dict[str, Any], repository)
 
@@ -389,6 +410,18 @@ class DogfoodConfigTests(unittest.TestCase):
             {"schema_version", "profile", "workspace", "groups", "repositories"}
             <= set(self.document)
         )
+
+    def test_dogfood_declares_profile_v2_and_signed_commits(self) -> None:
+        self.assertEqual(self.profile.get("version"), PROFILE_VERSION)
+        workflow = self.workspace.get("workflow")
+        self.assertIsInstance(workflow, dict)
+        assert isinstance(workflow, dict)
+        commit_policy = workflow.get("commit_policy")
+        self.assertIsInstance(commit_policy, str)
+        assert isinstance(commit_policy, str)
+        for marker in ("conventional commits", "firmar", "verificar la firma"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, commit_policy)
 
     def test_workspace_config_preserves_every_axis(self) -> None:
         workflow = self.workspace.get("workflow")

@@ -36,7 +36,8 @@ Before work, resolve the operational workspace policy from `.workspace/config.ya
 
 - Before implementation, identify and review the accepted ADR that governs the change. If a significant decision is not covered, add or update an ADR under `.workspace/docs/adr/` and obtain acceptance before modifying code.
 - Validate each new or modified ADR with `rootline validate .workspace/docs/adr/NNNN-slug.md --strict`.
-- Use conventional commits.
+- Use conventional commits and sign every commit with the repository-configured signing key.
+- Verify the commit signature before push.
 - Keep documentation synchronized with executable behavior.
 - Run the complete test suite before committing.
 - Integrate changes through pull requests. Direct delivery to `main` requires an explicit human exception recorded with its rationale and accepted risk.

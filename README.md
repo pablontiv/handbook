@@ -19,7 +19,7 @@ This repository is the handbook itself. Its current, versioned building blocks a
 - interaction contracts under [`output-styles/`](output-styles/);
 - architecture decisions in [`.workspace/docs/adr/`](.workspace/docs/adr/) and design history in [`.workspace/docs/superpowers/`](.workspace/docs/superpowers/).
 
-Version 1 adds a prose-first workspace method without claiming a deterministic controller or automatic execution.
+Version 2 adds a prose-first workspace method without claiming a deterministic controller or automatic execution.
 
 ## Core model
 
@@ -41,7 +41,7 @@ Every published artifact must be globally useful, portable, publicly distributab
 
 [`profiles/pablontiv/`](profiles/pablontiv/) publishes reusable reference material: `PROFILE.md` specializes Engineering Handbook v1.4 and `bootstrap.md` guides adoption. This repository dogfoods it through `.workspace/config.yaml`; repository-specific operation comes from that instance, not from edits to the reusable profile.
 
-Version 1 supports Pi as its runtime. Rootline governs durable knowledge under `.workspace/docs/`, Backscroll supplies required episodic recall, and controls begin as prose so they can become deterministic incrementally without fabricating execution evidence.
+Version 2 supports Pi as its runtime. Rootline governs durable knowledge under `.workspace/docs/`, Backscroll supplies required episodic recall, and controls begin as prose so they can become deterministic incrementally without fabricating execution evidence.
 
 ### Preserve reusable agent roles
 
@@ -52,9 +52,9 @@ Version 1 supports Pi as its runtime. Rootline governs durable knowledge under `
 - [`adr`](skills/adr/) records, accepts, and supersedes architecture decisions through Rootline-governed records.
 - [`decision-calibrator`](skills/decision-calibrator/) focuses rigor after corrections, context loss, stalled research, or high-operating-cost choices.
 
-### Develop against verified evidence
+### Develop capabilities empirically
 
-- [`evidence-driven-development`](skills/evidence-driven-development/) stops a specification, fixture, mock, test, and implementation from validating the same unverified premise. Use when features, bug fixes, refactors, or tests may rely on unverified requirements, external behavior, mocks, fixtures, causal claims, or acceptance signals, before brainstorming or test-driven development. See its [`SKILL.md`](skills/evidence-driven-development/SKILL.md). Deterministic contract tests and versioned pressure-replay evidence live under [`tests/`](skills/evidence-driven-development/tests/); that evidence records integrated runtime behavior and does not establish uplift beyond the runtime trigger that activates the skill.
+- [`empirical-capability-development`](methods/empirical-capability-development/) defines an opt-in method for resolving a material `UNKNOWN` through the smallest safe native probe, independent readback, explicit classification, retained findings, and verified cleanup before fresh product work.
 
 ### Keep continuity across sessions
 
@@ -100,7 +100,7 @@ python -m unittest discover -s profiles/pablontiv/tests -t profiles/pablontiv -p
 
 ## Optional integrations
 
-Individual artifacts may integrate with Pi, Claude Code, OpenCode, GitHub CLI, Rootline, Backscroll, or other tools. Those integrations are capability-specific; the linked artifact is the authority for supported runtimes, dependencies, and safety gates. This does not expand the Pablontiv profile's version 1 runtime compatibility beyond Pi.
+Individual artifacts may integrate with Pi, Claude Code, OpenCode, GitHub CLI, Rootline, Backscroll, or other tools. Those integrations are capability-specific; the linked artifact is the authority for supported runtimes, dependencies, and safety gates. This does not expand the Pablontiv profile's version 2 runtime compatibility beyond Pi.
 
 ## References
 
